@@ -1,16 +1,19 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 
 export async function createClient() {
   const cookieStore = await cookies()
-  const domain = process.env.NODE_ENV === 'development' ? 'localhost' : '.tabletapy.com';
+  const headerList = await headers()
+  const host = headerList.get('host') || ''
+  const isCustomDomain = host.includes('tabletapy.com')
+  const domain = isCustomDomain ? '.tabletapy.com' : undefined
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookieOptions: {
-        domain: domain,
+        ...(domain ? { domain } : {}),
         path: '/',
         sameSite: 'lax',
       },
@@ -20,14 +23,14 @@ export async function createClient() {
         },
         set(name: string, value: string, options: CookieOptions) {
           try {
-            cookieStore.set({ name, value, ...options, domain })
+            cookieStore.set({ name, value, ...options, ...(domain ? { domain } : {}) })
           } catch (error) {
             // The `set` method was called from a Server Component.
           }
         },
         remove(name: string, options: CookieOptions) {
           try {
-            cookieStore.set({ name, value: '', ...options, domain })
+            cookieStore.set({ name, value: '', ...options, ...(domain ? { domain } : {}) })
           } catch (error) {
             // The `delete` method was called from a Server Component.
           }
