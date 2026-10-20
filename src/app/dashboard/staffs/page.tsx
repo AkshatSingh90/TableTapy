@@ -130,22 +130,26 @@ export default function StaffsDashboardPage() {
 
         let roster: StaffRecord[] = [];
         if (staffData && staffData.length > 0) {
-          roster = staffData.map((item: any) => {
-            let meta: any = {};
-            try {
-              if (item.name.startsWith('STAFF:')) {
-                meta = JSON.parse(item.name.replace('STAFF:', ''));
-              }
-            } catch {}
-            return {
-              id: item.id,
-              name: meta.name || item.name.replace('STAFF:', ''),
-              role: meta.role || 'CAPTAIN',
-              phone: meta.phone || '',
-              assigned_tables: meta.assigned_tables || ['ALL'],
-              created_at: item.created_at || new Date().toISOString(),
-            };
-          });
+          roster = staffData
+            .map((item: any) => {
+              let meta: any = {};
+              try {
+                if (item.name.startsWith('STAFF:')) {
+                  meta = JSON.parse(item.name.replace('STAFF:', ''));
+                }
+              } catch {}
+              return {
+                id: item.id,
+                name: meta.name || item.name.replace('STAFF:', ''),
+                role: meta.role || 'CAPTAIN',
+                phone: meta.phone || '',
+                assigned_tables: meta.assigned_tables || ['ALL'],
+                restaurant_id: meta.restaurant_id || null,
+                created_at: item.created_at || new Date().toISOString(),
+              };
+            })
+            // Strictly isolate to the current restaurant!
+            .filter((s: any) => s.restaurant_id === restId);
         }
 
         // Filter out legacy mock members (e.g. stf_1, stf_2) so only user-created staff exist
@@ -253,13 +257,14 @@ export default function StaffsDashboardPage() {
     try {
       setSubmittingStaff(true);
       const newId = `stf_${Date.now()}`;
-      const payload: StaffRecord = {
+      const payload: StaffRecord & { restaurant_id?: string } = {
         id: newId,
         name: newStaff.name.trim(),
         role: newStaff.role,
         phone: newStaff.phone.trim() || undefined,
         assigned_tables: assigned,
         created_at: new Date().toISOString(),
+        restaurant_id: restaurantId,
       };
 
       const { data: dbItem } = await supabase
