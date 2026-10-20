@@ -39,3 +39,17 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# scratch / helper scripts & logs
+*.js
+!next.config.js
+!next.config.mjs
+!postcss.config.js
+!postcss.config.mjs
+!tailwind.config.js
+!tailwind.config.mjs
+*.py
+*.ps1
+*.txt
+*.sql
+
