@@ -159,23 +159,7 @@ export default function InvoicesPage() {
         return;
       }
 
-      let restId = user.user_metadata?.restaurant_id;
-
-      if (!restId) {
-        const { data: recentOrder } = await supabase
-          .from("orders")
-          .select("restaurant_id")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (recentOrder?.restaurant_id) {
-          restId = recentOrder.restaurant_id;
-        } else {
-          const { data: firstRest } = await supabase.from("restaurants").select("id").limit(1).maybeSingle();
-          if (firstRest) restId = firstRest.id;
-        }
-      }
+      const restId = user.user_metadata?.restaurant_id;
 
       if (restId) {
         const { data: restData } = await supabase.from("restaurants").select("*").eq("id", restId).maybeSingle();

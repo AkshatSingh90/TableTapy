@@ -130,18 +130,14 @@ export default function PromotionsPage() {
         return;
       }
 
-      let restId = user.user_metadata?.restaurant_id;
-
-      if (!restId) {
-        const { data: firstRest } = await supabase.from("restaurants").select("id, name").limit(1).maybeSingle();
-        if (firstRest) {
-          restId = firstRest.id;
-          setRestaurantName(firstRest.name || "My Restaurant");
-        }
-      }
+      const restId = user.user_metadata?.restaurant_id;
 
       if (restId) {
         setRestaurantId(restId);
+        const { data: rData } = await supabase.from("restaurants").select("name").eq("id", restId).maybeSingle();
+        if (rData?.name) {
+          setRestaurantName(rData.name);
+        }
 
         // Load Saved Configuration from localStorage or restaurant metadata
         const savedConfig = localStorage.getItem(`tabletapy_promotions_config_${restId}`);

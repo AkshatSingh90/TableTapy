@@ -98,6 +98,7 @@ export default function DashboardOverview() {
 
       setRestaurantData(newRest);
       setHasRestaurant(true);
+      window.location.reload();
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Failed to create store. Slug might be taken.");

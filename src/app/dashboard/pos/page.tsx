@@ -99,32 +99,17 @@ export default function PosTerminalPage() {
         data: { user },
       } = await supabase.auth.getUser();
 
-      let restId = user?.user_metadata?.restaurant_id;
+      const restId = user?.user_metadata?.restaurant_id;
 
-      if (!restId && user?.id) {
+      if (restId) {
         const { data: r } = await supabase
           .from("restaurants")
           .select("id, name, upi_id")
-          .eq("owner_id", user.id)
-          .limit(1)
+          .eq("id", restId)
           .maybeSingle();
-        if (r?.id) {
-          restId = r.id;
+        if (r) {
           if (r.name) setRestaurantName(r.name);
           if (r.upi_id) setUpiId(r.upi_id);
-        }
-      }
-
-      if (!restId) {
-        const { data: anyRest } = await supabase
-          .from("restaurants")
-          .select("id, name, upi_id")
-          .limit(1)
-          .maybeSingle();
-        if (anyRest?.id) {
-          restId = anyRest.id;
-          if (anyRest.name) setRestaurantName(anyRest.name);
-          if (anyRest.upi_id) setUpiId(anyRest.upi_id);
         }
       }
 
@@ -196,6 +181,31 @@ export default function PosTerminalPage() {
 
   useEffect(() => {
     loadInitialData();
+
+    // Realtime listener: Live 86 stock toggles reflect instantly in POS
+    const channel = supabase
+      .channel('pos_menu_availability_sync')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'menu_items_v2' },
+        (payload) => {
+          const updated = payload.new as any;
+          if (updated && updated.id) {
+            setMenuItems((prev) =>
+              prev.map((item) =>
+                item.id === updated.id
+                  ? { ...item, is_available: updated.is_available !== false }
+                  : item
+              )
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   useEffect(() => {
@@ -223,6 +233,8 @@ export default function PosTerminalPage() {
   /* ─── 3. Filtered Items ─────────────────────────────────────────────── */
   const filteredItems = useMemo(() => {
     return menuItems.filter((item) => {
+      // 86 Stock Filter: Do not show unavailable items on the POS terminal
+      if (item.is_available === false) return false;
       if (selectedCategory !== "ALL" && item.category.toLowerCase() !== selectedCategory.toLowerCase()) {
         return false;
       }

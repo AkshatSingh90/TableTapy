@@ -140,25 +140,11 @@ export default function KitchenDisplayPage() {
     const init = async () => {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
-      let restId = user?.user_metadata?.restaurant_id;
+      const restId = user?.user_metadata?.restaurant_id;
 
-      if (!restId && user?.id) {
-        const { data: r } = await supabase.from('restaurants').select('id, name').eq('owner_id', user.id).limit(1).maybeSingle();
-        if (r?.id) {
-          restId = r.id;
-          setRestaurantName(r.name || "");
-        }
-      } else if (restId) {
+      if (restId) {
         const { data: r } = await supabase.from('restaurants').select('name').eq('id', restId).single();
         if (r?.name) setRestaurantName(r.name);
-      }
-
-      if (!restId) {
-        const { data: r } = await supabase.from('restaurants').select('id, name').limit(1).maybeSingle();
-        if (r?.id) {
-          restId = r.id;
-          setRestaurantName(r.name || "");
-        }
       }
 
       if (!restId) {

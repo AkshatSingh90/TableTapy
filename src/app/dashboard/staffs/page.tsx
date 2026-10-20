@@ -64,16 +64,7 @@ export default function StaffsDashboardPage() {
     try {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
-      let restId = user?.user_metadata?.restaurant_id;
-
-      if (!restId && user?.id) {
-        const { data: r } = await supabase.from('restaurants').select('id').eq('owner_id', user.id).limit(1).maybeSingle();
-        if (r?.id) restId = r.id;
-      }
-      if (!restId) {
-        const { data: r } = await supabase.from('restaurants').select('id').limit(1).maybeSingle();
-        if (r?.id) restId = r.id;
-      }
+      const restId = user?.user_metadata?.restaurant_id;
 
       if (restId) {
         setRestaurantId(restId);

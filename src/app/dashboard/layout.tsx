@@ -19,19 +19,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   
   const [businessType, setBusinessType] = useState('RESTAURANT');
+  const [hasRestaurant, setHasRestaurant] = useState<boolean | null>(null);
 
   useEffect(() => {
-    const fetchBizType = async () => {
+    const fetchUserRestaurant = async () => {
       const { data: { user } } = await supabase.auth.getUser();
-      if (user?.user_metadata?.restaurant_id) {
-        const { data } = await supabase.from('restaurants').select('business_type').eq('id', user.user_metadata.restaurant_id).single();
-        if (data?.business_type) {
-          setBusinessType(data.business_type);
+      if (!user) {
+        router.push("/login");
+        return;
+      }
+
+      const restId = user.user_metadata?.restaurant_id;
+      if (!restId) {
+        setHasRestaurant(false);
+        // If user hasn't created a restaurant yet, force them to stay on /dashboard onboarding
+        if (pathname !== '/dashboard') {
+          router.replace('/dashboard');
         }
+        return;
+      }
+
+      setHasRestaurant(true);
+      const { data } = await supabase.from('restaurants').select('business_type').eq('id', restId).single();
+      if (data?.business_type) {
+        setBusinessType(data.business_type);
       }
     };
-    fetchBizType();
-  }, [supabase]);
+    fetchUserRestaurant();
+  }, [supabase, pathname, router]);
 
   const navGroups = businessType === 'HOTEL' ? [
     {
@@ -107,6 +122,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <div className="space-y-0.5">
                 {group.items.map((item) => {
                   const isActive = pathname === item.href;
+                  const isDisabled = hasRestaurant === false && item.href !== '/dashboard';
+
+                  if (isDisabled) {
+                    return (
+                      <span 
+                        key={item.name} 
+                        className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-zinc-300 cursor-not-allowed opacity-40 select-none"
+                        title="Complete store setup first"
+                      >
+                        <item.icon size={15} strokeWidth={1.5} className="text-zinc-300" /> 
+                        {item.name}
+                      </span>
+                    );
+                  }
+
                   return (
                     <Link 
                       key={item.name} 
@@ -143,26 +173,28 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </main>
 
       {/* Mobile Bottom Navigation */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-zinc-200 z-50 flex justify-around items-center px-2 py-2.5 pb-safe shadow-lg">
-        {navGroups.flatMap(g => g.items).slice(0, 5).map((item) => {
-          const isActive = pathname === item.href;
-          return (
-            <Link 
-              key={item.name} 
-              href={item.href} 
-              className={`flex flex-col items-center justify-center w-16 p-1 rounded-lg transition-colors ${
-                isActive ? 'text-[#E46254]' : 'text-zinc-500 hover:text-zinc-900'
-              }`}
-            >
-              <item.icon size={19} className="mb-0.5" />
-              <span className="text-[11px] font-medium">{item.name}</span>
-            </Link>
-          )
-        })}
-      </nav>
+      {hasRestaurant && (
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-zinc-200 z-50 flex justify-around items-center px-2 py-2.5 pb-safe shadow-lg">
+          {navGroups.flatMap(g => g.items).slice(0, 5).map((item) => {
+            const isActive = pathname === item.href;
+            return (
+              <Link 
+                key={item.name} 
+                href={item.href} 
+                className={`flex flex-col items-center justify-center w-16 p-1 rounded-lg transition-colors ${
+                  isActive ? 'text-[#E46254]' : 'text-zinc-500 hover:text-zinc-900'
+                }`}
+              >
+                <item.icon size={19} className="mb-0.5" />
+                <span className="text-[11px] font-medium">{item.name}</span>
+              </Link>
+            )
+          })}
+        </nav>
+      )}
 
       {/* Mandatory Owner Water Bottle Setup Blocker */}
-      <WaterBottleSetupModal />
+      {hasRestaurant && <WaterBottleSetupModal />}
 
     </div>
   );

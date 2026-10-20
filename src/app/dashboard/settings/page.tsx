@@ -33,14 +33,7 @@ export default function SettingsPage() {
     async function loadSettings() {
       try {
         const { data: { user } } = await supabase.auth.getUser();
-        let restId = user?.user_metadata?.restaurant_id;
-
-        if (!restId) {
-          const { data: restList } = await supabase.from('restaurants').select('*').limit(1);
-          if (restList && restList.length > 0) {
-            restId = restList[0].id;
-          }
-        }
+        const restId = user?.user_metadata?.restaurant_id;
 
         if (restId) {
           setRestaurantId(restId);
