@@ -28,6 +28,8 @@ interface MenuItem {
 }
 
 export default function MenuManagerPage() {
+  const supabase = createClient();
+  const [restaurantId, setRestaurantId] = useState<string>('');
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -48,32 +50,110 @@ export default function MenuManagerPage() {
 
   const loadData = async () => {
     setIsLoading(true);
-    // Load Inventory for recipe builder
-    const { data: invData } = await supabase.from('inventory_items').select('*').order('name');
-    if (invData) {
-      setInventory(invData.map((row: any) => ({
-        id: row.id, name: row.name, stock: Number(row.stock), recipeUnit: row.recipe_unit, costPerVendorUnit: Number(row.cost_per_vendor_unit), vendorToStorage: Number(row.vendor_to_storage), storageUnit: row.storage_unit, yieldPercentage: Number(row.yield_percentage || 100)
+    const { data: { user } } = await supabase.auth.getUser();
+    const restId = user?.user_metadata?.restaurant_id;
+
+    if (!restId) {
+      setMenuItems([]);
+      setInventory([]);
+      setIsLoading(false);
+      return;
+    }
+    setRestaurantId(restId);
+
+    // 1. Load Inventory for recipe builder (isolated per restaurant)
+    let invRows: any[] | null = null;
+    const { data: restInv, error: invErr } = await supabase
+      .from('inventory_items')
+      .select('*')
+      .eq('restaurant_id', restId)
+      .order('name');
+
+    if (!invErr && restInv) {
+      invRows = restInv;
+    } else {
+      const { data: allInv } = await supabase.from('inventory_items').select('*').order('name');
+      if (allInv) {
+        invRows = allInv.filter((row: any) => {
+          if (row.category === 'STAFF_ROSTER') return false;
+          if (row.restaurant_id) return row.restaurant_id === restId;
+          const savedCustomIds = localStorage.getItem(`tabletapy_inventory_${restId}`);
+          if (savedCustomIds) {
+            try {
+              const ids: string[] = JSON.parse(savedCustomIds);
+              if (ids.includes(row.id)) return true;
+            } catch {}
+          }
+          return row.name && row.name.startsWith(`[REST:${restId}]`);
+        });
+      }
+    }
+
+    if (invRows) {
+      setInventory(invRows.map((row: any) => ({
+        id: row.id,
+        name: row.name.replace(/^\[REST:[^\]]+\]\s*/, ''),
+        stock: Number(row.stock),
+        recipeUnit: row.recipe_unit,
+        costPerVendorUnit: Number(row.cost_per_vendor_unit),
+        vendorToStorage: Number(row.vendor_to_storage),
+        storageUnit: row.storage_unit,
+        yieldPercentage: Number(row.yield_percentage || 100)
       })));
     }
     
-    // Load Menu Items
-    const { data: menuData } = await supabase.from('menu_items_v2').select('*').order('created_at', { ascending: false });
-    if (menuData) {
-       // Manual join to avoid strict foreign key errors if schema isn't perfect
+    // 2. Load Menu Items (supports native restaurant_id + metadata isolation)
+    let menuRows: any[] | null = null;
+    const { data: restMenu, error: menuScopeErr } = await supabase
+      .from('menu_items_v2')
+      .select('*')
+      .eq('restaurant_id', restId)
+      .order('created_at', { ascending: false });
+
+    if (!menuScopeErr && restMenu) {
+      menuRows = restMenu;
+    } else {
+      const { data: allMenu } = await supabase.from('menu_items_v2').select('*').order('created_at', { ascending: false });
+      if (allMenu) {
+        menuRows = allMenu.filter((row: any) => {
+          if (row.restaurant_id) return row.restaurant_id === restId;
+          const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restId}`);
+          if (savedCustomMenuIds) {
+            try {
+              const ids: string[] = JSON.parse(savedCustomMenuIds);
+              if (ids.includes(row.id)) return true;
+            } catch {}
+          }
+          return row.description && row.description.includes(`[REST:${restId}]`);
+        });
+      }
+    }
+
+    if (menuRows) {
        const { data: usages } = await supabase.from('inventory_recipe_usage').select('*');
        
-       setMenuItems(menuData.map((row: any) => {
+       setMenuItems(menuRows.map((row: any) => {
+         const cleanDesc = (row.description || '').replace(/\[REST:[^\]]+\]\s*/, '');
          const itemUsages = usages?.filter(u => u.name === row.name) || [];
-         // Attach ingredient names manually if FK is missing
          const enrichedUsages = itemUsages.map(u => {
-           const invMatch = invData?.find(inv => inv.id === u.inventory_item_id);
-           return { ...u, inventory_name: invMatch?.name || 'Unknown Ingredient' };
+           const invMatch = invRows?.find(inv => inv.id === u.inventory_item_id);
+           return { ...u, inventory_name: invMatch?.name?.replace(/^\[REST:[^\]]+\]\s*/, '') || 'Unknown Ingredient' };
          });
 
          return {
-           id: row.id, name: row.name, category: row.category, subcategory: row.subcategory || '', base_price: Number(row.base_price), description: row.description, is_veg: row.is_veg, is_available: row.is_available !== false, recipeUsages: enrichedUsages
+           id: row.id,
+           name: row.name,
+           category: row.category,
+           subcategory: row.subcategory || '',
+           base_price: Number(row.base_price),
+           description: cleanDesc,
+           is_veg: row.is_veg,
+           is_available: row.is_available !== false,
+           recipeUsages: enrichedUsages
          };
        }));
+    } else {
+      setMenuItems([]);
     }
     setIsLoading(false);
   };
@@ -197,13 +277,26 @@ export default function MenuManagerPage() {
     e.preventDefault();
     setIsSubmitting(true);
     
+    const taggedDesc = restaurantId ? `${form.description} [REST:${restaurantId}]`.trim() : form.description;
     const { data: insertedMenu, error: menuErr } = await supabase.from('menu_items_v2').insert([{
       name: form.name,
       category: form.category,
       base_price: Number(form.base_price),
-      description: form.description,
-      is_veg: form.is_veg
+      description: taggedDesc,
+      is_veg: form.is_veg,
+      restaurant_id: restaurantId || null
     }]).select().single();
+
+    if (insertedMenu?.id && restaurantId) {
+      try {
+        const savedIds = localStorage.getItem(`tabletapy_menu_${restaurantId}`);
+        const list: string[] = savedIds ? JSON.parse(savedIds) : [];
+        if (!list.includes(insertedMenu.id)) {
+          list.push(insertedMenu.id);
+          localStorage.setItem(`tabletapy_menu_${restaurantId}`, JSON.stringify(list));
+        }
+      } catch {}
+    }
 
     if (menuErr) {
       alert("Error saving dish: " + menuErr.message);

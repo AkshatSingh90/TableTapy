@@ -57,6 +57,8 @@ interface InventoryItem {
 }
 
 export default function InventoryPage() {
+  const supabase = createClient();
+  const [restaurantId, setRestaurantId] = useState<string>('');
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -88,51 +90,94 @@ export default function InventoryPage() {
   // Fetch Inventory from Supabase
   const fetchInventory = async () => {
     setIsLoadingData(true);
-    const { data, error } = await supabase
-      .from('inventory_items')
-      .select('*, ledger:inventory_ledgers(*), usedInRecipes:inventory_recipe_usage(*)');
+    const { data: { user } } = await supabase.auth.getUser();
+    const restId = user?.user_metadata?.restaurant_id;
 
-    if (error) {
-      console.error("Error fetching inventory:", error);
-    } else if (data) {
-      const mapped: InventoryItem[] = data.map((row: any) => ({
-        id: row.id,
-        name: row.name,
-        category: row.category,
-        stock: Number(row.stock),
-        threshold: Number(row.threshold),
-        vendorUnit: row.vendor_unit,
-        storageUnit: row.storage_unit,
-        yieldPercentage: Number(row.yield_percentage || 100),
-        isSemiFinished: Boolean(row.is_semi_finished),
-        expiryDate: row.expiry_date || '',
-        costPerVendorUnit: Number(row.cost_per_vendor_unit),
-        priceLastMonth: Number(row.price_last_month),
-        lastOrderedDate: row.last_ordered_date || 'Today',
-        nextOrderDate: row.next_order_date || 'Not Scheduled',
-        dailyBurnRate: Number(row.daily_burn_rate),
-        estimatedDaysLeft: Number(row.estimated_days_left),
-        vendorToStorage: Number(row.vendor_to_storage),
-        recipeUnit: row.recipe_unit,
-        lastCountedAt: row.last_counted_at || 'Just Now',
-        posExpected: Number(row.pos_expected),
-        actualCounted: Number(row.actual_counted),
-        usedInRecipes: (row.usedInRecipes || []).map((r: any) => ({
-          name: r.name,
-          amountPerOrder: Number(r.amount_per_order),
-          timesOrdered: Number(r.times_ordered),
-          ingredientCostPerOrder: Number(r.ingredient_cost_per_order),
-          dishPrice: Number(r.dish_price),
-          profitImpact: r.profit_impact
-        })),
-        ledger: (row.ledger || []).map((l: any) => ({
-          id: l.id,
-          date: l.date,
-          type: l.type as any,
-          amount: Number(l.amount),
-          note: l.note
-        }))
-      }));
+    if (!restId) {
+      setItems([]);
+      setIsLoadingData(false);
+      return;
+    }
+    setRestaurantId(restId);
+
+    // Try query with restaurant_id first (if native DB column exists)
+    let invRows: any[] | null = null;
+    const { data: restScopedData, error: restScopedErr } = await supabase
+      .from('inventory_items')
+      .select('*, ledger:inventory_ledgers(*), usedInRecipes:inventory_recipe_usage(*)')
+      .eq('restaurant_id', restId);
+
+    if (!restScopedErr && restScopedData) {
+      invRows = restScopedData;
+    } else {
+      // Fallback query + code-level metadata isolation
+      const { data: allData, error } = await supabase
+        .from('inventory_items')
+        .select('*, ledger:inventory_ledgers(*), usedInRecipes:inventory_recipe_usage(*)');
+
+      if (error) {
+        console.error("Error fetching inventory:", error);
+      } else if (allData) {
+        invRows = allData.filter((row: any) => {
+          if (row.category === 'STAFF_ROSTER') return false;
+          if (row.restaurant_id) return row.restaurant_id === restId;
+          const savedCustomIds = localStorage.getItem(`tabletapy_inventory_${restId}`);
+          if (savedCustomIds) {
+            try {
+              const ids: string[] = JSON.parse(savedCustomIds);
+              if (ids.includes(row.id)) return true;
+            } catch {}
+          }
+          if (row.name && row.name.startsWith(`[REST:${restId}]`)) return true;
+          return false;
+        });
+      }
+    }
+
+    if (invRows) {
+      const mapped: InventoryItem[] = invRows
+        .filter((row: any) => row.category !== 'STAFF_ROSTER')
+        .map((row: any) => {
+          const cleanName = row.name.replace(/^\[REST:[^\]]+\]\s*/, '');
+          return {
+            id: row.id,
+            name: cleanName,
+            category: row.category,
+            stock: Number(row.stock),
+            threshold: Number(row.threshold),
+            vendorUnit: row.vendor_unit,
+            storageUnit: row.storage_unit,
+            yieldPercentage: Number(row.yield_percentage || 100),
+            isSemiFinished: Boolean(row.is_semi_finished),
+            expiryDate: row.expiry_date || '',
+            costPerVendorUnit: Number(row.cost_per_vendor_unit),
+            priceLastMonth: Number(row.price_last_month),
+            lastOrderedDate: row.last_ordered_date || 'Today',
+            nextOrderDate: row.next_order_date || 'Not Scheduled',
+            dailyBurnRate: Number(row.daily_burn_rate),
+            estimatedDaysLeft: Number(row.estimated_days_left),
+            vendorToStorage: Number(row.vendor_to_storage),
+            recipeUnit: row.recipe_unit,
+            lastCountedAt: row.last_counted_at || 'Just Now',
+            posExpected: Number(row.pos_expected),
+            actualCounted: Number(row.actual_counted),
+            usedInRecipes: (row.usedInRecipes || []).map((r: any) => ({
+              name: r.name,
+              amountPerOrder: Number(r.amount_per_order),
+              timesOrdered: Number(r.times_ordered),
+              ingredientCostPerOrder: Number(r.ingredient_cost_per_order),
+              dishPrice: Number(r.dish_price),
+              profitImpact: r.profit_impact
+            })),
+            ledger: (row.ledger || []).map((l: any) => ({
+              id: l.id,
+              date: l.date,
+              type: l.type as any,
+              amount: Number(l.amount),
+              note: l.note
+            }))
+          };
+        });
       setItems(mapped);
       
       // Update selected profile if it's currently open
@@ -140,6 +185,8 @@ export default function InventoryPage() {
         const updatedProfile = mapped.find(i => i.id === selectedMasterProfile.id);
         if (updatedProfile) setSelectedMasterProfile(updatedProfile);
       }
+    } else {
+      setItems([]);
     }
     setIsLoadingData(false);
   };
@@ -291,7 +338,8 @@ export default function InventoryPage() {
     const { data: itemData, error: itemError } = await supabase
       .from('inventory_items')
       .insert([{
-        name: trimmedName,
+        name: restaurantId ? `[REST:${restaurantId}] ${trimmedName}` : trimmedName,
+        restaurant_id: restaurantId || null,
         category: newMaterial.category,
         stock: stockNum,
         threshold: !isNaN(threshNum) ? threshNum : null,
@@ -340,6 +388,16 @@ export default function InventoryPage() {
       expiryDate: '', isSemiFinished: false
     });
     
+    if (itemData?.id && restaurantId) {
+      try {
+        const savedIds = localStorage.getItem(`tabletapy_inventory_${restaurantId}`);
+        const list: string[] = savedIds ? JSON.parse(savedIds) : [];
+        if (!list.includes(itemData.id)) {
+          list.push(itemData.id);
+          localStorage.setItem(`tabletapy_inventory_${restaurantId}`, JSON.stringify(list));
+        }
+      } catch {}
+    }
     setIsAddingMode(false);
     setIsSubmitting(false);
     await fetchInventory();
