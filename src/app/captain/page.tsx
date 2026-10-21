@@ -665,21 +665,24 @@ export default function CaptainAppPage() {
 
       let dynamicRoster: StaffMember[] = [];
       if (staffData && staffData.length > 0) {
-        dynamicRoster = staffData.map((item: any) => {
-          let metadata: any = {};
-          try {
-            if (item.name.startsWith('STAFF:')) {
-              metadata = JSON.parse(item.name.replace('STAFF:', ''));
-            }
-          } catch {}
-          return {
-            id: item.id,
-            name: metadata.name || item.name.replace('STAFF:', ''),
-            role: (metadata.role || 'CAPTAIN') as StaffMember['role'],
-            phone: metadata.phone || '',
-            assigned_tables: metadata.assigned_tables || ['ALL']
-          };
-        });
+        dynamicRoster = staffData
+          .map((item: any) => {
+            let metadata: any = {};
+            try {
+              if (item.name.startsWith('STAFF:')) {
+                metadata = JSON.parse(item.name.replace('STAFF:', ''));
+              }
+            } catch {}
+            return {
+              id: item.id,
+              name: metadata.name || item.name.replace('STAFF:', ''),
+              role: (metadata.role || 'CAPTAIN') as StaffMember['role'],
+              phone: metadata.phone || '',
+              assigned_tables: metadata.assigned_tables || ['ALL'],
+              restaurant_id: metadata.restaurant_id || null,
+            };
+          })
+          .filter((s: any) => s.restaurant_id === foundRest.id);
       }
 
       // Filter out legacy mock members

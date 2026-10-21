@@ -265,27 +265,26 @@ export default function ReportsPage() {
           .order("created_at", { ascending: false });
 
         if (staffData && staffData.length > 0) {
-          const roster: StaffRecord[] = staffData.map((item: any) => {
-            let meta: any = {};
-            try {
-              if (item.name.startsWith("STAFF:")) {
-                meta = JSON.parse(item.name.replace("STAFF:", ""));
-              }
-            } catch {}
-            return {
-              id: item.id,
-              name: meta.name || item.name.replace("STAFF:", ""),
-              role: meta.role || "CAPTAIN",
-              assigned_tables: meta.assigned_tables || ["ALL"],
-            };
-          });
+          const roster: StaffRecord[] = staffData
+            .map((item: any) => {
+              let meta: any = {};
+              try {
+                if (item.name.startsWith("STAFF:")) {
+                  meta = JSON.parse(item.name.replace("STAFF:", ""));
+                }
+              } catch {}
+              return {
+                id: item.id,
+                name: meta.name || item.name.replace("STAFF:", ""),
+                role: meta.role || "CAPTAIN",
+                assigned_tables: meta.assigned_tables || ["ALL"],
+                restaurant_id: meta.restaurant_id || null,
+              };
+            })
+            .filter((s: any) => s.restaurant_id === restId);
           setStaffList(roster);
         } else {
-          setStaffList([
-            { id: "s-1", name: "Ramesh Sharma", role: "CAPTAIN", assigned_tables: ["Table 01", "Table 02", "Table 03"] },
-            { id: "s-2", name: "Suresh Patil", role: "CAPTAIN", assigned_tables: ["Table 04", "Table 05", "Table 06"] },
-            { id: "s-3", name: "Anand Verma", role: "STEWARD", assigned_tables: ["Table 07", "Table 08"] },
-          ]);
+          setStaffList([]);
         }
       }
     } catch (err) {
