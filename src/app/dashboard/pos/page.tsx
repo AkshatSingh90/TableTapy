@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-import Image from "next/image";
 import {
   Search,
   Plus,
@@ -22,16 +21,14 @@ import {
   Clock,
   User,
   Phone,
-  Sparkles,
-  ChefHat,
-  ChevronDown,
+  RotateCcw,
   AlertCircle,
   Percent,
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
 
-/* ─── Domain Types ─────────────────────────────────────────────────── */
+/* ─── Types ───────────────────────────────────────────────────────── */
 interface MenuItem {
   id: string;
   name: string;
@@ -92,25 +89,25 @@ interface OrderRecord {
 type TerminalMode = "DINE_IN" | "TAKEAWAY";
 type PaymentMethod = "CASH" | "UPI" | "CARD";
 
-export default function TableTapyApplePOS() {
+export default function PosPage() {
   const supabase = createClient();
 
   // Core Data
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
-  const [restaurantName, setRestaurantName] = useState<string>("TableTapy Floor");
+  const [restaurantName, setRestaurantName] = useState<string>("");
   const [upiId, setUpiId] = useState<string>("");
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
 
-  // Operational State
+  // Terminal Navigation
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("DINE_IN");
   const [selectedTable, setSelectedTable] = useState<string>("");
   const [tableFilter, setTableFilter] = useState<"ALL" | "ACTIVE" | "VACANT">("ALL");
   const [showMovePicker, setShowMovePicker] = useState<boolean>(false);
 
-  // Takeaway Token
+  // Takeaway Tokens
   const [takeawayCounter, setTakeawayCounter] = useState<number>(1);
   const currentTakeawayToken = `Token #${takeawayCounter.toString().padStart(2, "0")}`;
 
@@ -118,7 +115,7 @@ export default function TableTapyApplePOS() {
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
 
-  // Cart (Items to be sent to kitchen)
+  // Cart (New order to fire to kitchen)
   const [cart, setCart] = useState<CartItem[]>([]);
 
   // Search & Categories
@@ -126,14 +123,14 @@ export default function TableTapyApplePOS() {
   const [selectedCategory, setSelectedCategory] = useState("ALL");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Discount & Settlement
+  // Settlement & Discounts
   const [discountPercent, setDiscountPercent] = useState<number>(0);
-  const [showDiscountSheet, setShowDiscountSheet] = useState(false);
-  const [isPaymentSheetOpen, setIsPaymentSheetOpen] = useState(false);
+  const [showDiscountSelector, setShowDiscountSelector] = useState(false);
+  const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Thermal Printing Chit
+  // Thermal Chit Printing
   const [printChit, setPrintChit] = useState<{
     type: "KOT" | "BILL" | "VOID";
     mode: TerminalMode;
@@ -150,16 +147,16 @@ export default function TableTapyApplePOS() {
     reason?: string;
   } | null>(null);
 
-  // Gentle Pill Notification
+  // Toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 2800);
+    setTimeout(() => setToastMessage(null), 3000);
   };
 
-  /* ─── 1. Load Data & Realtime Sync ──────────────────────────────── */
+  /* ─── 1. Load Data ──────────────────────────────────────────────── */
   const loadInitialData = async () => {
-    setIsLoading(true);
+    setLoading(true);
     try {
       const {
         data: { user },
@@ -167,12 +164,12 @@ export default function TableTapyApplePOS() {
 
       const restId = user?.user_metadata?.restaurant_id;
       if (!restId) {
-        setIsLoading(false);
+        setLoading(false);
         return;
       }
       setRestaurantId(restId);
 
-      // Restaurant Profile
+      // Restaurant Info
       const { data: rest } = await supabase
         .from("restaurants")
         .select("id, name, upi_id")
@@ -218,7 +215,7 @@ export default function TableTapyApplePOS() {
           menuData.map((row: any) => ({
             id: row.id,
             name: row.name,
-            category: row.category || "Main",
+            category: row.category || "General",
             subcategory: row.subcategory || "",
             base_price: Number(row.base_price || 0),
             description: (row.description || "").replace(/\[REST:[^\]]+\]\s*/, ""),
@@ -232,7 +229,7 @@ export default function TableTapyApplePOS() {
     } catch (err) {
       console.error("Failed to load POS data:", err);
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
@@ -252,7 +249,6 @@ export default function TableTapyApplePOS() {
   useEffect(() => {
     loadInitialData();
 
-    // Keyboard Hotkey
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "/" && document.activeElement !== searchInputRef.current) {
         e.preventDefault();
@@ -261,15 +257,15 @@ export default function TableTapyApplePOS() {
       if (e.key === "Escape") {
         setSearchQuery("");
         setShowMovePicker(false);
-        setIsPaymentSheetOpen(false);
-        setShowDiscountSheet(false);
+        setIsPaymentDrawerOpen(false);
+        setShowDiscountSelector(false);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Supabase Realtime Subscription for incoming QR / Captain orders
+  // Supabase Realtime Sync
   useEffect(() => {
     if (!restaurantId) return;
 
@@ -341,7 +337,7 @@ export default function TableTapyApplePOS() {
         existing.customerPhone = order.customer_phone;
       }
 
-      // Detect Order Source Origin
+      // Order Origin Attribution
       let orderSource: "QR" | "STAFF" | "CAPTAIN" = "QR";
       const noteLower = (order.note || "").toLowerCase();
       const customerLower = (order.customer_name || "").toLowerCase();
@@ -394,7 +390,7 @@ export default function TableTapyApplePOS() {
     return tableSessionMap.get(selectedTable) || null;
   }, [terminalMode, selectedTable, tableSessionMap]);
 
-  // Autofill Customer Information
+  // Autofill Guest Details
   useEffect(() => {
     if (terminalMode === "DINE_IN" && currentTableSession) {
       if (currentTableSession.customerName && !customerName) {
@@ -414,7 +410,7 @@ export default function TableTapyApplePOS() {
     );
   }, [activeOrders]);
 
-  /* ─── 3. Menu Filtering & Categories ────────────────────────────── */
+  /* ─── 3. Filtering & Categories ─────────────────────────────────── */
   const categories = useMemo(() => {
     const set = new Set<string>();
     menuItems.forEach((m) => {
@@ -481,7 +477,7 @@ export default function TableTapyApplePOS() {
     setCart([]);
   };
 
-  /* ─── 5. Combined Financials ────────────────────────────────────── */
+  /* ─── 5. Financials ─────────────────────────────────────────────── */
   const targetDestination =
     terminalMode === "DINE_IN" ? selectedTable : currentTakeawayToken;
 
@@ -530,11 +526,11 @@ export default function TableTapyApplePOS() {
     return Math.round(tendered - grandTotal);
   }, [cashTendered, grandTotal]);
 
-  /* ─── 6. Thermal KOT & Bill Printing Actions ────────────────────── */
+  /* ─── 6. Thermal Printing & Settlement Actions ──────────────────── */
   const handleSendToKitchen = async () => {
     if (cart.length === 0) return;
     if (terminalMode === "DINE_IN" && !selectedTable) {
-      showToast("Please choose a table first");
+      showToast("Please select a table first");
       return;
     }
 
@@ -556,7 +552,7 @@ export default function TableTapyApplePOS() {
 
       const roundNum = (currentTableSession?.orders.length || 0) + 1;
 
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from("orders")
         .insert({
           restaurant_id: restaurantId,
@@ -596,7 +592,7 @@ export default function TableTapyApplePOS() {
 
       setTimeout(() => {
         window.print();
-      }, 120);
+      }, 100);
     } catch (err: any) {
       showToast("Failed to send order: " + (err.message || "Network Error"));
     } finally {
@@ -606,7 +602,7 @@ export default function TableTapyApplePOS() {
 
   const handlePrintGuestBill = () => {
     if (allCurrentItems.length === 0) {
-      showToast("No active items on this check");
+      showToast("No active items on this bill");
       return;
     }
 
@@ -775,7 +771,7 @@ export default function TableTapyApplePOS() {
             customer_name: customerName.trim() || `Guest (${selectedTable})`,
             customer_phone: customerPhone.trim() || null,
             items_json: unsavedPayload,
-            note: `[POS Direct Addon Settled: ${method}]`,
+            note: `[POS Addon Settled: ${method}]`,
           });
         }
       } else {
@@ -820,7 +816,7 @@ export default function TableTapyApplePOS() {
       clearCurrentCart();
       setCustomerName("");
       setCustomerPhone("");
-      setIsPaymentSheetOpen(false);
+      setIsPaymentDrawerOpen(false);
 
       if (terminalMode === "TAKEAWAY") {
         setTakeawayCounter((prev) => prev + 1);
@@ -838,14 +834,12 @@ export default function TableTapyApplePOS() {
     }
   };
 
-  // UPI QR String
   const upiIntentUrl = useMemo(() => {
     const vpa = upiId || "merchant@upi";
-    const name = encodeURIComponent(restaurantName);
+    const name = encodeURIComponent(restaurantName || "Restaurant");
     return `upi://pay?pa=${vpa}&pn=${name}&am=${grandTotal}&cu=INR`;
   }, [upiId, restaurantName, grandTotal]);
 
-  // Filtered Tables
   const filteredTables = useMemo(() => {
     return locations.filter((loc) => {
       const session = tableSessionMap.get(loc.name);
@@ -861,68 +855,58 @@ export default function TableTapyApplePOS() {
   ).length;
 
   return (
-    <div className="flex h-screen flex-col bg-[#FBFBFC] font-sans text-neutral-900 select-none overflow-hidden antialiased">
+    <div className="flex h-screen flex-col bg-[#FAFAFA] font-sans text-zinc-900 select-none overflow-hidden">
       
-      {/* ── Apple-style Floating Toast Pill ── */}
+      {/* Toast Alert */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[400] bg-neutral-900/90 backdrop-blur-xl text-white px-4 py-2 rounded-full shadow-[0_10px_30px_rgba(0,0,0,0.18)] text-xs font-medium flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200 border border-white/10">
-          <div className="w-1.5 h-1.5 rounded-full bg-[#E46254] animate-ping" />
+        <div className="fixed top-5 right-6 z-[300] bg-zinc-900 text-white px-4 py-2.5 rounded-xl shadow-xl text-xs font-medium flex items-center gap-2 border border-zinc-800 animate-in fade-in slide-in-from-top-2">
+          <Check size={14} className="text-[#E46254]" />
           <span>{toastMessage}</span>
         </div>
       )}
 
-      {/* ═════════════════════════════════════════════════════════════════════
-          APPLE HEADER: Warm TableTapy Identity & Floating Segmented Controls
-         ═════════════════════════════════════════════════════════════════════ */}
-      <header className="shrink-0 h-14 bg-white/80 backdrop-blur-xl border-b border-black/[0.05] px-6 flex items-center justify-between z-30">
-        
-        {/* Brand Presence: Clean TableTapy Identity */}
+      {/* ── STICKY TOP BAR: Matches /dashboard/orders & /dashboard/locations ── */}
+      <div className="shrink-0 bg-white border-b border-zinc-200/80 px-6 py-3 flex items-center justify-between gap-4 z-20">
         <div className="flex items-center gap-3">
-          <Link href="/dashboard" className="flex items-center gap-2.5 group">
-            <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-[#E46254] to-[#F28274] flex items-center justify-center shadow-[0_2px_8px_rgba(228,98,84,0.35)] transition-transform group-hover:scale-105">
-              <span className="font-black text-white text-sm tracking-tighter">T</span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-xs font-semibold tracking-tight text-neutral-900">
-                {restaurantName}
-              </span>
-              <span className="text-[10px] font-medium text-[#E46254] tracking-wide">
-                TableTapy POS
-              </span>
-            </div>
-          </Link>
+          <div className="flex items-center gap-2">
+            <h1 className="text-[18px] font-bold text-zinc-900 tracking-tight">Point of Sale</h1>
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 text-[10.5px] font-bold border border-emerald-500/20">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Live
+            </span>
+          </div>
 
-          <div className="h-4 w-px bg-neutral-200 mx-2" />
+          <div className="h-4 w-px bg-zinc-200 mx-1" />
 
-          {/* Apple Segmented Mode Switcher */}
-          <div className="bg-neutral-100/80 p-0.5 rounded-full flex items-center border border-black/[0.04]">
+          {/* Mode Tabs */}
+          <div className="flex items-center bg-zinc-100 p-0.5 rounded-lg border border-zinc-200/80">
             <button
               onClick={() => {
                 setTerminalMode("DINE_IN");
                 if (!selectedTable && locations.length > 0) setSelectedTable(locations[0].name);
               }}
-              className={`px-3.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all duration-150 cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer ${
                 terminalMode === "DINE_IN"
-                  ? "bg-white text-neutral-900 shadow-[0_2px_6px_rgba(0,0,0,0.06)]"
-                  : "text-neutral-500 hover:text-neutral-800"
+                  ? "bg-white text-zinc-900 shadow-2xs font-semibold"
+                  : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <UtensilsCrossed size={12} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : "text-neutral-400"} />
+              <UtensilsCrossed size={13} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : "text-zinc-400"} />
               <span>Dine-In</span>
             </button>
 
             <button
               onClick={() => setTerminalMode("TAKEAWAY")}
-              className={`px-3.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all duration-150 cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer ${
                 terminalMode === "TAKEAWAY"
-                  ? "bg-white text-neutral-900 shadow-[0_2px_6px_rgba(0,0,0,0.06)]"
-                  : "text-neutral-500 hover:text-neutral-800"
+                  ? "bg-white text-zinc-900 shadow-2xs font-semibold"
+                  : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <ShoppingBag size={12} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : "text-neutral-400"} />
+              <ShoppingBag size={13} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : "text-zinc-400"} />
               <span>Takeaway</span>
               {activeTakeaways.length > 0 && (
-                <span className="text-[9px] font-bold bg-[#E46254]/10 text-[#E46254] px-1.5 py-0.2 rounded-full">
+                <span className="text-[9.5px] font-bold bg-[#E46254]/10 text-[#E46254] px-1.5 py-0.2 rounded-full">
                   {activeTakeaways.length}
                 </span>
               )}
@@ -930,48 +914,68 @@ export default function TableTapyApplePOS() {
           </div>
         </div>
 
-        {/* Status Pill */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 text-[11px] font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Cloud Live</span>
+        {/* Search Input matching Dashboard */}
+        <div className="flex items-center gap-2">
+          <div className="relative w-64 md:w-80">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="Search dishes or categories... (Press '/')"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl pl-9 pr-8 py-1.5 text-[12.5px] placeholder:text-zinc-400 outline-none focus:border-zinc-400 focus:bg-white transition-all font-medium"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+              >
+                <X size={13} />
+              </button>
+            )}
           </div>
-        </div>
-      </header>
 
-      {/* ═════════════════════════════════════════════════════════════════════
-          SUB-BAR: Minimalist Table Ribbon with Soft Warm Tones
-         ═════════════════════════════════════════════════════════════════════ */}
-      <div className="shrink-0 bg-white border-b border-black/[0.04] px-6 py-2.5 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar">
+          <button
+            onClick={() => {
+              if (restaurantId) fetchActiveOrders(restaurantId);
+              showToast("Synced with cloud");
+            }}
+            className="p-2 border border-zinc-200 bg-white rounded-xl text-zinc-500 hover:text-zinc-900 cursor-pointer transition-colors"
+            title="Refresh"
+          >
+            <RotateCcw size={14} />
+          </button>
+        </div>
+      </div>
+
+      {/* ── TABLE MATRIX STRIP ── */}
+      <div className="shrink-0 bg-white border-b border-zinc-200/80 px-6 py-2 flex items-center justify-between gap-4 overflow-x-auto slim-scrollbar">
         {terminalMode === "DINE_IN" ? (
           locations.length === 0 ? (
-            <div className="flex items-center gap-2 text-xs text-neutral-500 py-1">
+            <div className="flex items-center gap-2 text-xs text-zinc-500 py-0.5">
               <AlertCircle size={14} className="text-amber-500 shrink-0" />
-              <span>No tables created yet.</span>
-              <Link href="/dashboard/locations" className="font-semibold text-neutral-900 underline">
+              <span>No tables configured.</span>
+              <Link href="/dashboard/locations" className="font-semibold text-zinc-900 underline">
                 Add tables in Locations
               </Link>
             </div>
           ) : (
             <div className="flex items-center gap-3 w-full">
-              {/* Segmented Filter */}
-              <div className="flex items-center gap-1 shrink-0 bg-neutral-100/70 p-0.5 rounded-full border border-black/[0.03]">
+              {/* Filter Pills */}
+              <div className="flex items-center gap-1 shrink-0 bg-zinc-100 p-0.5 rounded-lg border border-zinc-200/80">
                 <button
                   onClick={() => setTableFilter("ALL")}
-                  className={`px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer ${
-                    tableFilter === "ALL"
-                      ? "bg-white text-neutral-900 shadow-[0_1px_4px_rgba(0,0,0,0.06)]"
-                      : "text-neutral-500 hover:text-neutral-900"
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all cursor-pointer ${
+                    tableFilter === "ALL" ? "bg-white text-zinc-900 shadow-2xs font-semibold" : "text-zinc-500 hover:text-zinc-900"
                   }`}
                 >
                   All ({locations.length})
                 </button>
                 <button
                   onClick={() => setTableFilter("ACTIVE")}
-                  className={`px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
-                    tableFilter === "ACTIVE"
-                      ? "bg-[#E46254] text-white shadow-[0_2px_8px_rgba(228,98,84,0.3)]"
-                      : "text-neutral-500 hover:text-neutral-900"
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                    tableFilter === "ACTIVE" ? "bg-[#E46254] text-white font-semibold" : "text-zinc-500 hover:text-zinc-900"
                   }`}
                 >
                   <span className={`w-1.5 h-1.5 rounded-full ${tableFilter === "ACTIVE" ? "bg-white" : "bg-[#E46254]"}`} />
@@ -979,10 +983,8 @@ export default function TableTapyApplePOS() {
                 </button>
                 <button
                   onClick={() => setTableFilter("VACANT")}
-                  className={`px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
-                    tableFilter === "VACANT"
-                      ? "bg-white text-neutral-900 shadow-[0_1px_4px_rgba(0,0,0,0.06)]"
-                      : "text-neutral-500 hover:text-neutral-900"
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                    tableFilter === "VACANT" ? "bg-white text-zinc-900 shadow-2xs font-semibold" : "text-zinc-500 hover:text-zinc-900"
                   }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
@@ -990,8 +992,8 @@ export default function TableTapyApplePOS() {
                 </button>
               </div>
 
-              {/* Smooth Floating Table Pills */}
-              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5 flex-1">
+              {/* Table Pills */}
+              <div className="flex items-center gap-2 overflow-x-auto slim-scrollbar py-0.5 flex-1">
                 {filteredTables.map((loc) => {
                   const session = tableSessionMap.get(loc.name);
                   const isSelected = selectedTable === loc.name;
@@ -1004,12 +1006,12 @@ export default function TableTapyApplePOS() {
                         setSelectedTable(loc.name);
                         clearCurrentCart();
                       }}
-                      className={`h-9 px-3.5 rounded-xl text-xs font-semibold flex items-center gap-2 whitespace-nowrap transition-all duration-150 cursor-pointer shrink-0 ${
+                      className={`h-8 px-3 rounded-lg text-xs font-semibold flex items-center gap-2 whitespace-nowrap transition-all cursor-pointer border shrink-0 ${
                         isSelected
-                          ? "bg-neutral-900 text-white shadow-[0_4px_12px_rgba(0,0,0,0.15)] ring-2 ring-neutral-900/10"
+                          ? "bg-zinc-900 text-white border-zinc-900 shadow-xs"
                           : isVacant
-                          ? "bg-neutral-50 hover:bg-neutral-100/80 text-neutral-700 border border-neutral-200/60"
-                          : "bg-[#E46254]/8 hover:bg-[#E46254]/14 text-[#C2410C] border border-[#E46254]/20"
+                          ? "bg-white text-zinc-700 border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50"
+                          : "bg-[#E46254]/8 text-[#C2410C] border-[#E46254]/30 hover:border-[#E46254]/50"
                       }`}
                     >
                       <span
@@ -1023,9 +1025,7 @@ export default function TableTapyApplePOS() {
                       />
                       <span>{loc.name}</span>
                       {!isVacant && session?.runningTotal ? (
-                        <span className={`text-[10px] tabular-nums font-mono font-bold px-1.5 py-0.2 rounded-md ${
-                          isSelected ? "bg-white/20 text-white" : "bg-[#E46254]/15 text-[#C2410C]"
-                        }`}>
+                        <span className={`text-[10.5px] tabular-nums font-mono font-bold ${isSelected ? "text-white/90" : "text-[#C2410C]"}`}>
                           ₹{session.runningTotal}
                         </span>
                       ) : null}
@@ -1038,7 +1038,7 @@ export default function TableTapyApplePOS() {
         ) : (
           <div className="flex items-center justify-between w-full">
             <div className="flex items-center gap-3">
-              <span className="text-sm font-bold text-neutral-900">
+              <span className="text-xs font-bold text-zinc-900">
                 {currentTakeawayToken}
               </span>
               <button
@@ -1047,20 +1047,19 @@ export default function TableTapyApplePOS() {
                   clearCurrentCart();
                   showToast(`Switched to Token #${(takeawayCounter + 1).toString().padStart(2, "0")}`);
                 }}
-                className="px-3 py-1 bg-neutral-100 hover:bg-neutral-200/80 rounded-full text-xs font-semibold text-neutral-700 cursor-pointer transition-colors"
+                className="px-2.5 py-1 bg-zinc-100 hover:bg-zinc-200 border border-zinc-200 rounded-md text-xs font-semibold text-zinc-700 cursor-pointer"
               >
                 + Next Parcel
               </button>
             </div>
 
-            {/* Waiting Takeaways */}
             {activeTakeaways.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-                <span className="text-xs font-medium text-neutral-400">Waiting:</span>
+              <div className="flex items-center gap-2 overflow-x-auto slim-scrollbar">
+                <span className="text-xs font-medium text-zinc-400">Waiting:</span>
                 {activeTakeaways.map((ord) => (
                   <span
                     key={ord.id}
-                    className="px-2.5 py-0.5 bg-[#E46254]/10 border border-[#E46254]/20 text-[#C2410C] rounded-full text-xs font-semibold tabular-nums"
+                    className="px-2.5 py-0.5 bg-[#E46254]/10 border border-[#E46254]/20 text-[#C2410C] rounded-md text-xs font-semibold tabular-nums"
                   >
                     {ord.table_no} (₹{ord.total})
                   </span>
@@ -1071,78 +1070,49 @@ export default function TableTapyApplePOS() {
         )}
       </div>
 
-      {/* ═════════════════════════════════════════════════════════════════════
-          MAIN CANVAS: Split 64% Menu / 36% Apple Wallet Receipt Pass
-         ═════════════════════════════════════════════════════════════════════ */}
-      <div className="flex flex-1 overflow-hidden p-3 gap-3">
+      {/* ── MAIN WORKSPACE: Split Screen ── */}
+      <div className="flex flex-1 overflow-hidden p-4 gap-4">
         
-        {/* ── LEFT: Apple-Style Fluid Menu Grid ── */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-white rounded-3xl border border-black/[0.04] shadow-[0_2px_12px_rgba(0,0,0,0.02)]">
+        {/* LEFT COLUMN: Dish Catalog */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-white rounded-2xl border border-zinc-200/80 shadow-2xs">
           
-          {/* Search & Category Pills Strip */}
-          <div className="shrink-0 p-4 border-b border-black/[0.04] space-y-3">
-            
-            {/* Spotlight Search Bar */}
-            <div className="relative">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400" size={15} />
-              <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Search dishes or ingredients... (Press '/' to search)"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-9 py-2.5 bg-neutral-100/70 hover:bg-neutral-100 focus:bg-white border border-transparent focus:border-[#E46254]/30 focus:ring-4 focus:ring-[#E46254]/8 rounded-2xl text-xs font-medium outline-none transition-all duration-150"
-              />
-              {searchQuery && (
+          {/* Category Strip */}
+          <div className="shrink-0 p-3.5 border-b border-zinc-100 flex items-center gap-1.5 overflow-x-auto slim-scrollbar bg-white">
+            {categories.map((cat) => {
+              const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
+              const count =
+                cat === "ALL"
+                  ? menuItems.length
+                  : menuItems.filter((i) => i.category.toLowerCase() === cat.toLowerCase()).length;
+
+              return (
                 <button
-                  onClick={() => setSearchQuery("")}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 cursor-pointer"
+                  key={cat}
+                  onClick={() => setSelectedCategory(cat)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 border shrink-0 ${
+                    isSelected
+                      ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                      : "bg-white text-zinc-600 border-zinc-200/80 hover:border-zinc-300 hover:text-zinc-900"
+                  }`}
                 >
-                  <X size={14} />
+                  <span>{cat === "ALL" ? "All Items" : cat}</span>
+                  <span className={`text-[10px] tabular-nums font-mono px-1 rounded ${
+                    isSelected ? "bg-white/20 text-white" : "bg-zinc-100 text-zinc-500"
+                  }`}>
+                    {count}
+                  </span>
                 </button>
-              )}
-            </div>
-
-            {/* Apple Smooth Category Rail */}
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-              {categories.map((cat) => {
-                const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
-                const count =
-                  cat === "ALL"
-                    ? menuItems.length
-                    : menuItems.filter((i) => i.category.toLowerCase() === cat.toLowerCase()).length;
-
-                return (
-                  <button
-                    key={cat}
-                    onClick={() => setSelectedCategory(cat)}
-                    className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-150 cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                      isSelected
-                        ? "bg-[#E46254] text-white shadow-[0_2px_8px_rgba(228,98,84,0.3)]"
-                        : "bg-neutral-100/70 text-neutral-600 hover:bg-neutral-200/70 hover:text-neutral-900"
-                    }`}
-                  >
-                    <span>{cat === "ALL" ? "All Items" : cat}</span>
-                    <span className={`text-[10px] tabular-nums font-mono px-1.5 py-0.2 rounded-full ${
-                      isSelected ? "bg-white/25 text-white" : "bg-neutral-200/60 text-neutral-500"
-                    }`}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+              );
+            })}
           </div>
 
-          {/* Fluid Dish Cards Grid */}
-          <div className="flex-1 overflow-y-auto p-4">
+          {/* Dishes Grid */}
+          <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
             {filteredItems.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-8">
-                <div className="w-12 h-12 rounded-2xl bg-neutral-100 flex items-center justify-center text-neutral-400 mb-3">
-                  <Receipt size={22} />
-                </div>
-                <h3 className="text-sm font-semibold text-neutral-800">No dishes found</h3>
-                <p className="text-xs text-neutral-400 mt-0.5">Try searching for another dish or change category</p>
+                <Receipt size={26} className="text-zinc-300 mb-2" />
+                <h3 className="text-sm font-semibold text-zinc-700">No dishes found</h3>
+                <p className="text-xs text-zinc-400 mt-0.5">Try clearing your search or pick another category</p>
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
@@ -1154,66 +1124,70 @@ export default function TableTapyApplePOS() {
                     <div
                       key={dish.id}
                       onClick={() => addToCart(dish)}
-                      className={`group relative h-[115px] rounded-2xl p-3.5 transition-all duration-150 cursor-pointer flex flex-col justify-between select-none border ${
+                      className={`h-[110px] bg-white rounded-xl p-3 border transition-all cursor-pointer flex flex-col justify-between select-none shadow-2xs hover:shadow-xs hover:border-zinc-300 active:scale-[0.98] ${
                         inCartQty > 0
-                          ? "bg-white border-[#E46254] shadow-[0_4px_16px_rgba(228,98,84,0.12)] ring-1 ring-[#E46254]"
-                          : "bg-white hover:bg-neutral-50/80 border-black/[0.05] shadow-[0_2px_8px_rgba(0,0,0,0.03)] hover:shadow-[0_4px_14px_rgba(0,0,0,0.06)] hover:border-black/[0.08]"
-                      } active:scale-[0.98]`}
+                          ? "border-[#E46254] ring-1 ring-[#E46254]/30 bg-[#E46254]/[0.02]"
+                          : "border-zinc-200/80"
+                      }`}
                     >
-                      {/* Top: Veg / Non-Veg Indicator + Category */}
-                      <div className="flex items-start justify-between gap-1.5">
+                      {/* Veg indicator & Category */}
+                      <div className="flex items-center justify-between">
                         <div className="flex items-center gap-1.5">
-                          <span
-                            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                              dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                            }`}
-                          />
-                          <span className="text-[10px] font-medium text-neutral-400 truncate max-w-[80px]">
+                          {dish.is_veg ? (
+                            <span className="w-3 h-3 border border-emerald-600 flex items-center justify-center p-0.5 rounded-xs shrink-0">
+                              <span className="w-1.5 h-1.5 bg-emerald-600 rounded-full" />
+                            </span>
+                          ) : (
+                            <span className="w-3 h-3 border border-[#E46254] flex items-center justify-center p-0.5 rounded-xs shrink-0">
+                              <span className="w-1.5 h-1.5 bg-[#E46254] rounded-full" />
+                            </span>
+                          )}
+                          <span className="text-[10px] font-medium text-zinc-400 truncate max-w-[80px]">
                             {dish.category}
                           </span>
                         </div>
 
                         {inCartQty > 0 && (
-                          <span className="text-[10px] font-bold bg-[#E46254] text-white px-1.5 py-0.2 rounded-full">
-                            {inCartQty} in cart
+                          <span className="text-[10px] font-bold bg-[#E46254] text-white px-1.5 py-0.2 rounded-md font-mono">
+                            {inCartQty}
                           </span>
                         )}
                       </div>
 
-                      {/* Middle: Dish Name */}
-                      <p className="text-xs font-bold text-neutral-900 leading-snug line-clamp-2">
+                      {/* Dish Name */}
+                      <p className="text-xs font-semibold text-zinc-900 leading-snug line-clamp-2">
                         {dish.name}
                       </p>
 
-                      {/* Bottom: Price + Stepper */}
+                      {/* Price & Stepper */}
                       <div className="flex items-center justify-between pt-1">
-                        <span className="text-sm font-black text-neutral-900 font-mono tabular-nums">
+                        <span className="text-xs font-bold text-zinc-900 font-mono tabular-nums">
                           ₹{dish.base_price}
                         </span>
 
                         {inCartQty > 0 ? (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className="flex items-center bg-neutral-100 rounded-full p-0.5 border border-black/[0.04]"
+                            className="flex items-center bg-zinc-100 rounded-md border border-zinc-200"
                           >
                             <button
                               onClick={() => updateCartQuantity(dish.id, -1)}
-                              className="w-5 h-5 flex items-center justify-center rounded-full hover:bg-white text-neutral-600 transition-colors"
+                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
                             >
                               <Minus size={10} />
                             </button>
-                            <span className="w-5 text-center text-[11px] font-bold font-mono">
+                            <span className="w-4 text-center text-[10px] font-bold font-mono">
                               {inCartQty}
                             </span>
                             <button
                               onClick={() => updateCartQuantity(dish.id, 1)}
-                              className="w-5 h-5 flex items-center justify-center rounded-full hover:bg-white text-neutral-900 transition-colors"
+                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
                             >
                               <Plus size={10} />
                             </button>
                           </div>
                         ) : (
-                          <span className="text-[11px] font-semibold text-[#E46254] bg-[#E46254]/8 group-hover:bg-[#E46254] group-hover:text-white px-2.5 py-0.5 rounded-full transition-all duration-150">
+                          <span className="text-[10.5px] font-semibold text-[#E46254] bg-[#E46254]/8 hover:bg-[#E46254] hover:text-white px-2 py-0.5 rounded-md transition-colors">
                             + Add
                           </span>
                         )}
@@ -1226,14 +1200,14 @@ export default function TableTapyApplePOS() {
           </div>
         </div>
 
-        {/* ── RIGHT: Apple Wallet Pass Style Live Ticket ── */}
-        <div className="w-[380px] xl:w-[410px] bg-white rounded-3xl border border-black/[0.04] shadow-[0_2px_16px_rgba(0,0,0,0.03)] flex flex-col justify-between shrink-0 overflow-hidden">
+        {/* RIGHT COLUMN: Active Bill Ticket */}
+        <div className="w-[370px] xl:w-[400px] bg-white rounded-2xl border border-zinc-200/80 shadow-2xs flex flex-col justify-between shrink-0 overflow-hidden">
           
           {/* Ticket Header */}
-          <div className="shrink-0 p-4 border-b border-black/[0.04] bg-neutral-50/50">
+          <div className="shrink-0 p-4 border-b border-zinc-100 bg-zinc-50/50">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <h3 className="text-base font-bold text-neutral-900 tracking-tight">
+                <h3 className="text-sm font-bold text-zinc-900 tracking-tight">
                   {terminalMode === "DINE_IN" ? selectedTable || "Select Table" : currentTakeawayToken}
                 </h3>
 
@@ -1241,22 +1215,22 @@ export default function TableTapyApplePOS() {
                   <div className="relative">
                     <button
                       onClick={() => setShowMovePicker((v) => !v)}
-                      className="px-2 py-0.5 text-[10px] font-semibold text-neutral-600 bg-white border border-neutral-200/80 rounded-full hover:bg-neutral-100 flex items-center gap-1 cursor-pointer transition-colors"
+                      className="px-2 py-0.5 text-[10.5px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded-md hover:bg-zinc-100 flex items-center gap-1 cursor-pointer"
                     >
                       <ArrowRightLeft size={9} />
-                      <span>Transfer</span>
+                      <span>Shift</span>
                     </button>
 
                     {showMovePicker && (
-                      <div className="absolute left-0 top-full mt-1.5 w-48 bg-white/95 backdrop-blur-xl border border-black/[0.06] rounded-2xl shadow-[0_10px_30px_rgba(0,0,0,0.12)] p-1.5 z-50 space-y-0.5">
-                        <p className="text-[10px] font-semibold text-neutral-400 px-2 py-1">Shift to table:</p>
+                      <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-zinc-200 rounded-xl shadow-lg p-1 z-50 space-y-0.5">
+                        <p className="text-[10px] font-semibold text-zinc-400 px-2 py-1">Transfer table to:</p>
                         {locations
                           .filter((l) => l.name !== selectedTable)
                           .map((loc) => (
                             <button
                               key={loc.id}
                               onClick={() => handleTransferTable(loc.name)}
-                              className="w-full text-left px-2.5 py-1.5 rounded-xl text-xs font-medium hover:bg-neutral-100 cursor-pointer transition-colors"
+                              className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium hover:bg-zinc-100 cursor-pointer"
                             >
                               {loc.name}
                             </button>
@@ -1270,22 +1244,22 @@ export default function TableTapyApplePOS() {
               {cart.length > 0 && (
                 <button
                   onClick={clearCurrentCart}
-                  className="text-xs text-neutral-400 hover:text-rose-600 font-medium cursor-pointer transition-colors"
+                  className="text-xs text-zinc-400 hover:text-rose-600 font-medium cursor-pointer"
                 >
                   Clear Cart
                 </button>
               )}
             </div>
 
-            {/* Guest Auto-Filled Pill */}
-            <div className="mt-2.5 flex items-center justify-between bg-white px-3 py-2 rounded-2xl border border-black/[0.04] text-xs shadow-[0_1px_4px_rgba(0,0,0,0.02)]">
+            {/* Guest Details */}
+            <div className="mt-2 flex items-center justify-between bg-white px-3 py-1.5 rounded-lg border border-zinc-200/80 text-xs">
               <div className="flex items-center gap-2 truncate">
-                <User size={13} className="text-[#E46254] shrink-0" />
-                <span className="font-semibold text-neutral-800 truncate">
-                  {currentTableSession?.customerName || customerName || "Guest"}
+                <User size={12} className="text-zinc-400 shrink-0" />
+                <span className="font-semibold text-zinc-800 truncate">
+                  {currentTableSession?.customerName || customerName || "Dine-in Guest"}
                 </span>
                 {currentTableSession?.customerPhone && (
-                  <span className="text-neutral-400 font-mono text-[11px]">
+                  <span className="text-zinc-400 font-mono text-[10.5px]">
                     · {currentTableSession.customerPhone}
                   </span>
                 )}
@@ -1297,44 +1271,44 @@ export default function TableTapyApplePOS() {
                   placeholder="Guest phone..."
                   value={customerPhone}
                   onChange={(e) => setCustomerPhone(e.target.value)}
-                  className="w-28 px-2 py-0.5 bg-neutral-50 border border-neutral-200 rounded-lg text-xs font-mono outline-none"
+                  className="w-28 px-2 py-0.5 bg-zinc-50 border border-zinc-200 rounded text-xs font-mono outline-none"
                 />
               )}
             </div>
           </div>
 
-          {/* Ticket Body: Kitchen Rounds & Cart Stream */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* Ticket Items Stream */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 slim-scrollbar">
             
-            {/* Kitchen Queue Stream */}
+            {/* Items already sent to kitchen */}
             {terminalMode === "DINE_IN" && currentTableSession?.firedRounds && currentTableSession.firedRounds.length > 0 && (
               <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs font-semibold text-neutral-500 bg-neutral-100/70 px-3 py-1.5 rounded-xl">
+                <div className="flex items-center justify-between text-xs font-semibold text-zinc-600 bg-zinc-100/70 px-3 py-1.5 rounded-lg">
                   <div className="flex items-center gap-1.5">
-                    <Clock size={12} className="text-[#E46254]" />
-                    <span>In Kitchen ({currentTableSession.firedRounds.length})</span>
+                    <Clock size={12} className="text-zinc-500" />
+                    <span>Kitchen Orders ({currentTableSession.firedRounds.length})</span>
                   </div>
-                  <span className="text-[10px] text-neutral-400">Tap ✕ to Void</span>
+                  <span className="text-[10px] text-zinc-400">Tap ✕ to Void</span>
                 </div>
 
-                <div className="divide-y divide-neutral-100 bg-neutral-50/50 rounded-2xl p-2 border border-black/[0.03]">
+                <div className="divide-y divide-zinc-100 bg-white rounded-xl p-2 border border-zinc-200/80">
                   {currentTableSession.firedRounds.map((fi, idx) => (
                     <div key={`${fi.id}-${idx}`} className="py-2 px-1 flex items-center justify-between text-xs">
                       <div className="flex items-center gap-2.5 flex-1 pr-2">
-                        <span className="text-xs font-bold font-mono text-neutral-400 w-5">{fi.quantity}×</span>
+                        <span className="text-xs font-bold font-mono text-zinc-400 w-5">{fi.quantity}×</span>
                         <div>
-                          <p className="font-semibold text-neutral-900 leading-snug">{fi.name}</p>
+                          <p className="font-semibold text-zinc-900 leading-snug">{fi.name}</p>
                           <div className="flex items-center gap-1.5 mt-0.5">
-                            <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded-full uppercase ${
+                            <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded uppercase ${
                               fi.source === "QR"
-                                ? "bg-blue-50 text-blue-600"
+                                ? "bg-blue-50 text-blue-700 border border-blue-200"
                                 : fi.source === "CAPTAIN"
-                                ? "bg-purple-50 text-purple-600"
-                                : "bg-neutral-200 text-neutral-700"
+                                ? "bg-purple-50 text-purple-700 border border-purple-200"
+                                : "bg-zinc-100 text-zinc-700 border border-zinc-200"
                             }`}>
                               {fi.source === "QR" ? "Online QR" : fi.source === "CAPTAIN" ? "Captain" : "POS Counter"}
                             </span>
-                            <span className="text-[10px] font-mono text-neutral-400">
+                            <span className="text-[10px] font-mono text-zinc-400">
                               R#{fi.roundNumber}
                             </span>
                           </div>
@@ -1342,13 +1316,13 @@ export default function TableTapyApplePOS() {
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="font-bold text-neutral-900 font-mono tabular-nums">
+                        <span className="font-bold text-zinc-900 font-mono tabular-nums">
                           ₹{fi.price * fi.quantity}
                         </span>
 
                         <button
                           onClick={() => handleReprintKOT(fi.roundNumber)}
-                          className="text-neutral-400 hover:text-neutral-900 p-1 cursor-pointer transition-colors"
+                          className="text-zinc-400 hover:text-zinc-800 p-1 cursor-pointer transition-colors"
                           title="Reprint KOT"
                         >
                           <Printer size={13} />
@@ -1356,7 +1330,7 @@ export default function TableTapyApplePOS() {
 
                         <button
                           onClick={() => handleVoidFiredDish(fi.name, fi.price, fi.orderId)}
-                          className="text-neutral-300 hover:text-rose-600 p-1 cursor-pointer transition-colors"
+                          className="text-zinc-300 hover:text-rose-600 p-1 cursor-pointer transition-colors"
                           title="Void Item"
                         >
                           <X size={13} />
@@ -1368,10 +1342,10 @@ export default function TableTapyApplePOS() {
               </div>
             )}
 
-            {/* New Staff Cart (Ready to Send to Kitchen) */}
+            {/* Unfired Cart Items */}
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs font-semibold text-neutral-700 px-1">
-                <span>New Round {cart.length > 0 ? `(${cart.length})` : ""}</span>
+              <div className="flex items-center justify-between text-xs font-semibold text-zinc-700 px-1">
+                <span>New Items {cart.length > 0 ? `(${cart.length})` : ""}</span>
                 {cart.length > 0 && (
                   <span className="text-[10px] text-[#E46254] font-medium">Ready to fire</span>
                 )}
@@ -1379,45 +1353,45 @@ export default function TableTapyApplePOS() {
 
               {cart.length === 0 ? (
                 allCurrentItems.length === 0 ? (
-                  <div className="py-8 text-center text-neutral-400 text-xs">
-                    Tap dishes to add to this order
+                  <div className="py-8 text-center text-zinc-400 text-xs">
+                    Tap dishes to add to this check
                   </div>
                 ) : null
               ) : (
-                <div className="divide-y divide-neutral-100 bg-white rounded-2xl p-2 border border-[#E46254]/20 shadow-[0_2px_8px_rgba(228,98,84,0.06)]">
+                <div className="divide-y divide-zinc-100 bg-white rounded-xl p-2 border border-zinc-200/80">
                   {cart.map((item) => (
                     <div key={item.id} className="py-2 px-1 flex items-center justify-between text-xs">
                       <div className="flex-1 pr-2 truncate">
-                        <p className="font-bold text-neutral-900 truncate">{item.name}</p>
-                        <p className="text-[10px] text-neutral-400 font-mono">₹{item.price} each</p>
+                        <p className="font-semibold text-zinc-900 truncate">{item.name}</p>
+                        <p className="text-[10px] text-zinc-400 font-mono">₹{item.price} each</p>
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
-                        <div className="flex items-center bg-neutral-100 rounded-full p-0.5">
+                        <div className="flex items-center bg-zinc-100 rounded-md border border-zinc-200">
                           <button
                             onClick={() => updateCartQuantity(item.id, -1)}
-                            className="w-5 h-5 flex items-center justify-center rounded-full hover:bg-white text-neutral-600"
+                            className="p-1 text-zinc-600 hover:text-black cursor-pointer"
                           >
                             <Minus size={10} />
                           </button>
-                          <span className="w-5 text-center font-mono font-bold text-xs">
+                          <span className="w-4 text-center font-mono font-bold text-xs">
                             {item.quantity}
                           </span>
                           <button
                             onClick={() => updateCartQuantity(item.id, 1)}
-                            className="w-5 h-5 flex items-center justify-center rounded-full hover:bg-white text-neutral-900"
+                            className="p-1 text-zinc-600 hover:text-black cursor-pointer"
                           >
                             <Plus size={10} />
                           </button>
                         </div>
 
-                        <span className="text-xs font-bold text-neutral-900 w-12 text-right font-mono tabular-nums">
+                        <span className="text-xs font-bold text-zinc-900 w-12 text-right font-mono tabular-nums">
                           ₹{item.price * item.quantity}
                         </span>
 
                         <button
                           onClick={() => removeCartItem(item.id)}
-                          className="text-neutral-300 hover:text-rose-500 p-1 cursor-pointer transition-colors"
+                          className="text-zinc-300 hover:text-rose-500 p-1 cursor-pointer"
                         >
                           <Trash2 size={13} />
                         </button>
@@ -1429,16 +1403,14 @@ export default function TableTapyApplePOS() {
             </div>
           </div>
 
-          {/* ═════════════════════════════════════════════════════════════════
-              APPLE SETTLEMENT DOCK: Confident, Ergonomic Actions
-             ═════════════════════════════════════════════════════════════════ */}
-          <div className="shrink-0 p-4 bg-neutral-50/70 border-t border-black/[0.04] space-y-3">
+          {/* Bottom Financial Dock */}
+          <div className="shrink-0 p-4 bg-zinc-50 border-t border-zinc-200/80 space-y-3">
             
             {/* Calculation Lines */}
             <div className="space-y-1.5 text-xs">
-              <div className="flex justify-between text-neutral-500">
+              <div className="flex justify-between text-zinc-500">
                 <span>Subtotal</span>
-                <span className="font-semibold text-neutral-800 font-mono tabular-nums">₹{subtotal}</span>
+                <span className="font-semibold text-zinc-800 font-mono tabular-nums">₹{subtotal}</span>
               </div>
 
               {effectiveDiscount > 0 && (
@@ -1448,33 +1420,33 @@ export default function TableTapyApplePOS() {
                 </div>
               )}
 
-              <div className="flex justify-between text-neutral-500">
+              <div className="flex justify-between text-zinc-500">
                 <span className="flex items-center gap-1">
                   <span>Taxes (5% GST)</span>
                   <button
-                    onClick={() => setShowDiscountSheet((v) => !v)}
-                    className="text-[10px] text-[#E46254] underline cursor-pointer hover:brightness-110 ml-1"
+                    onClick={() => setShowDiscountSelector((v) => !v)}
+                    className="text-[10px] text-zinc-500 underline cursor-pointer hover:text-zinc-900 ml-1"
                   >
-                    {discountPercent > 0 ? "Edit Disc" : "+ Discount"}
+                    {discountPercent > 0 ? "Edit Disc" : "+ Disc"}
                   </button>
                 </span>
-                <span className="font-semibold text-neutral-800 font-mono tabular-nums">₹{taxTotal.toFixed(1)}</span>
+                <span className="font-semibold text-zinc-800 font-mono tabular-nums">₹{taxTotal.toFixed(1)}</span>
               </div>
 
-              {/* Quick Discount Selector */}
-              {showDiscountSheet && (
+              {/* Discount Selector */}
+              {showDiscountSelector && (
                 <div className="flex items-center gap-1 pt-1">
                   {[0, 5, 10, 15, 20].map((pct) => (
                     <button
                       key={pct}
                       onClick={() => {
                         setDiscountPercent(pct);
-                        setShowDiscountSheet(false);
+                        setShowDiscountSelector(false);
                       }}
-                      className={`flex-1 py-1 rounded-full text-[10px] font-semibold transition-colors cursor-pointer ${
+                      className={`flex-1 py-1 rounded-md text-[10px] font-semibold border cursor-pointer ${
                         discountPercent === pct
-                          ? "bg-neutral-900 text-white"
-                          : "bg-white text-neutral-600 border border-neutral-200"
+                          ? "bg-zinc-900 text-white border-zinc-900"
+                          : "bg-white text-zinc-600 border-zinc-200"
                       }`}
                     >
                       {pct === 0 ? "None" : `${pct}%`}
@@ -1484,54 +1456,54 @@ export default function TableTapyApplePOS() {
               )}
 
               {/* Total Due */}
-              <div className="flex items-center justify-between pt-2 border-t border-black/[0.04]">
-                <span className="text-xs font-bold text-neutral-800">Total Due</span>
-                <span className="text-xl font-black text-neutral-900 font-mono tabular-nums">
+              <div className="flex items-center justify-between pt-2 border-t border-zinc-200">
+                <span className="text-xs font-bold text-zinc-700">Total Due</span>
+                <span className="text-lg font-black text-zinc-900 font-mono tabular-nums">
                   ₹{grandTotal}
                 </span>
               </div>
             </div>
 
-            {/* ACTION 1: SEND TO KITCHEN & PRINT GUEST BILL */}
+            {/* Action Row 1: Send to Kitchen & Print Bill */}
             <div className="grid grid-cols-2 gap-2">
               <button
                 disabled={cart.length === 0 || isSubmitting}
                 onClick={handleSendToKitchen}
-                className="py-2.5 px-3 rounded-2xl bg-neutral-900 hover:bg-black disabled:opacity-40 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-[0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer transition-all duration-150 active:scale-[0.98]"
+                className="py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black disabled:opacity-40 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
               >
                 <Send size={13} />
-                <span>Fire Kitchen</span>
+                <span>Send to Kitchen</span>
               </button>
 
               <button
                 disabled={allCurrentItems.length === 0 || isSubmitting}
                 onClick={handlePrintGuestBill}
-                className="py-2.5 px-3 rounded-2xl border border-neutral-200 bg-white hover:bg-neutral-100 disabled:opacity-40 text-neutral-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all duration-150 active:scale-[0.98]"
+                className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
               >
                 <Printer size={13} />
                 <span>Print Bill</span>
               </button>
             </div>
 
-            {/* ACTION 2: PRIMARY EMERALD / BRAND SETTLE BUTTON */}
-            {!isPaymentSheetOpen ? (
+            {/* Action Row 2: Settle Button (TableTapy Coral Brand Accent) */}
+            {!isPaymentDrawerOpen ? (
               <button
                 disabled={allCurrentItems.length === 0 || isSubmitting}
-                onClick={() => setIsPaymentSheetOpen(true)}
-                className="w-full py-3.5 px-4 rounded-2xl bg-[#E46254] hover:bg-[#D55345] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-[0_4px_14px_rgba(228,98,84,0.35)] cursor-pointer transition-all duration-150 active:scale-[0.98]"
+                onClick={() => setIsPaymentDrawerOpen(true)}
+                className="w-full py-3 px-3 rounded-xl bg-[#E46254] hover:bg-[#D35546] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-2xs cursor-pointer transition-all"
               >
                 <CreditCard size={15} />
-                <span>Collect Payment & Settle · ₹{grandTotal}</span>
+                <span>Collect Payment & Settle (₹{grandTotal})</span>
               </button>
             ) : (
-              <div className="bg-white border border-black/[0.06] rounded-2xl p-3 shadow-[0_10px_30px_rgba(0,0,0,0.08)] space-y-2.5 animate-in fade-in zoom-in-95 duration-150">
+              <div className="bg-white border border-zinc-300 rounded-xl p-3 shadow-md space-y-2.5 animate-in fade-in zoom-in-95 duration-100">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-neutral-900">
-                    Settle ₹{grandTotal}
+                  <span className="text-xs font-bold text-zinc-900">
+                    Settle ₹{grandTotal} · Select Payment:
                   </span>
                   <button
-                    onClick={() => setIsPaymentSheetOpen(false)}
-                    className="p-1 text-neutral-400 hover:text-neutral-600 cursor-pointer"
+                    onClick={() => setIsPaymentDrawerOpen(false)}
+                    className="p-1 text-zinc-400 hover:text-zinc-600 cursor-pointer"
                   >
                     <X size={14} />
                   </button>
@@ -1541,39 +1513,39 @@ export default function TableTapyApplePOS() {
                   <button
                     disabled={isSubmitting}
                     onClick={() => handleQuickSettle("CASH")}
-                    className="py-2 px-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200/80 text-neutral-900 rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-all"
                   >
-                    <Banknote size={15} className="text-neutral-700" />
+                    <Banknote size={15} className="text-zinc-700" />
                     <span>Cash</span>
                   </button>
 
                   <button
                     disabled={isSubmitting}
                     onClick={() => handleQuickSettle("UPI")}
-                    className="py-2 px-1 bg-[#E46254]/8 hover:bg-[#E46254]/15 border border-[#E46254]/20 text-[#C2410C] rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                    className="py-2 px-1 bg-[#E46254]/8 hover:bg-[#E46254]/15 border border-[#E46254]/25 text-[#C2410C] rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-all"
                   >
                     <QrCode size={15} className="text-[#E46254]" />
-                    <span>UPI Pay</span>
+                    <span>UPI Received</span>
                   </button>
 
                   <button
                     disabled={isSubmitting}
                     onClick={() => handleQuickSettle("CARD")}
-                    className="py-2 px-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200/80 text-neutral-900 rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-all"
                   >
-                    <CreditCard size={15} className="text-neutral-700" />
+                    <CreditCard size={15} className="text-zinc-700" />
                     <span>Card</span>
                   </button>
                 </div>
 
-                {/* Tendered Cash Helper */}
-                <div className="flex items-center gap-2 pt-1 border-t border-neutral-100 text-xs">
+                {/* Tendered Change Calculator */}
+                <div className="flex items-center gap-2 pt-1 border-t border-zinc-100 text-xs">
                   <input
                     type="number"
                     placeholder="Cash given..."
                     value={cashTendered}
                     onChange={(e) => setCashTendered(e.target.value)}
-                    className="w-24 px-2 py-1 bg-neutral-50 border border-neutral-200 rounded-lg text-xs font-mono outline-none"
+                    className="w-24 px-2 py-1 bg-zinc-50 border border-zinc-300 rounded-md text-xs font-mono outline-none"
                   />
                   {parseFloat(cashTendered) > grandTotal && (
                     <span className="text-xs font-bold text-emerald-600 ml-auto font-mono">
@@ -1587,9 +1559,7 @@ export default function TableTapyApplePOS() {
         </div>
       </div>
 
-      {/* ═════════════════════════════════════════════════════════════════════
-          THERMAL CHIT ENGINE (80mm / 58mm Standard ESC/POS)
-         ═════════════════════════════════════════════════════════════════════ */}
+      {/* ── THERMAL RECEIPT ── */}
       <div id="thermal-chit" className="hidden print:block text-black bg-white font-mono text-[11px] leading-tight p-2">
         {printChit && (
           <div>
@@ -1694,14 +1664,14 @@ export default function TableTapyApplePOS() {
                   </div>
                 )}
                 
-                {/* Dynamic UPI QR on Printed Bill */}
+                {/* Dynamic Tabletop UPI QR */}
                 {upiId && (
                   <div className="text-center pt-2 pb-1 border-t my-1">
                     <div className="flex justify-center py-1">
                       <QRCode value={upiIntentUrl} size={100} />
                     </div>
                     <div className="text-[10px] font-bold">SCAN TO PAY VIA UPI</div>
-                    <div className="text-[9px] text-neutral-600">{upiId}</div>
+                    <div className="text-[9px] text-zinc-600">{upiId}</div>
                   </div>
                 )}
 

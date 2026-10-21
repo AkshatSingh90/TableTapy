@@ -106,10 +106,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   ];
 
-  if (pathname === '/dashboard/pos') {
-    return <>{children}</>;
-  }
-
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-gray-50 text-gray-900 relative pb-20 md:pb-0">
       
