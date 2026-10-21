@@ -25,17 +25,29 @@ import {
   Users,
   CheckCircle2,
   ChevronRight,
-  ExternalLink,
+  Percent,
+  ChefHat,
+  Tag,
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
 
-/* ─── Domain Types ─────────────────────────────────────────────────── */
+/* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
   id: string;
   name: string;
   type?: string;
   capacity?: number;
+}
+
+interface MenuItem {
+  id: string;
+  name: string;
+  category: string;
+  subcategory?: string;
+  base_price: number;
+  is_veg: boolean;
+  is_available: boolean;
 }
 
 interface OrderRecord {
@@ -53,13 +65,30 @@ interface OrderRecord {
   note?: string;
 }
 
-interface TableSessionData {
-  status: "COOKING" | "BILLED" | "VACANT";
-  orders: OrderRecord[];
+interface TableRound {
+  orderId: string;
+  roundNumber: number;
+  status: string;
+  source: "QR" | "STAFF" | "CAPTAIN";
+  createdAt: string;
   items: Array<{
     name: string;
     quantity: number;
     price: number;
+    isVeg?: boolean;
+    notes?: string;
+  }>;
+}
+
+interface TableSessionData {
+  status: "COOKING" | "BILLED" | "VACANT";
+  orders: OrderRecord[];
+  rounds: TableRound[];
+  allItems: Array<{
+    name: string;
+    quantity: number;
+    price: number;
+    isVeg?: boolean;
     notes?: string;
     source: "QR" | "STAFF" | "CAPTAIN";
     roundNumber: number;
@@ -73,31 +102,50 @@ interface TableSessionData {
   hasNewRound: boolean;
 }
 
+interface NewStaffItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+  isVeg: boolean;
+  category?: string;
+  notes?: string;
+}
+
 type TerminalMode = "DINE_IN" | "TAKEAWAY";
 type PaymentMethod = "CASH" | "UPI" | "CARD";
 
 export default function PosPage() {
   const supabase = createClient();
 
-  // Core State
+  // Core Platform Data
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
   const [restaurantName, setRestaurantName] = useState<string>("Restaurant");
   const [upiId, setUpiId] = useState<string>("");
   const [locations, setLocations] = useState<Location[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Mode & Filters
+  // Terminal Navigation & Filters
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("DINE_IN");
   const [tableFilter, setTableFilter] = useState<"ALL" | "OCCUPIED" | "VACANT">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Selected Table Drawer (when user taps an active or vacant card)
+  // Active Table Drawer
   const [activeTableModal, setActiveTableModal] = useState<string | null>(null);
 
-  // Settlement & Discount inside the table sheet
+  // Manual Add Dish State inside Drawer
+  const [isAddDishOpen, setIsAddDishOpen] = useState(false);
+  const [dishSearchQuery, setDishSearchQuery] = useState("");
+  const [manualCart, setManualCart] = useState<NewStaffItem[]>([]);
+  const [manualCustomerName, setManualCustomerName] = useState("");
+  const [manualCustomerPhone, setManualCustomerPhone] = useState("");
+
+  // Settlement & Discount State
   const [discountPercent, setDiscountPercent] = useState<number>(0);
+  const [customDiscountRupees, setCustomDiscountRupees] = useState<string>("");
   const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -113,6 +161,7 @@ export default function PosPage() {
     tableOrToken: string;
     kotNumber?: number;
     customerName?: string;
+    customerPhone?: string;
     items: Array<{ name: string; quantity: number; price?: number; notes?: string }>;
     subtotal?: number;
     discount?: number;
@@ -130,7 +179,7 @@ export default function PosPage() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  /* ─── 1. Load Data ──────────────────────────────────────────────── */
+  /* ─── 1. Load Data & Realtime Sync ──────────────────────────────── */
   const loadInitialData = async () => {
     setLoading(true);
     try {
@@ -175,9 +224,31 @@ export default function PosPage() {
         );
       }
 
+      // Menu Catalog for quick add
+      const { data: menuData } = await supabase
+        .from("menu_items_v2")
+        .select("*")
+        .eq("restaurant_id", restId)
+        .order("category", { ascending: true })
+        .order("name", { ascending: true });
+
+      if (menuData) {
+        setMenuItems(
+          menuData.map((row: any) => ({
+            id: row.id,
+            name: row.name,
+            category: row.category || "General",
+            subcategory: row.subcategory || "",
+            base_price: Number(row.base_price || 0),
+            is_veg: row.is_veg !== false,
+            is_available: row.is_available !== false,
+          }))
+        );
+      }
+
       await fetchActiveOrders(restId);
     } catch (err) {
-      console.error("Failed to load POS tables:", err);
+      console.error("Failed to load POS floor:", err);
     } finally {
       setLoading(false);
     }
@@ -207,6 +278,7 @@ export default function PosPage() {
       if (e.key === "Escape") {
         setActiveTableModal(null);
         setIsPaymentDrawerOpen(false);
+        setIsAddDishOpen(false);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -218,7 +290,7 @@ export default function PosPage() {
     if (!restaurantId) return;
 
     const channel = supabase
-      .channel("pos_tables_realtime")
+      .channel("pos_floor_sync")
       .on(
         "postgres_changes",
         {
@@ -242,12 +314,12 @@ export default function PosPage() {
   const tableSessionMap = useMemo(() => {
     const map = new Map<string, TableSessionData>();
 
-    // Initialize all tables as vacant
     locations.forEach((loc) => {
       map.set(loc.name, {
         status: "VACANT",
         orders: [],
-        items: [],
+        rounds: [],
+        allItems: [],
         totalBill: 0,
         hasNewRound: false,
       });
@@ -263,7 +335,8 @@ export default function PosPage() {
       const existing = map.get(order.table_no) || {
         status: "VACANT",
         orders: [],
-        items: [],
+        rounds: [],
+        allItems: [],
         totalBill: 0,
         hasNewRound: false,
       };
@@ -304,22 +377,39 @@ export default function PosPage() {
         orderSource = "CAPTAIN";
       }
 
-      const roundIndex = existing.orders.length;
+      const roundIndex = existing.rounds.length + 1;
+      const roundItems: Array<{ name: string; quantity: number; price: number; isVeg?: boolean; notes?: string }> = [];
 
       if (Array.isArray(order.items_json)) {
         order.items_json.forEach((raw: any) => {
           const itemObj = raw.item || raw;
-          existing.items.push({
+          const parsedItem = {
             name: itemObj.name || "Custom Item",
             price: Number(raw.price || itemObj.basePrice || itemObj.base_price || 0),
             quantity: Number(raw.quantity || 1),
+            isVeg: itemObj.isVeg ?? itemObj.is_veg ?? true,
             notes: raw.notes || raw.specialInstructions || "",
+          };
+
+          roundItems.push(parsedItem);
+
+          existing.allItems.push({
+            ...parsedItem,
             source: orderSource,
             roundNumber: roundIndex,
             orderId: order.id,
           });
         });
       }
+
+      existing.rounds.push({
+        orderId: order.id,
+        roundNumber: roundIndex,
+        status: order.status,
+        source: orderSource,
+        createdAt: order.created_at,
+        items: roundItems,
+      });
 
       if (order.payment_status === "PAID") {
         existing.status = "BILLED";
@@ -341,7 +431,6 @@ export default function PosPage() {
     );
   }, [activeOrders]);
 
-  // Counts
   const occupiedCount = Array.from(tableSessionMap.values()).filter(
     (s) => s.status !== "VACANT"
   ).length;
@@ -362,29 +451,99 @@ export default function PosPage() {
       return (
         loc.name.toLowerCase().includes(q) ||
         session?.customerName?.toLowerCase().includes(q) ||
-        session?.items.some((i) => i.name.toLowerCase().includes(q))
+        session?.customerPhone?.includes(q) ||
+        session?.allItems.some((i) => i.name.toLowerCase().includes(q))
       );
     });
   }, [locations, tableSessionMap, tableFilter, searchQuery]);
 
-  // Selected Table Session in Drawer
+  // Selected Table Session
   const activeSession = useMemo(() => {
     if (!activeTableModal) return null;
     return tableSessionMap.get(activeTableModal) || null;
   }, [activeTableModal, tableSessionMap]);
 
-  /* ─── Calculations for Selected Table ───────────────────────────── */
+  // Synchronize customer name & phone into edit inputs when table changes
+  useEffect(() => {
+    if (activeSession) {
+      setManualCustomerName(activeSession.customerName || "");
+      setManualCustomerPhone(activeSession.customerPhone || "");
+    } else {
+      setManualCustomerName("");
+      setManualCustomerPhone("");
+    }
+    setManualCart([]);
+    setIsAddDishOpen(false);
+    setIsPaymentDrawerOpen(false);
+    setDiscountPercent(0);
+    setCustomDiscountRupees("");
+  }, [activeTableModal]);
+
+  /* ─── 3. Manual Add Dish Helpers ────────────────────────────────── */
+  const filteredCatalog = useMemo(() => {
+    if (!dishSearchQuery.trim()) return menuItems.slice(0, 15);
+    const q = dishSearchQuery.toLowerCase().trim();
+    return menuItems.filter(
+      (m) =>
+        m.name.toLowerCase().includes(q) ||
+        m.category.toLowerCase().includes(q)
+    );
+  }, [menuItems, dishSearchQuery]);
+
+  const addToManualCart = (dish: MenuItem) => {
+    setManualCart((prev) => {
+      const idx = prev.findIndex((i) => i.id === dish.id);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx].quantity += 1;
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          id: dish.id,
+          name: dish.name,
+          price: dish.base_price,
+          quantity: 1,
+          isVeg: dish.is_veg,
+          category: dish.category,
+        },
+      ];
+    });
+  };
+
+  const updateManualQty = (id: string, delta: number) => {
+    setManualCart((prev) =>
+      prev
+        .map((item) => {
+          if (item.id === id) {
+            const newQty = item.quantity + delta;
+            return newQty > 0 ? { ...item, quantity: newQty } : null;
+          }
+          return item;
+        })
+        .filter(Boolean) as NewStaffItem[]
+    );
+  };
+
+  /* ─── 4. Financial Calculations ─────────────────────────────────── */
   const subtotal = useMemo(() => {
-    if (!activeSession) return 0;
-    return activeSession.items.reduce((s, it) => s + it.price * it.quantity, 0);
-  }, [activeSession]);
+    const existingTotal = activeSession
+      ? activeSession.allItems.reduce((s, it) => s + it.price * it.quantity, 0)
+      : 0;
+    const manualTotal = manualCart.reduce((s, it) => s + it.price * it.quantity, 0);
+    return existingTotal + manualTotal;
+  }, [activeSession, manualCart]);
 
   const effectiveDiscount = useMemo(() => {
+    if (customDiscountRupees && !isNaN(parseFloat(customDiscountRupees))) {
+      return Math.min(subtotal, parseFloat(customDiscountRupees));
+    }
     return (subtotal * discountPercent) / 100;
-  }, [subtotal, discountPercent]);
+  }, [subtotal, discountPercent, customDiscountRupees]);
 
   const taxTotal = useMemo(() => {
-    return (subtotal - effectiveDiscount) * 0.05; // 5% GST
+    return Math.max(0, (subtotal - effectiveDiscount) * 0.05); // 5% GST
   }, [subtotal, effectiveDiscount]);
 
   const grandTotal = useMemo(() => {
@@ -397,9 +556,86 @@ export default function PosPage() {
     return Math.round(tendered - grandTotal);
   }, [cashTendered, grandTotal]);
 
-  /* ─── Thermal Printing & Settle ─────────────────────────────────── */
+  /* ─── 5. Actions: Send KOT, Print Bill, Settle ──────────────────── */
+  const handleSendManualKOT = async () => {
+    if (manualCart.length === 0 || !activeTableModal) return;
+
+    setIsSubmitting(true);
+    try {
+      const itemsPayload = manualCart.map((c) => ({
+        item: {
+          id: c.id,
+          name: c.name,
+          basePrice: c.price,
+          category: c.category,
+          isVeg: c.isVeg,
+        },
+        price: c.price,
+        quantity: c.quantity,
+        notes: c.notes || "",
+        isReady: false,
+      }));
+
+      const roundNum = (activeSession?.rounds.length || 0) + 1;
+
+      const { error } = await supabase.from("orders").insert({
+        restaurant_id: restaurantId,
+        table_no: activeTableModal,
+        total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+        status: "PREPARING",
+        payment_status: "PENDING",
+        customer_name: manualCustomerName.trim() || activeSession?.customerName || `Table ${activeTableModal}`,
+        customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
+        items_json: itemsPayload,
+        note: `[POS Fired Round #${roundNum}]`,
+      });
+
+      if (error) throw error;
+
+      // Print Thermal KOT Chit
+      setPrintChit({
+        type: "KOT",
+        mode: "DINE_IN",
+        tableOrToken: activeTableModal,
+        kotNumber: roundNum,
+        customerName: manualCustomerName.trim() || activeSession?.customerName,
+        customerPhone: manualCustomerPhone.trim() || activeSession?.customerPhone,
+        items: manualCart.map((c) => ({
+          name: c.name,
+          quantity: c.quantity,
+          notes: c.notes,
+        })),
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      });
+
+      showToast(`KOT Round #${roundNum} sent to kitchen`);
+      setManualCart([]);
+      setIsAddDishOpen(false);
+
+      if (restaurantId) fetchActiveOrders(restaurantId);
+
+      setTimeout(() => {
+        window.print();
+      }, 100);
+    } catch (err: any) {
+      showToast("Failed to fire KOT: " + (err.message || "Network Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handlePrintGuestBill = () => {
-    if (!activeSession || activeSession.items.length === 0) {
+    if (!activeTableModal) return;
+    const combinedItems = [
+      ...(activeSession?.allItems || []),
+      ...manualCart.map((c) => ({
+        name: c.name,
+        quantity: c.quantity,
+        price: c.price,
+      })),
+    ];
+
+    if (combinedItems.length === 0) {
       showToast("No active items on this table");
       return;
     }
@@ -407,9 +643,10 @@ export default function PosPage() {
     setPrintChit({
       type: "BILL",
       mode: "DINE_IN",
-      tableOrToken: activeTableModal || "Table",
-      customerName: activeSession.customerName || `Table ${activeTableModal}`,
-      items: activeSession.items,
+      tableOrToken: activeTableModal,
+      customerName: manualCustomerName.trim() || activeSession?.customerName || `Table ${activeTableModal}`,
+      customerPhone: manualCustomerPhone.trim() || activeSession?.customerPhone,
+      items: combinedItems,
       subtotal,
       discount: effectiveDiscount,
       tax: taxTotal,
@@ -422,21 +659,20 @@ export default function PosPage() {
     }, 100);
   };
 
-  const handleReprintKOT = (roundNum: number) => {
-    if (!activeSession) return;
-    const roundItems = activeSession.items.filter((i) => i.roundNumber === roundNum);
-    if (roundItems.length === 0) return;
+  const handleReprintKOT = (round: TableRound) => {
+    if (!activeTableModal || round.items.length === 0) return;
 
     setPrintChit({
       type: "KOT",
       mode: "DINE_IN",
-      tableOrToken: activeTableModal || "Table",
-      kotNumber: roundNum,
-      customerName: activeSession.customerName,
-      items: roundItems.map((i) => ({
+      tableOrToken: activeTableModal,
+      kotNumber: round.roundNumber,
+      customerName: activeSession?.customerName,
+      customerPhone: activeSession?.customerPhone,
+      items: round.items.map((i) => ({
         name: i.name,
         quantity: i.quantity,
-        notes: `REPRINT - Round #${roundNum}`,
+        notes: `REPRINT - Round #${round.roundNumber}`,
       })),
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
@@ -447,14 +683,14 @@ export default function PosPage() {
   };
 
   const handleSettleTable = async (method: PaymentMethod) => {
-    if (!activeSession || activeSession.items.length === 0 || !activeTableModal) {
+    if (!activeTableModal || subtotal === 0) {
       showToast("No items to settle");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const orderIds = activeSession.orders.map((o) => o.id);
+      const orderIds = (activeSession?.orders || []).map((o) => o.id);
 
       if (orderIds.length > 0) {
         await supabase
@@ -469,15 +705,48 @@ export default function PosPage() {
           .in("id", orderIds);
       }
 
+      // If manual items were left in cart, commit them directly as settled
+      if (manualCart.length > 0) {
+        const unsavedPayload = manualCart.map((c) => ({
+          item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
+          price: c.price,
+          quantity: c.quantity,
+          isReady: true,
+        }));
+
+        await supabase.from("orders").insert({
+          restaurant_id: restaurantId,
+          table_no: activeTableModal,
+          total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+          status: "COMPLETED",
+          payment_status: "PAID",
+          payment_method: method,
+          customer_name: manualCustomerName.trim() || activeSession?.customerName || `Guest (${activeTableModal})`,
+          customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
+          items_json: unsavedPayload,
+          note: `[POS Addon Settled: ${method}]`,
+        });
+      }
+
       showToast(`Table ${activeTableModal} settled ₹${grandTotal} via ${method}`);
+
+      const combinedItems = [
+        ...(activeSession?.allItems || []),
+        ...manualCart.map((c) => ({
+          name: c.name,
+          quantity: c.quantity,
+          price: c.price,
+        })),
+      ];
 
       setPrintChit({
         type: "BILL",
         mode: "DINE_IN",
         tableOrToken: activeTableModal,
-        customerName: activeSession.customerName,
+        customerName: manualCustomerName.trim() || activeSession?.customerName,
+        customerPhone: manualCustomerPhone.trim() || activeSession?.customerPhone,
         paymentMethod: method,
-        items: activeSession.items,
+        items: combinedItems,
         subtotal,
         discount: effectiveDiscount,
         tax: taxTotal,
@@ -487,7 +756,9 @@ export default function PosPage() {
 
       setActiveTableModal(null);
       setIsPaymentDrawerOpen(false);
+      setManualCart([]);
       setDiscountPercent(0);
+      setCustomDiscountRupees("");
 
       if (restaurantId) fetchActiveOrders(restaurantId);
 
@@ -531,7 +802,7 @@ export default function PosPage() {
 
           <div className="h-4 w-px bg-zinc-200 mx-1" />
 
-          {/* Mode Tabs */}
+          {/* Mode Switcher */}
           <div className="flex items-center bg-zinc-100 p-0.5 rounded-lg border border-zinc-200/80">
             <button
               onClick={() => setTerminalMode("DINE_IN")}
@@ -559,14 +830,14 @@ export default function PosPage() {
           </div>
         </div>
 
-        {/* Search & Actions */}
+        {/* Search & Refresh */}
         <div className="flex items-center gap-2">
           <div className="relative w-64 md:w-72">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
             <input
               ref={searchInputRef}
               type="text"
-              placeholder="Search tables or guests... (Press '/')"
+              placeholder="Search tables, guests, phone... (Press '/')"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-zinc-50 border border-zinc-200 rounded-xl pl-9 pr-8 py-1.5 text-[12.5px] placeholder:text-zinc-400 outline-none focus:border-zinc-400 focus:bg-white transition-all font-medium"
@@ -642,7 +913,7 @@ export default function PosPage() {
         </Link>
       </div>
 
-      {/* ── ALL THE TABLES IN CARDS ── */}
+      {/* ── FLOOR TABLES GRID ── */}
       <div className="flex-1 overflow-y-auto p-6 slim-scrollbar">
         {locations.length === 0 ? (
           <div className="h-[60vh] flex flex-col items-center justify-center text-center p-8 bg-white rounded-2xl border border-dashed border-zinc-200 max-w-md mx-auto">
@@ -671,17 +942,15 @@ export default function PosPage() {
             {filteredTables.map((loc) => {
               const session = tableSessionMap.get(loc.name);
               const isOccupied = session && session.status !== "VACANT";
-              const itemCount = session?.items.reduce((s, it) => s + it.quantity, 0) || 0;
+              const itemCount = session?.allItems.reduce((s, it) => s + it.quantity, 0) || 0;
 
-              // Elapsed time calculation
               const elapsedMinutes = session?.firstOrderAt
                 ? Math.max(0, Math.floor((Date.now() - new Date(session.firstOrderAt).getTime()) / 60000))
                 : 0;
 
-              // Sources present in session
-              const hasQR = session?.items.some((i) => i.source === "QR");
-              const hasCaptain = session?.items.some((i) => i.source === "CAPTAIN");
-              const hasPOS = session?.items.some((i) => i.source === "STAFF");
+              const hasQR = session?.allItems.some((i) => i.source === "QR");
+              const hasCaptain = session?.allItems.some((i) => i.source === "CAPTAIN");
+              const hasPOS = session?.allItems.some((i) => i.source === "STAFF");
 
               return (
                 <div
@@ -694,7 +963,7 @@ export default function PosPage() {
                   }`}
                 >
                   <div>
-                    {/* Top Header: Table Name & Status Badge */}
+                    {/* Header: Table Name & Status Badge */}
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <div>
                         <h2 className="text-base font-bold text-zinc-900 tracking-tight group-hover:text-[#E46254] transition-colors">
@@ -720,7 +989,7 @@ export default function PosPage() {
                       )}
                     </div>
 
-                    {/* Middle: Active Session Details or Vacant Placeholder */}
+                    {/* Middle: Active Session Details or Vacant State */}
                     {isOccupied ? (
                       <div className="space-y-2 mt-3 pt-3 border-t border-zinc-100">
                         {/* Guest & Timer */}
@@ -737,8 +1006,16 @@ export default function PosPage() {
                           </span>
                         </div>
 
-                        {/* Order Origin Tags */}
-                        <div className="flex items-center gap-1 flex-wrap">
+                        {/* Customer Phone if present */}
+                        {session?.customerPhone && (
+                          <div className="flex items-center gap-1 text-[11px] text-zinc-500 font-mono">
+                            <Phone size={10} className="text-zinc-400" />
+                            <span>{session.customerPhone}</span>
+                          </div>
+                        )}
+
+                        {/* Order Origin Tags & Rounds Count */}
+                        <div className="flex items-center gap-1 flex-wrap pt-0.5">
                           {hasQR && (
                             <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-200">
                               Online QR
@@ -754,8 +1031,8 @@ export default function PosPage() {
                               POS
                             </span>
                           )}
-                          <span className="text-[10.5px] text-zinc-400 ml-auto font-medium">
-                            {itemCount} {itemCount === 1 ? "item" : "items"}
+                          <span className="text-[10px] text-zinc-400 ml-auto font-mono">
+                            {session?.rounds.length} {session?.rounds.length === 1 ? "round" : "rounds"}
                           </span>
                         </div>
                       </div>
@@ -782,12 +1059,12 @@ export default function PosPage() {
                           </span>
                         </div>
                         <span className="px-3 py-1.5 rounded-lg bg-[#E46254] text-white text-xs font-semibold group-hover:brightness-105 transition-all shadow-2xs">
-                          View Bill
+                          View & Settle
                         </span>
                       </>
                     ) : (
                       <span className="w-full text-center py-1.5 rounded-lg bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-600 text-xs font-semibold transition-colors">
-                        Available
+                        + Start Order
                       </span>
                     )}
                   </div>
@@ -801,26 +1078,52 @@ export default function PosPage() {
       {/* ── TABLE DETAILS MODAL / DRAWER ── */}
       {activeTableModal && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl max-w-lg w-full border border-zinc-200 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-2xl max-w-xl w-full border border-zinc-200 shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-150">
             
             {/* Modal Header */}
-            <div className="p-4 border-b border-zinc-200 flex items-center justify-between bg-zinc-50/50">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center font-bold text-sm">
+            <div className="p-4 border-b border-zinc-200 flex items-center justify-between bg-zinc-50/70">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center font-bold text-base shadow-2xs">
                   {activeTableModal.replace(/[^0-9]/g, "") || "T"}
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-zinc-900 tracking-tight">
-                    {activeTableModal}
-                  </h3>
-                  <div className="flex items-center gap-1.5 text-xs text-zinc-500 font-medium">
-                    <User size={12} className="text-zinc-400" />
-                    <span>{activeSession?.customerName || "Dine-in Guest"}</span>
-                    {activeSession?.customerPhone && (
-                      <span className="text-zinc-400 font-mono text-[11px]">
-                        · {activeSession.customerPhone}
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-zinc-900 tracking-tight">
+                      {activeTableModal}
+                    </h3>
+                    {activeSession && activeSession.status !== "VACANT" ? (
+                      <span className="px-2 py-0.2 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
+                        Occupied · {activeSession.rounds.length} {activeSession.rounds.length === 1 ? "Round" : "Rounds"}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-700 text-[10.5px] font-semibold border border-emerald-500/20">
+                        Vacant Table
                       </span>
                     )}
+                  </div>
+
+                  {/* Guest Identity Details */}
+                  <div className="flex items-center gap-3 text-xs text-zinc-500 mt-1 font-medium">
+                    <div className="flex items-center gap-1.5">
+                      <User size={12} className="text-zinc-400" />
+                      <input
+                        type="text"
+                        placeholder="Guest Name..."
+                        value={manualCustomerName}
+                        onChange={(e) => setManualCustomerName(e.target.value)}
+                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-semibold text-zinc-800 w-28 placeholder:text-zinc-400"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Phone size={12} className="text-zinc-400" />
+                      <input
+                        type="tel"
+                        placeholder="Phone Number..."
+                        value={manualCustomerPhone}
+                        onChange={(e) => setManualCustomerPhone(e.target.value)}
+                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-mono text-zinc-700 w-28 placeholder:text-zinc-400"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -829,187 +1132,396 @@ export default function PosPage() {
                 onClick={() => {
                   setActiveTableModal(null);
                   setIsPaymentDrawerOpen(false);
+                  setIsAddDishOpen(false);
                 }}
-                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer transition-colors"
               >
                 <X size={18} />
               </button>
             </div>
 
-            {/* Modal Items Body */}
+            {/* Modal Scroll Body */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 slim-scrollbar">
-              {!activeSession || activeSession.items.length === 0 ? (
-                <div className="py-12 text-center text-zinc-400 text-xs">
-                  <UtensilsCrossed size={28} className="text-zinc-300 mx-auto mb-2" />
-                  <p className="font-semibold text-zinc-700 text-sm">Table is currently vacant</p>
-                  <p className="text-zinc-400 mt-1">Guests can scan the table QR code to order, or captain can punch an order.</p>
-                </div>
-              ) : (
+              
+              {/* ROUNDS STREAM: Shows items already ordered */}
+              {activeSession && activeSession.rounds.length > 0 && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between text-xs font-semibold text-zinc-600 bg-zinc-100/70 px-3 py-1.5 rounded-lg">
-                    <span>Ordered Dishes ({activeSession.items.length})</span>
-                    <span>Subtotal: ₹{subtotal}</span>
+                    <span>Order Rounds ({activeSession.rounds.length})</span>
+                    <span>Running Items: {activeSession.allItems.length}</span>
                   </div>
 
-                  <div className="divide-y divide-zinc-100 bg-white rounded-xl border border-zinc-200/80 p-2">
-                    {activeSession.items.map((it, idx) => (
-                      <div key={idx} className="py-2.5 px-2 flex items-center justify-between text-xs">
-                        <div className="flex items-center gap-2.5 flex-1 pr-2">
-                          <span className="font-bold font-mono text-zinc-400 w-5">{it.quantity}×</span>
-                          <div>
-                            <p className="font-semibold text-zinc-900 leading-snug">{it.name}</p>
-                            <div className="flex items-center gap-1.5 mt-0.5">
-                              <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded uppercase ${
-                                it.source === "QR"
-                                  ? "bg-blue-50 text-blue-700 border border-blue-200"
-                                  : it.source === "CAPTAIN"
-                                  ? "bg-purple-50 text-purple-700 border border-purple-200"
-                                  : "bg-zinc-100 text-zinc-700 border border-zinc-200"
-                              }`}>
-                                {it.source === "QR" ? "Online QR" : it.source === "CAPTAIN" ? "Captain" : "POS Counter"}
-                              </span>
-                              <span className="text-[10px] font-mono text-zinc-400">
-                                Round #{it.roundNumber}
-                              </span>
-                            </div>
+                  <div className="space-y-2.5">
+                    {activeSession.rounds.map((round) => (
+                      <div
+                        key={round.orderId}
+                        className="bg-white rounded-xl border border-zinc-200/80 p-3 space-y-2 shadow-2xs"
+                      >
+                        {/* Round Header */}
+                        <div className="flex items-center justify-between text-xs pb-1.5 border-b border-zinc-100">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-zinc-900 font-mono">
+                              Round #{round.roundNumber}
+                            </span>
+                            <span className={`text-[9.5px] font-bold px-1.5 py-0.2 rounded uppercase ${
+                              round.source === "QR"
+                                ? "bg-blue-50 text-blue-700 border border-blue-200"
+                                : round.source === "CAPTAIN"
+                                ? "bg-purple-50 text-purple-700 border border-purple-200"
+                                : "bg-zinc-100 text-zinc-700 border border-zinc-200"
+                            }`}>
+                              {round.source === "QR" ? "Online QR" : round.source === "CAPTAIN" ? "Captain App" : "POS Counter"}
+                            </span>
+                            <span className="text-[10px] text-zinc-400">
+                              {new Date(round.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            </span>
                           </div>
+
+                          {/* 1-Click KOT Reprint */}
+                          <button
+                            onClick={() => handleReprintKOT(round)}
+                            className="px-2 py-0.5 rounded-md text-[11px] font-semibold text-zinc-600 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
+                            title="Reprint KOT Chit"
+                          >
+                            <Printer size={12} />
+                            <span>Reprint KOT</span>
+                          </button>
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="font-bold text-zinc-900 font-mono tabular-nums">
+                        {/* Round Items List */}
+                        <div className="divide-y divide-zinc-50">
+                          {round.items.map((it, idx) => (
+                            <div key={idx} className="py-1.5 flex items-center justify-between text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold font-mono text-zinc-500 w-5">{it.quantity}×</span>
+                                <div>
+                                  <span className="font-medium text-zinc-900">{it.name}</span>
+                                  {it.notes && (
+                                    <span className="text-[10.5px] text-zinc-400 italic block">
+                                      Note: {it.notes}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <span className="font-bold font-mono tabular-nums text-zinc-800">
+                                ₹{it.price * it.quantity}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* MANUAL DISHES IN CURRENT STAFF BATCH (Ready to Fire) */}
+              {manualCart.length > 0 && (
+                <div className="space-y-2 bg-amber-50/50 border border-amber-200 rounded-xl p-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-1.5 font-bold text-amber-900">
+                      <ChefHat size={14} className="text-amber-600" />
+                      <span>New Dishes to Fire ({manualCart.length})</span>
+                    </div>
+                    <button
+                      onClick={() => setManualCart([])}
+                      className="text-[10.5px] text-zinc-400 hover:text-rose-600 font-medium"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  <div className="divide-y divide-amber-100/70">
+                    {manualCart.map((it) => (
+                      <div key={it.id} className="py-1.5 flex items-center justify-between text-xs">
+                        <div className="flex-1 pr-2">
+                          <p className="font-bold text-zinc-900">{it.name}</p>
+                          <p className="text-[10.5px] text-zinc-500 font-mono">₹{it.price} each</p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center bg-white rounded-md border border-amber-200">
+                            <button
+                              onClick={() => updateManualQty(it.id, -1)}
+                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                            >
+                              <Minus size={10} />
+                            </button>
+                            <span className="w-4 text-center font-mono font-bold text-xs">
+                              {it.quantity}
+                            </span>
+                            <button
+                              onClick={() => updateManualQty(it.id, 1)}
+                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                            >
+                              <Plus size={10} />
+                            </button>
+                          </div>
+
+                          <span className="w-12 text-right font-mono font-bold text-zinc-900 tabular-nums">
                             ₹{it.price * it.quantity}
                           </span>
+
                           <button
-                            onClick={() => handleReprintKOT(it.roundNumber)}
-                            className="text-zinc-400 hover:text-zinc-900 p-1 cursor-pointer transition-colors"
-                            title="Reprint KOT"
+                            onClick={() => setManualCart((prev) => prev.filter((i) => i.id !== it.id))}
+                            className="text-zinc-300 hover:text-rose-600 p-1"
                           >
-                            <Printer size={13} />
+                            <Trash2 size={12} />
                           </button>
                         </div>
                       </div>
                     ))}
                   </div>
 
-                  {/* Calculations */}
-                  <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-200/80 space-y-1.5 text-xs">
-                    <div className="flex justify-between text-zinc-500">
-                      <span>Subtotal</span>
-                      <span className="font-semibold text-zinc-800 font-mono">₹{subtotal}</span>
-                    </div>
+                  <button
+                    disabled={isSubmitting}
+                    onClick={handleSendManualKOT}
+                    className="w-full mt-2 py-2 px-3 rounded-lg bg-zinc-900 hover:bg-black text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
+                  >
+                    <Send size={13} />
+                    <span>Fire KOT to Kitchen (Round #{(activeSession?.rounds.length || 0) + 1})</span>
+                  </button>
+                </div>
+              )}
 
-                    {effectiveDiscount > 0 && (
-                      <div className="flex justify-between text-emerald-600 font-semibold">
-                        <span>Discount ({discountPercent}%)</span>
-                        <span className="font-mono">-₹{effectiveDiscount.toFixed(1)}</span>
-                      </div>
-                    )}
+              {/* QUICK MANUAL ADD DISH ACCORDION */}
+              <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                <button
+                  type="button"
+                  onClick={() => setIsAddDishOpen((v) => !v)}
+                  className="w-full p-3 bg-zinc-50/70 hover:bg-zinc-100/70 flex items-center justify-between text-xs font-bold text-zinc-800 transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <Plus size={14} className="text-[#E46254]" />
+                    <span>Add Dish Manually to Table</span>
+                  </div>
+                  <span className="text-[11px] font-medium text-zinc-400">
+                    {isAddDishOpen ? "Hide Menu" : "Browse Menu"}
+                  </span>
+                </button>
 
-                    <div className="flex justify-between text-zinc-500">
-                      <span className="flex items-center gap-1">
-                        <span>Taxes (5% GST)</span>
+                {isAddDishOpen && (
+                  <div className="p-3 border-t border-zinc-200 space-y-2.5">
+                    {/* Search Dishes */}
+                    <div className="relative">
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={13} />
+                      <input
+                        type="text"
+                        placeholder="Search menu (e.g. Naan, Chai, Burger)..."
+                        value={dishSearchQuery}
+                        onChange={(e) => setDishSearchQuery(e.target.value)}
+                        className="w-full pl-8 pr-7 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-medium outline-none focus:border-zinc-400 focus:bg-white"
+                      />
+                      {dishSearchQuery && (
                         <button
-                          onClick={() => setDiscountPercent((p) => (p === 0 ? 10 : 0))}
-                          className="text-[10px] text-zinc-500 underline ml-1 cursor-pointer hover:text-zinc-900"
+                          onClick={() => setDishSearchQuery("")}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
                         >
-                          {discountPercent > 0 ? "Remove Disc" : "+ 10% Disc"}
+                          <X size={12} />
                         </button>
-                      </span>
-                      <span className="font-semibold text-zinc-800 font-mono">₹{taxTotal.toFixed(1)}</span>
+                      )}
                     </div>
 
-                    <div className="flex items-center justify-between pt-2 border-t border-zinc-200">
-                      <span className="text-xs font-bold text-zinc-800">Grand Total</span>
-                      <span className="text-base font-black text-zinc-900 font-mono">₹{grandTotal}</span>
+                    {/* Catalog Mini List */}
+                    <div className="max-h-44 overflow-y-auto slim-scrollbar divide-y divide-zinc-100 border border-zinc-100 rounded-lg">
+                      {filteredCatalog.length === 0 ? (
+                        <div className="py-4 text-center text-xs text-zinc-400">
+                          No dishes found
+                        </div>
+                      ) : (
+                        filteredCatalog.map((dish) => (
+                          <div
+                            key={dish.id}
+                            className="p-2 flex items-center justify-between hover:bg-zinc-50 text-xs"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                  dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
+                                }`}
+                              />
+                              <span className="font-semibold text-zinc-800">{dish.name}</span>
+                              <span className="text-[10px] text-zinc-400 font-mono">({dish.category})</span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-bold text-zinc-900">
+                                ₹{dish.base_price}
+                              </span>
+                              <button
+                                onClick={() => addToManualCart(dish)}
+                                className="px-2 py-0.5 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer"
+                              >
+                                + Add
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
                     </div>
+                  </div>
+                )}
+              </div>
+
+              {/* CALCULATIONS & BILL BREAKDOWN */}
+              {subtotal > 0 && (
+                <div className="bg-zinc-50 rounded-xl p-3.5 border border-zinc-200/80 space-y-2 text-xs">
+                  <div className="flex justify-between text-zinc-500">
+                    <span>Subtotal</span>
+                    <span className="font-semibold text-zinc-800 font-mono">₹{subtotal}</span>
+                  </div>
+
+                  {/* DISCOUNT CALCULATOR */}
+                  <div className="space-y-1.5 pt-1 border-t border-zinc-200/60">
+                    <div className="flex items-center justify-between text-zinc-600">
+                      <span className="flex items-center gap-1 font-medium">
+                        <Tag size={12} className="text-[#E46254]" />
+                        <span>Discount:</span>
+                      </span>
+                      {effectiveDiscount > 0 && (
+                        <span className="font-bold text-emerald-600 font-mono">
+                          -₹{effectiveDiscount.toFixed(1)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      {[0, 5, 10, 15, 20].map((pct) => (
+                        <button
+                          key={pct}
+                          onClick={() => {
+                            setDiscountPercent(pct);
+                            setCustomDiscountRupees("");
+                          }}
+                          className={`flex-1 py-1 rounded-md text-[10.5px] font-semibold border cursor-pointer transition-colors ${
+                            discountPercent === pct && !customDiscountRupees
+                              ? "bg-zinc-900 text-white border-zinc-900"
+                              : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-100"
+                          }`}
+                        >
+                          {pct === 0 ? "None" : `${pct}%`}
+                        </button>
+                      ))}
+
+                      {/* Custom Rupee Discount */}
+                      <input
+                        type="number"
+                        placeholder="₹ Off"
+                        value={customDiscountRupees}
+                        onChange={(e) => {
+                          setCustomDiscountRupees(e.target.value);
+                          setDiscountPercent(0);
+                        }}
+                        className="w-16 px-1.5 py-1 bg-white border border-zinc-200 rounded-md text-[10.5px] font-mono outline-none text-center"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Taxes (5% GST) */}
+                  <div className="flex justify-between text-zinc-500 pt-1 border-t border-zinc-200/60">
+                    <span>Taxes (5% GST)</span>
+                    <span className="font-semibold text-zinc-800 font-mono">₹{taxTotal.toFixed(1)}</span>
+                  </div>
+
+                  {/* Grand Total */}
+                  <div className="flex items-center justify-between pt-2 border-t border-zinc-200">
+                    <div>
+                      <span className="text-xs font-bold text-zinc-800 block">Grand Total Due</span>
+                      <span className="text-[10px] text-zinc-400 font-medium">Includes taxes & discounts</span>
+                    </div>
+                    <span className="text-lg font-black text-zinc-900 font-mono tabular-nums">
+                      ₹{grandTotal}
+                    </span>
                   </div>
                 </div>
               )}
             </div>
 
             {/* Modal Bottom Actions */}
-            {activeSession && activeSession.items.length > 0 && (
-              <div className="p-4 bg-white border-t border-zinc-200 space-y-2.5">
-                {!isPaymentDrawerOpen ? (
-                  <div className="grid grid-cols-2 gap-2">
+            <div className="p-4 bg-white border-t border-zinc-200 space-y-2.5">
+              {subtotal === 0 ? (
+                <div className="text-center text-xs text-zinc-400 py-1">
+                  Table is vacant. Use "+ Add Dish Manually" to start an order.
+                </div>
+              ) : !isPaymentDrawerOpen ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={handlePrintGuestBill}
+                    className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                  >
+                    <Printer size={14} />
+                    <span>Print Guest Bill</span>
+                  </button>
+
+                  <button
+                    onClick={() => setIsPaymentDrawerOpen(true)}
+                    className="py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#D35546] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                  >
+                    <CreditCard size={14} />
+                    <span>Settle Bill (₹{grandTotal})</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2.5 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-900">
+                      Settle ₹{grandTotal} · Select Payment:
+                    </span>
                     <button
-                      onClick={handlePrintGuestBill}
-                      className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                      onClick={() => setIsPaymentDrawerOpen(false)}
+                      className="text-zinc-400 hover:text-zinc-600 p-0.5"
                     >
-                      <Printer size={14} />
-                      <span>Print Guest Bill</span>
+                      <X size={14} />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      disabled={isSubmitting}
+                      onClick={() => handleSettleTable("CASH")}
+                      className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                    >
+                      <Banknote size={15} className="text-zinc-700" />
+                      <span>Cash</span>
                     </button>
 
                     <button
-                      onClick={() => setIsPaymentDrawerOpen(true)}
-                      className="py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#D35546] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                      disabled={isSubmitting}
+                      onClick={() => handleSettleTable("UPI")}
+                      className="py-2 px-1 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/30 text-[#C2410C] rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
                     >
-                      <CreditCard size={14} />
-                      <span>Settle Bill (₹{grandTotal})</span>
+                      <QrCode size={15} className="text-[#E46254]" />
+                      <span>UPI</span>
+                    </button>
+
+                    <button
+                      disabled={isSubmitting}
+                      onClick={() => handleSettleTable("CARD")}
+                      className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                    >
+                      <CreditCard size={15} className="text-zinc-700" />
+                      <span>Card</span>
                     </button>
                   </div>
-                ) : (
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2.5 animate-in fade-in zoom-in-95 duration-100">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-zinc-900">
-                        Select Settle Method (₹{grandTotal}):
+
+                  {/* Cash Change Tendered */}
+                  <div className="flex items-center gap-2 pt-1 border-t border-zinc-200 text-xs">
+                    <input
+                      type="number"
+                      placeholder="Cash given..."
+                      value={cashTendered}
+                      onChange={(e) => setCashTendered(e.target.value)}
+                      className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-md text-xs font-mono outline-none"
+                    />
+                    {parseFloat(cashTendered) > grandTotal && (
+                      <span className="text-xs font-bold text-emerald-600 ml-auto font-mono">
+                        Return Change: ₹{changeDue}
                       </span>
-                      <button
-                        onClick={() => setIsPaymentDrawerOpen(false)}
-                        className="text-zinc-400 hover:text-zinc-600 p-0.5"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2">
-                      <button
-                        disabled={isSubmitting}
-                        onClick={() => handleSettleTable("CASH")}
-                        className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer"
-                      >
-                        <Banknote size={15} className="text-zinc-700" />
-                        <span>Cash</span>
-                      </button>
-
-                      <button
-                        disabled={isSubmitting}
-                        onClick={() => handleSettleTable("UPI")}
-                        className="py-2 px-1 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/30 text-[#C2410C] rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer"
-                      >
-                        <QrCode size={15} className="text-[#E46254]" />
-                        <span>UPI</span>
-                      </button>
-
-                      <button
-                        disabled={isSubmitting}
-                        onClick={() => handleSettleTable("CARD")}
-                        className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer"
-                      >
-                        <CreditCard size={15} className="text-zinc-700" />
-                        <span>Card</span>
-                      </button>
-                    </div>
-
-                    {/* Change calculator */}
-                    <div className="flex items-center gap-2 pt-1 border-t border-zinc-200 text-xs">
-                      <input
-                        type="number"
-                        placeholder="Cash given..."
-                        value={cashTendered}
-                        onChange={(e) => setCashTendered(e.target.value)}
-                        className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-md text-xs font-mono outline-none"
-                      />
-                      {parseFloat(cashTendered) > grandTotal && (
-                        <span className="text-xs font-bold text-emerald-600 ml-auto font-mono">
-                          Change: ₹{changeDue}
-                        </span>
-                      )}
-                    </div>
+                    )}
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1030,6 +1542,7 @@ export default function PosPage() {
                 {printChit.kotNumber && <div>KOT ROUND: #{printChit.kotNumber}</div>}
                 <div>TIME: {printChit.time}</div>
                 {printChit.customerName && <div>GUEST: {printChit.customerName}</div>}
+                {printChit.customerPhone && <div>PHONE: {printChit.customerPhone}</div>}
                 <div className="border-b my-1" />
                 <div className="space-y-1 font-bold">
                   {printChit.items.map((it, idx) => (
@@ -1052,6 +1565,7 @@ export default function PosPage() {
                   <span>{printChit.time}</span>
                 </div>
                 {printChit.customerName && <div>Customer: {printChit.customerName}</div>}
+                {printChit.customerPhone && <div>Phone: {printChit.customerPhone}</div>}
                 <div className="border-b my-1" />
                 <table className="w-full text-left">
                   <thead>
