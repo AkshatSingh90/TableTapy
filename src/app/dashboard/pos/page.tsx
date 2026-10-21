@@ -139,6 +139,7 @@ export default function PosPage() {
   // Manual Add Dish State inside Drawer
   const [isAddDishOpen, setIsAddDishOpen] = useState(false);
   const [dishSearchQuery, setDishSearchQuery] = useState("");
+  const [selectedDrawerCat, setSelectedDrawerCat] = useState("ALL");
   const [manualCart, setManualCart] = useState<NewStaffItem[]>([]);
   const [manualCustomerName, setManualCustomerName] = useState("");
   const [manualCustomerPhone, setManualCustomerPhone] = useState("");
@@ -224,7 +225,7 @@ export default function PosPage() {
         );
       }
 
-      // Menu Catalog for quick add
+      // Menu Catalog
       const { data: menuData } = await supabase
         .from("menu_items_v2")
         .select("*")
@@ -463,32 +464,49 @@ export default function PosPage() {
     return tableSessionMap.get(activeTableModal) || null;
   }, [activeTableModal, tableSessionMap]);
 
+  const isVacantTable = !activeSession || activeSession.status === "VACANT" || activeSession.rounds.length === 0;
+
   // Synchronize customer name & phone into edit inputs when table changes
   useEffect(() => {
-    if (activeSession) {
+    if (activeSession && activeSession.status !== "VACANT") {
       setManualCustomerName(activeSession.customerName || "");
       setManualCustomerPhone(activeSession.customerPhone || "");
+      setIsAddDishOpen(false);
     } else {
       setManualCustomerName("");
       setManualCustomerPhone("");
+      setIsAddDishOpen(true);
     }
     setManualCart([]);
-    setIsAddDishOpen(false);
     setIsPaymentDrawerOpen(false);
     setDiscountPercent(0);
     setCustomDiscountRupees("");
+    setSelectedDrawerCat("ALL");
+    setDishSearchQuery("");
   }, [activeTableModal]);
 
-  /* ─── 3. Manual Add Dish Helpers ────────────────────────────────── */
+  /* ─── 3. Menu Categories & Filter ───────────────────────────────── */
+  const drawerCategories = useMemo(() => {
+    const set = new Set<string>();
+    menuItems.forEach((m) => {
+      if (m.category) set.add(m.category);
+    });
+    return ["ALL", ...Array.from(set)];
+  }, [menuItems]);
+
   const filteredCatalog = useMemo(() => {
-    if (!dishSearchQuery.trim()) return menuItems.slice(0, 15);
-    const q = dishSearchQuery.toLowerCase().trim();
-    return menuItems.filter(
-      (m) =>
+    return menuItems.filter((m) => {
+      const matchCat =
+        selectedDrawerCat === "ALL" ||
+        m.category.toLowerCase() === selectedDrawerCat.toLowerCase();
+      const q = dishSearchQuery.toLowerCase().trim();
+      const matchSearch =
+        !q ||
         m.name.toLowerCase().includes(q) ||
-        m.category.toLowerCase().includes(q)
-    );
-  }, [menuItems, dishSearchQuery]);
+        m.category.toLowerCase().includes(q);
+      return matchCat && matchSearch;
+    });
+  }, [menuItems, selectedDrawerCat, dishSearchQuery]);
 
   const addToManualCart = (dish: MenuItem) => {
     setManualCart((prev) => {
@@ -608,7 +626,7 @@ export default function PosPage() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
-      showToast(`KOT Round #${roundNum} sent to kitchen`);
+      showToast(`Table ${activeTableModal}: KOT Round #${roundNum} sent to kitchen`);
       setManualCart([]);
       setIsAddDishOpen(false);
 
@@ -1091,13 +1109,13 @@ export default function PosPage() {
                     <h3 className="text-base font-bold text-zinc-900 tracking-tight">
                       {activeTableModal}
                     </h3>
-                    {activeSession && activeSession.status !== "VACANT" ? (
+                    {!isVacantTable ? (
                       <span className="px-2 py-0.2 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
-                        Occupied · {activeSession.rounds.length} {activeSession.rounds.length === 1 ? "Round" : "Rounds"}
+                        Occupied · {activeSession?.rounds.length} {activeSession?.rounds.length === 1 ? "Round" : "Rounds"}
                       </span>
                     ) : (
                       <span className="px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-700 text-[10.5px] font-semibold border border-emerald-500/20">
-                        Vacant Table
+                        Vacant Table · Start Order
                       </span>
                     )}
                   </div>
@@ -1108,20 +1126,20 @@ export default function PosPage() {
                       <User size={12} className="text-zinc-400" />
                       <input
                         type="text"
-                        placeholder="Guest Name..."
+                        placeholder="Guest Name (optional)..."
                         value={manualCustomerName}
                         onChange={(e) => setManualCustomerName(e.target.value)}
-                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-semibold text-zinc-800 w-28 placeholder:text-zinc-400"
+                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-semibold text-zinc-800 w-32 placeholder:text-zinc-400"
                       />
                     </div>
                     <div className="flex items-center gap-1.5">
                       <Phone size={12} className="text-zinc-400" />
                       <input
                         type="tel"
-                        placeholder="Phone Number..."
+                        placeholder="Phone (optional)..."
                         value={manualCustomerPhone}
                         onChange={(e) => setManualCustomerPhone(e.target.value)}
-                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-mono text-zinc-700 w-28 placeholder:text-zinc-400"
+                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-mono text-zinc-700 w-32 placeholder:text-zinc-400"
                       />
                     </div>
                   </div>
@@ -1143,12 +1161,12 @@ export default function PosPage() {
             {/* Modal Scroll Body */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 slim-scrollbar">
               
-              {/* ROUNDS STREAM: Shows items already ordered */}
-              {activeSession && activeSession.rounds.length > 0 && (
+              {/* CASE 1: OCCUPIED TABLE ROUNDS STREAM */}
+              {!isVacantTable && activeSession && activeSession.rounds.length > 0 && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between text-xs font-semibold text-zinc-600 bg-zinc-100/70 px-3 py-1.5 rounded-lg">
-                    <span>Order Rounds ({activeSession.rounds.length})</span>
-                    <span>Running Items: {activeSession.allItems.length}</span>
+                    <span>Existing Order Rounds ({activeSession.rounds.length})</span>
+                    <span>Running Total: ₹{activeSession.totalBill}</span>
                   </div>
 
                   <div className="space-y-2.5">
@@ -1221,7 +1239,7 @@ export default function PosPage() {
                   <div className="flex items-center justify-between text-xs">
                     <div className="flex items-center gap-1.5 font-bold text-amber-900">
                       <ChefHat size={14} className="text-amber-600" />
-                      <span>New Dishes to Fire ({manualCart.length})</span>
+                      <span>Selected Dishes ({manualCart.length})</span>
                     </div>
                     <button
                       onClick={() => setManualCart([])}
@@ -1272,36 +1290,39 @@ export default function PosPage() {
                       </div>
                     ))}
                   </div>
-
-                  <button
-                    disabled={isSubmitting}
-                    onClick={handleSendManualKOT}
-                    className="w-full mt-2 py-2 px-3 rounded-lg bg-zinc-900 hover:bg-black text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
-                  >
-                    <Send size={13} />
-                    <span>Fire KOT to Kitchen (Round #{(activeSession?.rounds.length || 0) + 1})</span>
-                  </button>
                 </div>
               )}
 
-              {/* QUICK MANUAL ADD DISH ACCORDION */}
-              <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
-                <button
-                  type="button"
-                  onClick={() => setIsAddDishOpen((v) => !v)}
-                  className="w-full p-3 bg-zinc-50/70 hover:bg-zinc-100/70 flex items-center justify-between text-xs font-bold text-zinc-800 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <Plus size={14} className="text-[#E46254]" />
-                    <span>Add Dish Manually to Table</span>
+              {/* DISH SELECTOR & SEARCH (ALWAYS OPEN FOR VACANT TABLE, OR EXPANDABLE FOR OCCUPIED) */}
+              <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white shadow-2xs">
+                {!isVacantTable ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsAddDishOpen((v) => !v)}
+                    className="w-full p-3 bg-zinc-50/70 hover:bg-zinc-100/70 flex items-center justify-between text-xs font-bold text-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Plus size={14} className="text-[#E46254]" />
+                      <span>+ Add More Dishes to Table</span>
+                    </div>
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      {isAddDishOpen ? "Hide Menu" : "Open Menu"}
+                    </span>
+                  </button>
+                ) : (
+                  <div className="p-3 bg-zinc-50/70 border-b border-zinc-200 flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-900">
+                      <UtensilsCrossed size={14} className="text-[#E46254]" />
+                      <span>Select Dishes to Start Order</span>
+                    </div>
+                    <span className="text-[10.5px] font-medium text-zinc-400">
+                      Tap dishes to add
+                    </span>
                   </div>
-                  <span className="text-[11px] font-medium text-zinc-400">
-                    {isAddDishOpen ? "Hide Menu" : "Browse Menu"}
-                  </span>
-                </button>
+                )}
 
-                {isAddDishOpen && (
-                  <div className="p-3 border-t border-zinc-200 space-y-2.5">
+                {(isVacantTable || isAddDishOpen) && (
+                  <div className="p-3 space-y-2.5">
                     {/* Search Dishes */}
                     <div className="relative">
                       <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={13} />
@@ -1322,48 +1343,91 @@ export default function PosPage() {
                       )}
                     </div>
 
-                    {/* Catalog Mini List */}
-                    <div className="max-h-44 overflow-y-auto slim-scrollbar divide-y divide-zinc-100 border border-zinc-100 rounded-lg">
+                    {/* Quick Category Chips */}
+                    <div className="flex items-center gap-1 overflow-x-auto slim-scrollbar py-0.5">
+                      {drawerCategories.map((cat) => (
+                        <button
+                          key={cat}
+                          onClick={() => setSelectedDrawerCat(cat)}
+                          className={`px-2.5 py-1 rounded-md text-[10.5px] font-semibold whitespace-nowrap transition-colors cursor-pointer shrink-0 ${
+                            selectedDrawerCat.toLowerCase() === cat.toLowerCase()
+                              ? "bg-zinc-900 text-white"
+                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                          }`}
+                        >
+                          {cat === "ALL" ? "All" : cat}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Catalog Dishes List */}
+                    <div className="max-h-56 overflow-y-auto slim-scrollbar divide-y divide-zinc-100 border border-zinc-100 rounded-lg">
                       {filteredCatalog.length === 0 ? (
-                        <div className="py-4 text-center text-xs text-zinc-400">
-                          No dishes found
+                        <div className="py-6 text-center text-xs text-zinc-400">
+                          No dishes found. Try a different search or category.
                         </div>
                       ) : (
-                        filteredCatalog.map((dish) => (
-                          <div
-                            key={dish.id}
-                            className="p-2 flex items-center justify-between hover:bg-zinc-50 text-xs"
-                          >
-                            <div className="flex items-center gap-2">
-                              <span
-                                className={`w-2 h-2 rounded-full shrink-0 ${
-                                  dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                                }`}
-                              />
-                              <span className="font-semibold text-zinc-800">{dish.name}</span>
-                              <span className="text-[10px] text-zinc-400 font-mono">({dish.category})</span>
-                            </div>
+                        filteredCatalog.map((dish) => {
+                          const cartMatch = manualCart.find((c) => c.id === dish.id);
+                          const qtyInCart = cartMatch ? cartMatch.quantity : 0;
 
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-zinc-900">
-                                ₹{dish.base_price}
-                              </span>
-                              <button
-                                onClick={() => addToManualCart(dish)}
-                                className="px-2 py-0.5 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer"
-                              >
-                                + Add
-                              </button>
+                          return (
+                            <div
+                              key={dish.id}
+                              className="p-2 flex items-center justify-between hover:bg-zinc-50 text-xs"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
+                                  }`}
+                                />
+                                <div>
+                                  <span className="font-semibold text-zinc-800">{dish.name}</span>
+                                  <span className="text-[10px] text-zinc-400 font-mono ml-1.5">
+                                    ₹{dish.base_price}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                {qtyInCart > 0 ? (
+                                  <div className="flex items-center bg-zinc-100 rounded-md border border-zinc-200">
+                                    <button
+                                      onClick={() => updateManualQty(dish.id, -1)}
+                                      className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                                    >
+                                      <Minus size={10} />
+                                    </button>
+                                    <span className="w-4 text-center font-mono font-bold text-xs">
+                                      {qtyInCart}
+                                    </span>
+                                    <button
+                                      onClick={() => addToManualCart(dish)}
+                                      className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                                    >
+                                      <Plus size={10} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => addToManualCart(dish)}
+                                    className="px-2.5 py-0.5 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer"
+                                  >
+                                    + Add
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* CALCULATIONS & BILL BREAKDOWN */}
+              {/* CALCULATIONS & BILL BREAKDOWN (IF SUB-TOTAL > 0) */}
               {subtotal > 0 && (
                 <div className="bg-zinc-50 rounded-xl p-3.5 border border-zinc-200/80 space-y-2 text-xs">
                   <div className="flex justify-between text-zinc-500">
@@ -1439,29 +1503,54 @@ export default function PosPage() {
 
             {/* Modal Bottom Actions */}
             <div className="p-4 bg-white border-t border-zinc-200 space-y-2.5">
-              {subtotal === 0 ? (
-                <div className="text-center text-xs text-zinc-400 py-1">
-                  Table is vacant. Use "+ Add Dish Manually" to start an order.
-                </div>
+              {isVacantTable ? (
+                /* VACANT TABLE ACTION: FIRE KOT & SEAT TABLE */
+                <button
+                  disabled={manualCart.length === 0 || isSubmitting}
+                  onClick={handleSendManualKOT}
+                  className="w-full py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#D35546] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-2xs cursor-pointer transition-all"
+                >
+                  <Send size={14} />
+                  <span>
+                    {manualCart.length === 0
+                      ? "Select dishes above to start order"
+                      : `Fire KOT to Kitchen & Seat Table (₹${manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})`}
+                  </span>
+                </button>
               ) : !isPaymentDrawerOpen ? (
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={handlePrintGuestBill}
-                    className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                  >
-                    <Printer size={14} />
-                    <span>Print Guest Bill</span>
-                  </button>
+                /* OCCUPIED TABLE ACTIONS: PRINT BILL OR SETTLE (PLUS EXTRA ROUND IF DISHES SELECTED) */
+                <div className="space-y-2">
+                  {manualCart.length > 0 && (
+                    <button
+                      disabled={isSubmitting}
+                      onClick={handleSendManualKOT}
+                      className="w-full py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
+                    >
+                      <Send size={13} />
+                      <span>Fire New KOT Round (Round #{(activeSession?.rounds.length || 0) + 1})</span>
+                    </button>
+                  )}
 
-                  <button
-                    onClick={() => setIsPaymentDrawerOpen(true)}
-                    className="py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#D35546] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                  >
-                    <CreditCard size={14} />
-                    <span>Settle Bill (₹{grandTotal})</span>
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={handlePrintGuestBill}
+                      className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                    >
+                      <Printer size={14} />
+                      <span>Print Guest Bill</span>
+                    </button>
+
+                    <button
+                      onClick={() => setIsPaymentDrawerOpen(true)}
+                      className="py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#D35546] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                    >
+                      <CreditCard size={14} />
+                      <span>Settle Bill (₹{grandTotal})</span>
+                    </button>
+                  </div>
                 </div>
               ) : (
+                /* SETTLE DRAWER: CASH / UPI / CARD */
                 <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2.5 animate-in fade-in zoom-in-95 duration-100">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-zinc-900">
