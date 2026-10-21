@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import Link from "next/link";
 import {
   Search,
   Plus,
@@ -14,8 +15,6 @@ import {
   Check,
   ChefHat,
   Printer,
-  Clock,
-  LayoutGrid,
   UtensilsCrossed,
   ShoppingBag,
   Bike,
@@ -24,17 +23,14 @@ import {
   Flame,
   CheckCircle2,
   AlertCircle,
-  Percent,
   RotateCcw,
-  Sparkles,
-  ChevronRight,
-  Hash,
-  ArrowRight
+  ArrowRightLeft,
+  ChevronDown
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
 
-/* ─── Type Definitions ────────────────────────────────────────────── */
+/* ─── Types ───────────────────────────────────────────────────────── */
 interface MenuItem {
   id: string;
   name: string;
@@ -79,12 +75,12 @@ interface OrderRecord {
 }
 
 type OrderMode = "DINE_IN" | "TAKEAWAY" | "DELIVERY";
-type PaymentMethod = "CASH" | "UPI" | "CARD";
+type PaymentMethod = "CASH" | "UPI" | "CARD" | "SPLIT";
 
 export default function PosTerminalPage() {
   const supabase = createClient();
 
-  // Core Data State
+  // Core Data
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
   const [restaurantName, setRestaurantName] = useState<string>("Restaurant");
   const [upiId, setUpiId] = useState<string>("");
@@ -93,50 +89,45 @@ export default function PosTerminalPage() {
   const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Active Terminal Mode (Dine In vs Takeaway vs Delivery)
+  // Active Terminal Mode
   const [orderMode, setOrderMode] = useState<OrderMode>("DINE_IN");
 
   // Dine-In Specific Selection
   const [selectedTable, setSelectedTable] = useState<string>("");
-  const [showFloorModal, setShowFloorModal] = useState<boolean>(false);
+  const [showMoveTablePicker, setShowMoveTablePicker] = useState<boolean>(false);
 
-  // Takeaway Specific Selection
-  const [takeawayToken, setTakeawayToken] = useState<string>(() => `TK-${Math.floor(100 + Math.random() * 900)}`);
+  // Takeaway Specific Selection: Sequential Daily Token
+  const [takeawayTokenNumber, setTakeawayTokenNumber] = useState<number>(1);
+  const takeawayToken = `Token #${takeawayTokenNumber}`;
 
-  // Customer Info
+  // Customer Info (Compact)
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
-  const [deliveryAddress, setDeliveryAddress] = useState("");
 
-  // Cart / Pending Items (Round items to be fired or settled)
+  // Cart / Pending Items
   const [cart, setCart] = useState<CartItem[]>([]);
 
   // Search & Categories
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("ALL");
-  const [vegOnlyFilter, setVegOnlyFilter] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Discount State
+  // Discount (Inline)
   const [discountPercent, setDiscountPercent] = useState<number>(0);
-  const [discountAmount, setDiscountAmount] = useState<number>(0);
-  const [discountMode, setDiscountMode] = useState<"PERCENT" | "FLAT">("PERCENT");
-  const [showDiscountModal, setShowDiscountModal] = useState(false);
+  const [showDiscountInput, setShowDiscountInput] = useState(false);
 
-  // Settlement & Payment Modal
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>("CASH");
+  // Inline Payment States (NO MODALS)
   const [cashTendered, setCashTendered] = useState<string>("");
+  const [showInlineUpi, setShowInlineUpi] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Thermal Print State (KOT chit or Tax invoice)
+  // Thermal Print State
   const [printChit, setPrintChit] = useState<{
-    type: "KOT" | "BILL";
+    type: "KOT" | "BILL" | "VOID";
     mode: OrderMode;
     tableOrToken: string;
     kotNumber?: number;
     customerName?: string;
-    customerPhone?: string;
     items: Array<{ name: string; quantity: number; price?: number; notes?: string }>;
     subtotal?: number;
     discount?: number;
@@ -144,16 +135,17 @@ export default function PosTerminalPage() {
     grandTotal?: number;
     paymentMethod?: string;
     time: string;
+    reason?: string;
   } | null>(null);
 
-  // Quick Toast Notification
+  // Quick Toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  /* ─── 1. Load Store Data & Active Sessions ────────────────────────── */
+  /* ─── 1. Load Real Data from Supabase ────────────────────────────── */
   const loadInitialData = async () => {
     setIsLoading(true);
     try {
@@ -168,7 +160,7 @@ export default function PosTerminalPage() {
       }
       setRestaurantId(restId);
 
-      // 1. Restaurant profile
+      // Restaurant Profile
       const { data: rest } = await supabase
         .from("restaurants")
         .select("id, name, upi_id")
@@ -180,40 +172,29 @@ export default function PosTerminalPage() {
         if (rest.upi_id) setUpiId(rest.upi_id);
       }
 
-      // 2. Locations / Tables
+      // Tables / Locations: STRICTLY ONLY WHAT OWNER CREATED (NO HARDCODING)
       const { data: locData } = await supabase
         .from("locations")
         .select("*")
         .eq("restaurant_id", restId)
         .order("name", { ascending: true });
 
-      let loadedLocs: Location[] = [];
       if (locData && locData.length > 0) {
-        loadedLocs = locData.map((l: any) => ({
+        const loaded = locData.map((l: any) => ({
           id: l.id,
           name: l.name,
           type: l.type,
-          capacity: l.capacity || 4,
+          capacity: l.capacity,
         }));
+        setLocations(loaded);
+        setSelectedTable(loaded[0].name);
       } else {
-        // Fallback default floor tables
-        loadedLocs = [
-          { id: "t1", name: "Table 1", capacity: 2 },
-          { id: "t2", name: "Table 2", capacity: 4 },
-          { id: "t3", name: "Table 3", capacity: 4 },
-          { id: "t4", name: "Table 4", capacity: 6 },
-          { id: "t5", name: "Table 5", capacity: 2 },
-          { id: "t6", name: "Table 6", capacity: 4 },
-          { id: "t7", name: "Table 7", capacity: 8 },
-          { id: "t8", name: "Table 8", capacity: 4 },
-        ];
-      }
-      setLocations(loadedLocs);
-      if (!selectedTable && loadedLocs.length > 0) {
-        setSelectedTable(loadedLocs[0].name);
+        // Zero tables if the owner hasn't created any
+        setLocations([]);
+        setSelectedTable("");
       }
 
-      // 3. Menu items (strict tenant isolation)
+      // Menu Items (Tenant Scoped)
       const { data: menuData } = await supabase
         .from("menu_items_v2")
         .select("*")
@@ -236,10 +217,10 @@ export default function PosTerminalPage() {
         );
       }
 
-      // 4. Fetch Active Orders
+      // Active Orders
       await fetchActiveOrders(restId);
     } catch (err) {
-      console.error("Error loading POS initial data:", err);
+      console.error("Error loading POS data:", err);
     } finally {
       setIsLoading(false);
     }
@@ -255,15 +236,23 @@ export default function PosTerminalPage() {
 
     if (orderData) {
       setActiveOrders(orderData as OrderRecord[]);
+
+      // Compute next sequential Takeaway Token # based on today's count
+      const today = new Date().toDateString();
+      const todayTakeaways = orderData.filter((o) => {
+        const isTk = (o.table_no || "").toLowerCase().includes("token") || (o.table_no || "").toLowerCase().includes("takeaway");
+        return isTk && new Date(o.created_at).toDateString() === today;
+      });
+      setTakeawayTokenNumber(todayTakeaways.length + 1);
     }
   };
 
   useEffect(() => {
     loadInitialData();
 
-    // Realtime listener for orders and stock toggles
+    // Realtime Postgres listener
     const channel = supabase
-      .channel("pos_master_sync")
+      .channel("pos_fast_terminal_sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "orders" },
@@ -294,25 +283,59 @@ export default function PosTerminalPage() {
     };
   }, [restaurantId]);
 
-  // Keyboard shortcut '/' to focus search
+  /* ─── 2. Keyboard Shortcuts Engine (F1, F2, F4, F8, F9, /) ────────── */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Focus search: '/'
       if (e.key === "/" && document.activeElement !== searchInputRef.current) {
         e.preventDefault();
         searchInputRef.current?.focus();
+        return;
       }
+      // F1: Dine-In Mode
+      if (e.key === "F1") {
+        e.preventDefault();
+        setOrderMode("DINE_IN");
+        return;
+      }
+      // F2: Takeaway Mode
+      if (e.key === "F2") {
+        e.preventDefault();
+        setOrderMode("TAKEAWAY");
+        return;
+      }
+      // F4: Fire KOT
+      if (e.key === "F4") {
+        e.preventDefault();
+        handleFireKOT();
+        return;
+      }
+      // F8: Instant Cash Settle
+      if (e.key === "F8") {
+        e.preventDefault();
+        handleQuickSettle("CASH");
+        return;
+      }
+      // F9: Print Bill Estimate
+      if (e.key === "F9") {
+        e.preventDefault();
+        handlePrintGuestBill();
+        return;
+      }
+      // Esc: Dismiss UPI QR / Unfocus
       if (e.key === "Escape") {
-        setShowFloorModal(false);
-        setShowPaymentModal(false);
-        setShowDiscountModal(false);
+        setShowInlineUpi(false);
+        setShowMoveTablePicker(false);
+        setShowDiscountInput(false);
+        searchInputRef.current?.blur();
       }
     };
+
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  });
 
-  /* ─── 2. Dine-In Table Status Computation ─────────────────────────── */
-  // Categorizes all tables into Vacant, Cooking (KOT Active), or Billed
+  /* ─── 3. Dine-In Table Status Computation ─────────────────────────── */
   const tableSessionMap = useMemo(() => {
     const map = new Map<
       string,
@@ -341,11 +364,11 @@ export default function PosTerminalPage() {
     activeOrders.forEach((ord) => {
       if (!ord.table_no) return;
       const isTakeaway =
-        ord.table_no.toLowerCase().startsWith("takeaway") ||
-        ord.table_no.toLowerCase().startsWith("tk-") ||
-        ord.table_no.toLowerCase().startsWith("counter");
+        ord.table_no.toLowerCase().includes("token") ||
+        ord.table_no.toLowerCase().includes("takeaway") ||
+        ord.table_no.toLowerCase().includes("counter");
 
-      if (isTakeaway) return; // Handled separately in Takeaway drawer
+      if (isTakeaway) return;
 
       let session = map.get(ord.table_no);
       if (!session) {
@@ -371,13 +394,11 @@ export default function PosTerminalPage() {
       if (Array.isArray(ord.items_json)) {
         ord.items_json.forEach((raw: any) => {
           const it = raw.item || {};
-          const qty = raw.quantity || 1;
-          const price = raw.price || it.basePrice || 0;
           session!.firedItems.push({
             id: it.id || raw.id || Math.random().toString(),
-            name: it.name || raw.name || "Item",
-            price: price,
-            quantity: qty,
+            name: it.name || raw.name || "Dish",
+            price: raw.price || it.basePrice || 0,
+            quantity: raw.quantity || 1,
             isVeg: it.isVeg !== false,
             category: it.category,
             notes: raw.notes || "",
@@ -385,7 +406,6 @@ export default function PosTerminalPage() {
         });
       }
 
-      // Check if bill was printed (proforma estimate)
       if (ord.note && ord.note.includes("[POS Bill Printed")) {
         session.status = "BILLED";
       } else {
@@ -396,55 +416,20 @@ export default function PosTerminalPage() {
     return map;
   }, [locations, activeOrders]);
 
-  // Current selected table session
   const currentTableSession = useMemo(() => {
     if (orderMode !== "DINE_IN" || !selectedTable) return null;
     return tableSessionMap.get(selectedTable) || null;
   }, [tableSessionMap, orderMode, selectedTable]);
 
-  /* ─── 3. Active Takeaway & Delivery Orders ─────────────────────────── */
+  /* ─── 4. Active Takeaway Tokens ───────────────────────────────────── */
   const activeTakeawayOrders = useMemo(() => {
     return activeOrders.filter((o) => {
       const t = (o.table_no || "").toLowerCase();
-      return t.startsWith("takeaway") || t.startsWith("tk-") || t.startsWith("counter") || t.startsWith("delivery");
+      return t.includes("token") || t.includes("takeaway") || t.includes("counter");
     });
   }, [activeOrders]);
 
-  // Switch to an active takeaway order
-  const handleSelectActiveTakeaway = (ord: OrderRecord) => {
-    setOrderMode(ord.table_no.toLowerCase().startsWith("delivery") ? "DELIVERY" : "TAKEAWAY");
-    setTakeawayToken(ord.table_no);
-    setCustomerName(ord.customer_name || "");
-    setCustomerPhone(ord.customer_phone || "");
-
-    // Load items into cart
-    if (Array.isArray(ord.items_json)) {
-      const loaded: CartItem[] = ord.items_json.map((raw: any) => {
-        const it = raw.item || {};
-        return {
-          id: it.id || raw.id || Math.random().toString(),
-          name: it.name || raw.name || "Item",
-          price: raw.price || it.basePrice || 0,
-          quantity: raw.quantity || 1,
-          isVeg: it.isVeg !== false,
-          category: it.category,
-          notes: raw.notes || "",
-        };
-      });
-      setCart(loaded);
-    }
-  };
-
-  const handleStartNewTakeaway = () => {
-    setOrderMode("TAKEAWAY");
-    setTakeawayToken(`TK-${Math.floor(100 + Math.random() * 900)}`);
-    setCustomerName("");
-    setCustomerPhone("");
-    setCart([]);
-    showToast("Started New Takeaway Order");
-  };
-
-  /* ─── 4. Categories & Menu Filtering ──────────────────────────────── */
+  /* ─── 5. Categories & Menu Filtering ──────────────────────────────── */
   const categories = useMemo(() => {
     const set = new Set<string>();
     menuItems.forEach((i) => {
@@ -456,7 +441,6 @@ export default function PosTerminalPage() {
   const filteredItems = useMemo(() => {
     return menuItems.filter((item) => {
       if (!item.is_available) return false;
-      if (vegOnlyFilter && !item.is_veg) return false;
       if (selectedCategory !== "ALL" && item.category.toLowerCase() !== selectedCategory.toLowerCase()) {
         return false;
       }
@@ -468,9 +452,9 @@ export default function PosTerminalPage() {
       }
       return true;
     });
-  }, [menuItems, selectedCategory, searchQuery, vegOnlyFilter]);
+  }, [menuItems, selectedCategory, searchQuery]);
 
-  /* ─── 5. Cart Operations ──────────────────────────────────────────── */
+  /* ─── 6. Cart Operations ──────────────────────────────────────────── */
   const addToCart = (item: MenuItem) => {
     setCart((prev) => {
       const existing = prev.find((i) => i.id === item.id);
@@ -509,18 +493,14 @@ export default function PosTerminalPage() {
     setCart((prev) => prev.filter((i) => i.id !== id));
   };
 
-  const updateCartItemNote = (id: string, note: string) => {
-    setCart((prev) => prev.map((i) => (i.id === id ? { ...i, notes: note } : i)));
-  };
-
   const clearCurrentCart = () => {
     setCart([]);
     setDiscountPercent(0);
-    setDiscountAmount(0);
+    setCashTendered("");
+    setShowInlineUpi(false);
   };
 
-  /* ─── 6. Billing & Calculations ───────────────────────────────────── */
-  // If Dine-In: includes items previously fired to kitchen + new items in cart
+  /* ─── 7. Calculations ─────────────────────────────────────────────── */
   const allCurrentItems = useMemo(() => {
     if (orderMode === "DINE_IN") {
       const fired = currentTableSession?.firedItems || [];
@@ -534,14 +514,11 @@ export default function PosTerminalPage() {
   }, [allCurrentItems]);
 
   const effectiveDiscount = useMemo(() => {
-    if (discountMode === "PERCENT") {
-      return (subtotal * discountPercent) / 100;
-    }
-    return Math.min(subtotal, discountAmount);
-  }, [subtotal, discountMode, discountPercent, discountAmount]);
+    return (subtotal * discountPercent) / 100;
+  }, [subtotal, discountPercent]);
 
   const taxableAmount = Math.max(0, subtotal - effectiveDiscount);
-  const taxTotal = (taxableAmount * 5) / 100; // Standard Indian 5% Restaurant GST
+  const taxTotal = (taxableAmount * 5) / 100; // 5% GST
   const grandTotal = Math.round(taxableAmount + taxTotal);
 
   const changeDue = useMemo(() => {
@@ -549,7 +526,7 @@ export default function PosTerminalPage() {
     return Math.max(0, tendered - grandTotal);
   }, [cashTendered, grandTotal]);
 
-  /* ─── 7. Actions: Fire KOT (Dine-In or Takeaway) ──────────────────── */
+  /* ─── 8. Actions: Fire KOT ────────────────────────────────────────── */
   const handleFireKOT = async () => {
     if (cart.length === 0) {
       showToast("No new items in cart to send to kitchen.");
@@ -558,7 +535,7 @@ export default function PosTerminalPage() {
 
     const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
     if (!targetDestination) {
-      showToast("Please choose a table or takeaway token first.");
+      showToast("Please choose a table first.");
       return;
     }
 
@@ -592,7 +569,7 @@ export default function PosTerminalPage() {
         payment_status: "PENDING",
         customer_name:
           customerName.trim() ||
-          (isDineIn ? `Guest (${selectedTable})` : `Takeaway Guest (${targetDestination})`),
+          (isDineIn ? `Guest (${selectedTable})` : `Takeaway (${targetDestination})`),
         customer_phone: customerPhone.trim() || null,
         items_json: kotPayload,
         note: orderTag,
@@ -600,18 +577,14 @@ export default function PosTerminalPage() {
 
       if (error) throw error;
 
-      showToast(
-        `🔥 KOT sent to Kitchen for ${targetDestination}! (${cart.length} dishes)`
-      );
+      showToast(`🔥 KOT fired to Kitchen for ${targetDestination}!`);
 
-      // Trigger standard thermal print for Kitchen Chit
       setPrintChit({
         type: "KOT",
         mode: orderMode,
         tableOrToken: targetDestination,
         kotNumber: kotRoundNum,
         customerName: customerName.trim(),
-        customerPhone: customerPhone.trim(),
         items: cart.map((c) => ({ name: c.name, quantity: c.quantity, notes: c.notes })),
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
@@ -621,7 +594,7 @@ export default function PosTerminalPage() {
 
       setTimeout(() => {
         window.print();
-      }, 150);
+      }, 100);
     } catch (err: any) {
       showToast("Failed to fire KOT: " + (err.message || "Error"));
     } finally {
@@ -629,16 +602,111 @@ export default function PosTerminalPage() {
     }
   };
 
-  /* ─── 8. Actions: Print Bill Estimate (Dine-In Guest Check) ──────── */
+  /* ─── 9. Actions: Void / Cancel Dish on Fired Order ───────────────── */
+  const handleVoidFiredDish = async (dishName: string, itemPrice: number) => {
+    if (!currentTableSession || currentTableSession.orders.length === 0) return;
+
+    const confirmVoid = window.confirm(`Void / Cancel 1x "${dishName}" from Table ${selectedTable}?`);
+    if (!confirmVoid) return;
+
+    setIsSubmitting(true);
+    try {
+      // Find order containing this dish
+      for (const ord of currentTableSession.orders) {
+        if (!Array.isArray(ord.items_json)) continue;
+        const idx = ord.items_json.findIndex(
+          (raw: any) => (raw.item?.name || raw.name) === dishName
+        );
+
+        if (idx !== -1) {
+          const updatedItems = [...ord.items_json];
+          const target = updatedItems[idx];
+
+          if (target.quantity > 1) {
+            target.quantity -= 1;
+          } else {
+            updatedItems.splice(idx, 1);
+          }
+
+          const newTotal = Math.max(0, Number(ord.total || 0) - itemPrice);
+
+          if (updatedItems.length === 0) {
+            await supabase.from("orders").delete().eq("id", ord.id);
+          } else {
+            await supabase
+              .from("orders")
+              .update({
+                items_json: updatedItems,
+                total: newTotal,
+                note: `[KOT Item Voided: ${dishName}]`,
+              })
+              .eq("id", ord.id);
+          }
+
+          // Trigger Kitchen Void Chit print
+          setPrintChit({
+            type: "VOID",
+            mode: "DINE_IN",
+            tableOrToken: selectedTable,
+            items: [{ name: dishName, quantity: 1 }],
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            reason: "Customer Cancelled / Mistake",
+          });
+
+          showToast(`🚫 Cancelled 1x ${dishName} on Table ${selectedTable}`);
+          if (restaurantId) fetchActiveOrders(restaurantId);
+
+          setTimeout(() => {
+            window.print();
+          }, 100);
+          break;
+        }
+      }
+    } catch (err: any) {
+      showToast("Error voiding item: " + (err.message || "Failed"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /* ─── 10. Actions: Move / Transfer Table ──────────────────────────── */
+  const handleTransferTable = async (targetTable: string) => {
+    if (!currentTableSession || currentTableSession.orders.length === 0) {
+      setSelectedTable(targetTable);
+      setShowMoveTablePicker(false);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const orderIds = currentTableSession.orders.map((o) => o.id);
+      const { error } = await supabase
+        .from("orders")
+        .update({ table_no: targetTable, note: `[Transferred from ${selectedTable}]` })
+        .in("id", orderIds);
+
+      if (error) throw error;
+
+      showToast(`↔️ Moved ${selectedTable} ➔ ${targetTable}`);
+      setSelectedTable(targetTable);
+      setShowMoveTablePicker(false);
+      if (restaurantId) fetchActiveOrders(restaurantId);
+    } catch (err: any) {
+      showToast("Transfer failed: " + (err.message || "Failed"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /* ─── 11. Actions: Print Bill Estimate (Guest Check) ──────────────── */
   const handlePrintGuestBill = async () => {
     if (allCurrentItems.length === 0) {
-      showToast("No items on table to generate bill.");
+      showToast("No items to print bill.");
       return;
     }
 
     const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
 
-    // Mark active orders on this table as Billed in database note
     if (currentTableSession && currentTableSession.orders.length > 0) {
       const orderIds = currentTableSession.orders.map((o) => o.id);
       await supabase
@@ -652,7 +720,6 @@ export default function PosTerminalPage() {
       mode: orderMode,
       tableOrToken: targetDestination,
       customerName: customerName.trim() || currentTableSession?.customerName,
-      customerPhone: customerPhone.trim() || currentTableSession?.customerPhone,
       items: allCurrentItems.map((c) => ({
         name: c.name,
         quantity: c.quantity,
@@ -665,18 +732,18 @@ export default function PosTerminalPage() {
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
-    showToast(`🖨️ Bill Estimate printed for ${targetDestination}`);
+    showToast(`🖨️ Bill Printed for ${targetDestination} (F9)`);
     if (restaurantId) fetchActiveOrders(restaurantId);
 
     setTimeout(() => {
       window.print();
-    }, 150);
+    }, 100);
   };
 
-  /* ─── 9. Actions: Settle Payment & Close Order ────────────────────── */
-  const handleSettleOrder = async () => {
+  /* ─── 12. Actions: Fast Inline Settle (1-Click Cash/UPI/Card) ─────── */
+  const handleQuickSettle = async (method: PaymentMethod) => {
     if (allCurrentItems.length === 0) {
-      showToast("Cannot settle an empty order.");
+      showToast("No items to settle.");
       return;
     }
 
@@ -685,29 +752,25 @@ export default function PosTerminalPage() {
 
     try {
       if (orderMode === "DINE_IN" && currentTableSession && currentTableSession.orders.length > 0) {
-        // Settle existing table orders
         const orderIds = currentTableSession.orders.map((o) => o.id);
 
-        const { error } = await supabase
+        await supabase
           .from("orders")
           .update({
             status: "COMPLETED",
             payment_status: "PAID",
-            payment_method: selectedPaymentMethod,
+            payment_method: method,
             total: grandTotal,
-            note: `[POS Settled Dine-In: ${selectedPaymentMethod}]`,
+            note: `[POS Settled: ${method}]`,
           })
           .in("id", orderIds);
 
-        if (error) throw error;
-
-        // If there were any unsaved cart items on the table, save them into a completed record
+        // Save any unsaved cart items directly as paid
         if (cart.length > 0) {
           const unsavedPayload = cart.map((c) => ({
             item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
             price: c.price,
             quantity: c.quantity,
-            notes: c.notes || "",
             isReady: true,
           }));
 
@@ -717,49 +780,44 @@ export default function PosTerminalPage() {
             total: cart.reduce((s, it) => s + it.price * it.quantity, 0),
             status: "COMPLETED",
             payment_status: "PAID",
-            payment_method: selectedPaymentMethod,
+            payment_method: method,
             customer_name: customerName.trim() || `Guest (${selectedTable})`,
-            customer_phone: customerPhone.trim() || null,
             items_json: unsavedPayload,
-            note: `[POS Additional Settled: ${selectedPaymentMethod}]`,
+            note: `[POS Addon Settled: ${method}]`,
           });
         }
       } else {
-        // Direct Takeaway or Instant Settle
+        // Direct Takeaway Settle
         const itemsPayload = allCurrentItems.map((c) => ({
           item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
           price: c.price,
           quantity: c.quantity,
-          notes: c.notes || "",
           isReady: true,
         }));
 
-        const { error } = await supabase.from("orders").insert({
+        await supabase.from("orders").insert({
           restaurant_id: restaurantId,
           table_no: targetDestination,
           total: grandTotal,
           status: "COMPLETED",
           payment_status: "PAID",
-          payment_method: selectedPaymentMethod,
-          customer_name: customerName.trim() || `${orderMode === "TAKEAWAY" ? "Takeaway" : "Delivery"} Guest`,
+          payment_method: method,
+          customer_name: customerName.trim() || `${targetDestination}`,
           customer_phone: customerPhone.trim() || null,
           items_json: itemsPayload,
-          note: `[POS Settled ${orderMode}: ${selectedPaymentMethod}]`,
+          note: `[POS Settled: ${method}]`,
         });
-
-        if (error) throw error;
       }
 
-      showToast(`✅ ${targetDestination} Settled (₹${grandTotal}) via ${selectedPaymentMethod}!`);
+      showToast(`✅ Settled ₹${grandTotal} via ${method}!`);
 
-      // Prepare Tax Invoice Print
+      // Print Final Tax Invoice
       setPrintChit({
         type: "BILL",
         mode: orderMode,
         tableOrToken: targetDestination,
         customerName: customerName.trim(),
-        customerPhone: customerPhone.trim(),
-        paymentMethod: selectedPaymentMethod,
+        paymentMethod: method,
         items: allCurrentItems.map((c) => ({
           name: c.name,
           quantity: c.quantity,
@@ -772,36 +830,25 @@ export default function PosTerminalPage() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
-      setShowPaymentModal(false);
       clearCurrentCart();
       setCustomerName("");
       setCustomerPhone("");
-      setCashTendered("");
-      setDiscountPercent(0);
-      setDiscountAmount(0);
 
+      // Increment Takeaway token sequentially
       if (orderMode === "TAKEAWAY") {
-        setTakeawayToken(`TK-${Math.floor(100 + Math.random() * 900)}`);
+        setTakeawayTokenNumber((prev) => prev + 1);
       }
 
       if (restaurantId) fetchActiveOrders(restaurantId);
 
       setTimeout(() => {
         window.print();
-      }, 150);
+      }, 100);
     } catch (err: any) {
       showToast("Settlement failed: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
-  };
-
-  // Helper for elapsed time
-  const getElapsedMinutes = (dateStr?: string) => {
-    if (!dateStr) return null;
-    const diffMs = Date.now() - new Date(dateStr).getTime();
-    const mins = Math.floor(diffMs / 60000);
-    return mins > 0 ? `${mins}m` : "1m";
   };
 
   // UPI Intent URL
@@ -814,131 +861,93 @@ export default function PosTerminalPage() {
   return (
     <div className="flex h-screen flex-col bg-[#F8F9FA] font-sans text-zinc-900 select-none overflow-hidden">
       
-      {/* ── Top Toast Notice ── */}
+      {/* ── Toast Notification ── */}
       {toastMessage && (
-        <div className="fixed top-4 right-4 z-[300] bg-zinc-900 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200">
-          <CheckCircle2 size={15} className="text-emerald-400" />
+        <div className="fixed top-3 right-4 z-[300] bg-zinc-900 text-white px-3.5 py-2 rounded-lg shadow-xl text-xs font-semibold flex items-center gap-2 animate-in fade-in duration-150">
+          <CheckCircle2 size={14} className="text-emerald-400" />
           <span>{toastMessage}</span>
         </div>
       )}
 
       {/* ═════════════════════════════════════════════════════════════════════
-          TOP MASTER BAR: Brand + Order Mode Switcher + Stats
+          CLEAN SLIM HEADER: Store Name + Mode Tabs + Keyboard Shortcuts
          ═════════════════════════════════════════════════════════════════════ */}
-      <header className="shrink-0 h-16 bg-white border-b border-zinc-200/80 px-6 flex items-center justify-between z-30 shadow-xs">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#E46254] flex items-center justify-center font-black text-white text-base shadow-sm">
-              T
-            </div>
-            <div>
-              <h1 className="text-sm font-bold text-zinc-900 tracking-tight leading-tight">
-                {restaurantName}
-              </h1>
-              <p className="text-[11px] font-medium text-zinc-400">
-                POS Terminal & Kitchen Ticketing
-              </p>
-            </div>
-          </div>
+      <header className="shrink-0 h-12 bg-white border-b border-zinc-200 px-4 flex items-center justify-between z-30">
+        <div className="flex items-center gap-4">
+          <h1 className="text-sm font-black text-zinc-900 tracking-tight">
+            {restaurantName}
+          </h1>
 
-          {/* Primary Order Mode Switcher: DINE-IN vs TAKEAWAY vs DELIVERY */}
-          <div className="flex bg-zinc-100 p-1 rounded-xl border border-zinc-200/60">
+          {/* Mode Switcher Tabs */}
+          <div className="flex bg-zinc-100 p-0.5 rounded-lg border border-zinc-200">
             <button
               onClick={() => {
                 setOrderMode("DINE_IN");
                 if (!selectedTable && locations.length > 0) setSelectedTable(locations[0].name);
               }}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
                 orderMode === "DINE_IN"
-                  ? "bg-white text-zinc-900 shadow-sm border border-zinc-200/50"
+                  ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/50"
                   : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <UtensilsCrossed size={14} className={orderMode === "DINE_IN" ? "text-[#E46254]" : ""} />
-              <span>Dine-In</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-zinc-200/60 text-zinc-700">
-                {Array.from(tableSessionMap.values()).filter((s) => s.status !== "VACANT").length} Active
-              </span>
+              <UtensilsCrossed size={13} className={orderMode === "DINE_IN" ? "text-[#E46254]" : ""} />
+              <span>Dine-In (F1)</span>
             </button>
 
             <button
-              onClick={() => {
-                setOrderMode("TAKEAWAY");
-                if (!takeawayToken) setTakeawayToken(`TK-${Math.floor(100 + Math.random() * 900)}`);
-              }}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+              onClick={() => setOrderMode("TAKEAWAY")}
+              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
                 orderMode === "TAKEAWAY"
-                  ? "bg-white text-zinc-900 shadow-sm border border-zinc-200/50"
+                  ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/50"
                   : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <ShoppingBag size={14} className={orderMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
-              <span>Takeaway / Parcel</span>
-              {activeTakeawayOrders.length > 0 && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 text-amber-800">
-                  {activeTakeawayOrders.length}
-                </span>
-              )}
+              <ShoppingBag size={13} className={orderMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
+              <span>Takeaway (F2)</span>
             </button>
 
             <button
-              onClick={() => {
-                setOrderMode("DELIVERY");
-                setTakeawayToken(`DEL-${Math.floor(100 + Math.random() * 900)}`);
-              }}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+              onClick={() => setOrderMode("DELIVERY")}
+              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
                 orderMode === "DELIVERY"
-                  ? "bg-white text-zinc-900 shadow-sm border border-zinc-200/50"
+                  ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/50"
                   : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <Bike size={14} className={orderMode === "DELIVERY" ? "text-[#E46254]" : ""} />
+              <Bike size={13} className={orderMode === "DELIVERY" ? "text-[#E46254]" : ""} />
               <span>Delivery</span>
             </button>
           </div>
         </div>
 
-        {/* Top Right Quick Stats & Floor Map Trigger */}
-        <div className="flex items-center gap-3">
-          {orderMode === "DINE_IN" && (
-            <button
-              onClick={() => setShowFloorModal(true)}
-              className="px-3.5 py-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-bold text-zinc-700 flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
-            >
-              <LayoutGrid size={14} className="text-[#E46254]" />
-              <span>Floor Map</span>
-            </button>
-          )}
-
-          {orderMode === "TAKEAWAY" && (
-            <button
-              onClick={handleStartNewTakeaway}
-              className="px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
-            >
-              <Plus size={14} />
-              <span>New Takeaway</span>
-            </button>
-          )}
-
-          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-100 border border-zinc-200/70 text-xs font-semibold text-zinc-600">
-            <Clock size={13} className="text-zinc-400" />
-            <span>Shift Active</span>
-          </div>
+        {/* Keyboard Helper Pills */}
+        <div className="hidden md:flex items-center gap-2 text-[11px] font-semibold text-zinc-400">
+          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">/ Search</span>
+          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F4 Fire KOT</span>
+          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F8 Settle Cash</span>
+          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F9 Bill</span>
         </div>
       </header>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          SUB-BAR: Contextual Selector Strip
-          - If DINE_IN: Fast Table Selector Strip with Status Colors
-          - If TAKEAWAY: Active Takeaways & Customer Quick Info
+          SUB-BAR: Real Tables Strip (NO Hardcoding) OR Takeaway Counter
          ═════════════════════════════════════════════════════════════════════ */}
-      <div className="shrink-0 bg-white border-b border-zinc-200/70 px-6 py-2.5 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar">
+      <div className="shrink-0 bg-white border-b border-zinc-200 px-4 py-2 flex items-center justify-between gap-3 overflow-x-auto no-scrollbar">
         {orderMode === "DINE_IN" ? (
-          <div className="flex items-center gap-2 w-full">
-            <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider shrink-0 mr-1">
-              Select Table:
-            </span>
-            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+          locations.length === 0 ? (
+            <div className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 px-3 py-1 rounded-lg border border-amber-200 w-full">
+              <AlertCircle size={14} className="shrink-0" />
+              <span>No tables created yet.</span>
+              <Link href="/dashboard/locations" className="font-bold underline text-amber-900 hover:text-black">
+                Add your restaurant tables in Table Orders / Locations
+              </Link>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 w-full overflow-x-auto no-scrollbar">
+              <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider shrink-0">
+                Tables:
+              </span>
               {locations.map((loc) => {
                 const session = tableSessionMap.get(loc.name);
                 const isSelected = selectedTable === loc.name;
@@ -953,17 +962,16 @@ export default function PosTerminalPage() {
                       setSelectedTable(loc.name);
                       clearCurrentCart();
                     }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap transition-all cursor-pointer border ${
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer border ${
                       isSelected
-                        ? "bg-[#E46254] text-white border-[#E46254] shadow-sm ring-2 ring-[#E46254]/20"
+                        ? "bg-[#E46254] text-white border-[#E46254] shadow-xs"
                         : isVacant
-                        ? "bg-white text-zinc-700 border-zinc-200 hover:border-emerald-400 hover:bg-emerald-50/30"
+                        ? "bg-white text-zinc-700 border-zinc-200 hover:border-zinc-300"
                         : isCooking
-                        ? "bg-amber-50 text-amber-900 border-amber-300 hover:border-amber-400"
-                        : "bg-indigo-50 text-indigo-900 border-indigo-300 hover:border-indigo-400"
+                        ? "bg-amber-50 text-amber-900 border-amber-300"
+                        : "bg-indigo-50 text-indigo-900 border-indigo-300"
                     }`}
                   >
-                    {/* Status Dot */}
                     <span
                       className={`w-2 h-2 rounded-full shrink-0 ${
                         isSelected
@@ -977,11 +985,7 @@ export default function PosTerminalPage() {
                     />
                     <span>{loc.name}</span>
                     {!isVacant && session?.runningTotal ? (
-                      <span
-                        className={`text-[10px] px-1.5 py-0.2 rounded-md font-bold tabular-nums ${
-                          isSelected ? "bg-white/20 text-white" : "bg-zinc-200/80 text-zinc-800"
-                        }`}
-                      >
+                      <span className={`text-[10px] font-bold ${isSelected ? "text-white" : "text-zinc-600"}`}>
                         ₹{session.runningTotal}
                       </span>
                     ) : null}
@@ -989,140 +993,112 @@ export default function PosTerminalPage() {
                 );
               })}
             </div>
-          </div>
+          )
         ) : (
-          <div className="flex items-center justify-between w-full gap-4">
+          <div className="flex items-center justify-between w-full">
             <div className="flex items-center gap-3">
-              <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
-                Active Takeaways:
-              </span>
-              {activeTakeawayOrders.length === 0 ? (
-                <span className="text-xs text-zinc-400 italic">No pending takeaways</span>
-              ) : (
-                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-                  {activeTakeawayOrders.map((ord) => {
-                    const isSelected = takeawayToken === ord.table_no;
-                    return (
-                      <button
-                        key={ord.id}
-                        onClick={() => handleSelectActiveTakeaway(ord)}
-                        className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all cursor-pointer ${
-                          isSelected
-                            ? "bg-zinc-900 text-white border-zinc-900"
-                            : "bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100"
-                        }`}
-                      >
-                        <span>{ord.table_no}</span>
-                        <span className="text-[10px] bg-white/30 px-1 rounded font-bold">
-                          ₹{ord.total}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-zinc-400">Current Token:</span>
-              <span className="px-2.5 py-1 bg-zinc-100 border border-zinc-300 rounded-lg text-xs font-black text-zinc-900">
+              <span className="text-xs font-bold text-zinc-900">
                 {takeawayToken}
               </span>
+              <button
+                onClick={() => {
+                  setTakeawayTokenNumber((prev) => prev + 1);
+                  clearCurrentCart();
+                  showToast(`Switched to Token #${takeawayTokenNumber + 1}`);
+                }}
+                className="px-2 py-0.5 bg-zinc-100 hover:bg-zinc-200 border border-zinc-300 rounded text-xs font-semibold text-zinc-700 cursor-pointer"
+              >
+                + Next Token
+              </button>
             </div>
+
+            {/* Quick in-progress takeaway pills */}
+            {activeTakeawayOrders.length > 0 && (
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                <span className="text-[11px] font-bold text-zinc-400">Waiting:</span>
+                {activeTakeawayOrders.map((ord) => (
+                  <span
+                    key={ord.id}
+                    className="px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-900 rounded text-[11px] font-bold"
+                  >
+                    {ord.table_no} (₹{ord.total})
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          MAIN WORKSPACE: Split Layout
-          - Left: Search + Category Pills + Dish Grid (65%)
-          - Right: Live Order Pad & Billing Ticket (35%)
+          MAIN WORKSPACE: Split Layout (Left Menu 65% | Right Ticket 35%)
          ═════════════════════════════════════════════════════════════════════ */}
       <div className="flex flex-1 overflow-hidden">
         
-        {/* ── LEFT SECTION: Menu Catalog & Selection ── */}
+        {/* ── LEFT: High-Density Menu Catalog ── */}
         <div className="flex-1 flex flex-col overflow-hidden bg-[#FAFAFA] border-r border-zinc-200">
           
-          {/* Top Search & Filter Bar */}
-          <div className="shrink-0 p-4 bg-white border-b border-zinc-100 flex items-center gap-3">
-            <div className="relative flex-1">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
+          {/* Search Bar + Category Pills */}
+          <div className="shrink-0 p-3 bg-white border-b border-zinc-200 space-y-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={15} />
               <input
                 ref={searchInputRef}
                 type="text"
-                placeholder="Search dishes or categories... (Press '/' to focus)"
+                placeholder="Search dish or category... ('/' to focus)"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-9 py-2 bg-zinc-50 border border-zinc-200 hover:border-zinc-300 focus:border-[#E46254] focus:bg-white focus:ring-2 focus:ring-[#E46254]/10 rounded-xl text-xs font-medium transition-all outline-none"
+                className="w-full pl-9 pr-8 py-1.5 bg-zinc-50 border border-zinc-200 hover:border-zinc-300 focus:border-[#E46254] focus:bg-white rounded-lg text-xs font-medium outline-none"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 cursor-pointer"
                 >
-                  <X size={14} />
+                  <X size={13} />
                 </button>
               )}
             </div>
 
-            {/* Veg Only Filter Pill */}
-            <button
-              onClick={() => setVegOnlyFilter((v) => !v)}
-              className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all cursor-pointer shrink-0 ${
-                vegOnlyFilter
-                  ? "bg-emerald-500 text-white border-emerald-500 shadow-xs"
-                  : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300"
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 border border-white" />
-              <span>Veg Only</span>
-            </button>
-          </div>
+            {/* Category Pills Strip */}
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              {categories.map((cat) => {
+                const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
+                const count =
+                  cat === "ALL"
+                    ? menuItems.length
+                    : menuItems.filter((i) => i.category.toLowerCase() === cat.toLowerCase()).length;
 
-          {/* Clean Horizontal Category Pills */}
-          <div className="shrink-0 px-4 py-2.5 bg-white border-b border-zinc-200/60 flex items-center gap-2 overflow-x-auto no-scrollbar">
-            {categories.map((cat) => {
-              const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
-              const count =
-                cat === "ALL"
-                  ? menuItems.length
-                  : menuItems.filter((i) => i.category.toLowerCase() === cat.toLowerCase()).length;
-
-              return (
-                <button
-                  key={cat}
-                  onClick={() => setSelectedCategory(cat)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 border shrink-0 ${
-                    isSelected
-                      ? "bg-[#E46254] text-white border-[#E46254] shadow-xs"
-                      : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300 hover:text-zinc-900"
-                  }`}
-                >
-                  <span>{cat === "ALL" ? "All Items" : cat}</span>
-                  <span
-                    className={`text-[10px] px-1.5 py-0.2 rounded-md font-bold tabular-nums ${
-                      isSelected ? "bg-white/20 text-white" : "bg-zinc-100 text-zinc-500"
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1 border shrink-0 ${
+                      isSelected
+                        ? "bg-[#E46254] text-white border-[#E46254]"
+                        : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300 hover:text-zinc-900"
                     }`}
                   >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
+                    <span>{cat === "ALL" ? "All" : cat}</span>
+                    <span className={`text-[10px] font-semibold ${isSelected ? "text-white/80" : "text-zinc-400"}`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          {/* Dish Grid: Touch-optimized Cards with immediate Add actions */}
-          <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+          {/* High-Density Dish Grid */}
+          <div className="flex-1 overflow-y-auto p-3">
             {filteredItems.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-12 bg-white rounded-2xl border border-zinc-200">
-                <Receipt size={32} className="text-zinc-300 mb-2" />
-                <h3 className="text-sm font-bold text-zinc-800">No dishes found</h3>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  Try switching categories or clearing the veg filter
-                </p>
+              <div className="h-full flex flex-col items-center justify-center text-center p-8 bg-white rounded-xl border border-zinc-200">
+                <Receipt size={28} className="text-zinc-300 mb-1" />
+                <h3 className="text-xs font-bold text-zinc-700">No dishes found</h3>
+                <p className="text-[11px] text-zinc-400">Try clearing your search</p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5">
                 {filteredItems.map((dish) => {
                   const cartItem = cart.find((c) => c.id === dish.id);
                   const inCartQty = cartItem ? cartItem.quantity : 0;
@@ -1131,17 +1107,15 @@ export default function PosTerminalPage() {
                     <div
                       key={dish.id}
                       onClick={() => addToCart(dish)}
-                      className={`bg-white rounded-2xl p-3.5 border transition-all cursor-pointer flex flex-col justify-between group select-none hover:shadow-md hover:border-[#E46254]/40 active:scale-[0.98] ${
-                        inCartQty > 0
-                          ? "border-[#E46254] ring-1 ring-[#E46254]/20 shadow-xs"
-                          : "border-zinc-200/80"
+                      className={`bg-white rounded-xl p-2.5 border transition-all cursor-pointer flex flex-col justify-between select-none hover:border-[#E46254]/50 hover:shadow-xs active:scale-[0.98] ${
+                        inCartQty > 0 ? "border-[#E46254] ring-1 ring-[#E46254]/20 bg-[#E46254]/2" : "border-zinc-200"
                       }`}
                     >
                       <div>
-                        {/* Top Indicator: Veg/Non-Veg + Category */}
-                        <div className="flex items-center justify-between mb-2">
+                        {/* Dot + Category */}
+                        <div className="flex items-center justify-between mb-1">
                           <span
-                            className={`w-3.5 h-3.5 border flex items-center justify-center shrink-0 rounded-xs ${
+                            className={`w-3 h-3 border flex items-center justify-center shrink-0 rounded-2xs ${
                               dish.is_veg ? "border-emerald-600" : "border-rose-600"
                             }`}
                           >
@@ -1151,20 +1125,19 @@ export default function PosTerminalPage() {
                               }`}
                             />
                           </span>
-
-                          <span className="text-[10px] font-semibold text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded uppercase tracking-wider truncate max-w-[100px]">
+                          <span className="text-[9px] font-semibold text-zinc-400 truncate max-w-[80px]">
                             {dish.category}
                           </span>
                         </div>
 
-                        {/* Dish Name */}
-                        <h4 className="text-xs font-bold text-zinc-800 group-hover:text-zinc-900 leading-snug line-clamp-2 min-h-[32px]">
+                        {/* Name */}
+                        <h4 className="text-xs font-bold text-zinc-800 line-clamp-2 leading-snug min-h-[30px]">
                           {dish.name}
                         </h4>
                       </div>
 
-                      {/* Bottom Price & Add Action */}
-                      <div className="flex items-center justify-between pt-3 mt-2 border-t border-zinc-100">
+                      {/* Price & Add */}
+                      <div className="flex items-center justify-between pt-2 mt-1 border-t border-zinc-100">
                         <span className="text-xs font-extrabold text-zinc-900">
                           ₹{dish.base_price}
                         </span>
@@ -1172,24 +1145,24 @@ export default function PosTerminalPage() {
                         {inCartQty > 0 ? (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className="flex items-center gap-1.5 bg-[#E46254] text-white px-1.5 py-0.5 rounded-lg shadow-xs"
+                            className="flex items-center gap-1 bg-[#E46254] text-white px-1.5 py-0.5 rounded shadow-xs"
                           >
                             <button
                               onClick={() => updateCartQty(dish.id, -1)}
                               className="p-0.5 hover:bg-white/20 rounded cursor-pointer"
                             >
-                              <Minus size={11} />
+                              <Minus size={10} />
                             </button>
-                            <span className="text-[11px] font-bold px-1">{inCartQty}</span>
+                            <span className="text-[11px] font-black px-1">{inCartQty}</span>
                             <button
                               onClick={() => updateCartQty(dish.id, 1)}
                               className="p-0.5 hover:bg-white/20 rounded cursor-pointer"
                             >
-                              <Plus size={11} />
+                              <Plus size={10} />
                             </button>
                           </div>
                         ) : (
-                          <span className="text-[11px] font-bold text-[#E46254] bg-[#E46254]/10 hover:bg-[#E46254] hover:text-white px-2 py-0.5 rounded-lg transition-colors">
+                          <span className="text-[10px] font-bold text-[#E46254] bg-[#E46254]/10 hover:bg-[#E46254] hover:text-white px-1.5 py-0.5 rounded transition-colors">
                             + Add
                           </span>
                         )}
@@ -1202,187 +1175,173 @@ export default function PosTerminalPage() {
           </div>
         </div>
 
-        {/* ── RIGHT SECTION: Order Ticket & Billing Pad ── */}
-        <div className="w-[380px] xl:w-[420px] bg-white flex flex-col justify-between shrink-0 shadow-lg z-20">
+        {/* ── RIGHT: Direct Order Ticket & Inline Fast Tender Dock ── */}
+        <div className="w-[360px] xl:w-[400px] bg-white flex flex-col justify-between shrink-0 shadow-md border-l border-zinc-200 z-20">
           
           {/* Ticket Header */}
-          <div className="shrink-0 p-4 border-b border-zinc-200/80 bg-zinc-50/50">
+          <div className="shrink-0 p-3 border-b border-zinc-200 bg-zinc-50/70">
             <div className="flex items-center justify-between">
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-zinc-400">
-                  Active Ticket
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-black text-zinc-900">
+                  {orderMode === "DINE_IN" ? selectedTable || "No Table" : takeawayToken}
                 </span>
-                <h3 className="text-base font-black text-zinc-900 flex items-center gap-2">
-                  <span>{orderMode === "DINE_IN" ? selectedTable || "No Table" : takeawayToken}</span>
-                  <span
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                      orderMode === "DINE_IN"
-                        ? currentTableSession?.status === "COOKING"
-                          ? "bg-amber-100 text-amber-800"
-                          : currentTableSession?.status === "BILLED"
-                          ? "bg-indigo-100 text-indigo-800"
-                          : "bg-emerald-100 text-emerald-800"
-                        : "bg-blue-100 text-blue-800"
-                    }`}
-                  >
-                    {orderMode === "DINE_IN"
-                      ? currentTableSession?.status || "VACANT"
-                      : orderMode}
-                  </span>
-                </h3>
+
+                {/* Transfer Table Button */}
+                {orderMode === "DINE_IN" && locations.length > 1 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowMoveTablePicker((v) => !v)}
+                      className="px-2 py-0.5 text-[10px] font-bold text-zinc-600 bg-white border border-zinc-300 rounded hover:bg-zinc-100 flex items-center gap-1 cursor-pointer"
+                      title="Move Table"
+                    >
+                      <ArrowRightLeft size={10} />
+                      <span>Move</span>
+                    </button>
+
+                    {/* Move Table Dropdown */}
+                    {showMoveTablePicker && (
+                      <div className="absolute left-0 top-full mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-xl p-1 z-50 space-y-0.5">
+                        <p className="text-[10px] font-bold text-zinc-400 px-2 py-1">Transfer to:</p>
+                        {locations
+                          .filter((l) => l.name !== selectedTable)
+                          .map((loc) => (
+                            <button
+                              key={loc.id}
+                              onClick={() => handleTransferTable(loc.name)}
+                              className="w-full text-left px-2 py-1 rounded text-xs font-semibold hover:bg-zinc-100 cursor-pointer"
+                            >
+                              {loc.name}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {/* Reset / Clear Button */}
               {cart.length > 0 && (
                 <button
                   onClick={clearCurrentCart}
-                  className="text-xs text-rose-600 hover:text-rose-700 font-semibold flex items-center gap-1 cursor-pointer"
+                  className="text-xs text-rose-600 hover:text-rose-700 font-semibold cursor-pointer"
                 >
-                  <RotateCcw size={12} />
-                  <span>Clear Cart</span>
+                  Clear Cart
                 </button>
               )}
             </div>
 
-            {/* Customer Details Strip */}
-            <div className="grid grid-cols-2 gap-2 mt-3 pt-2.5 border-t border-zinc-200/60">
-              <div className="relative">
-                <User size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
-                <input
-                  type="text"
-                  placeholder="Customer Name"
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  className="w-full pl-7 pr-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-medium outline-none focus:border-[#E46254]"
-                />
-              </div>
-
-              <div className="relative">
-                <Phone size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
-                <input
-                  type="tel"
-                  placeholder="Phone Number"
-                  value={customerPhone}
-                  onChange={(e) => setCustomerPhone(e.target.value)}
-                  className="w-full pl-7 pr-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-medium outline-none focus:border-[#E46254]"
-                />
-              </div>
+            {/* Optional Customer Inputs */}
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <input
+                type="text"
+                placeholder="Guest Name (Optional)"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                className="w-full px-2 py-1 bg-white border border-zinc-200 rounded text-xs outline-none focus:border-zinc-400"
+              />
+              <input
+                type="tel"
+                placeholder="Phone (Optional)"
+                value={customerPhone}
+                onChange={(e) => setCustomerPhone(e.target.value)}
+                className="w-full px-2 py-1 bg-white border border-zinc-200 rounded text-xs outline-none focus:border-zinc-400"
+              />
             </div>
           </div>
 
-          {/* Ticket Items Scroll Area */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* Ticket Scroll Items */}
+          <div className="flex-1 overflow-y-auto p-3 space-y-3">
             
-            {/* If Dine-In: Previously Fired Kitchen Items (Read-only status) */}
+            {/* Previously Fired Kitchen Items (With VOID / CANCEL Button) */}
             {orderMode === "DINE_IN" && currentTableSession?.firedItems && currentTableSession.firedItems.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-amber-800 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200/70">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-md border border-amber-200">
                   <span className="flex items-center gap-1.5">
-                    <ChefHat size={14} className="text-amber-600" />
+                    <ChefHat size={13} className="text-amber-600" />
                     <span>In Kitchen (Fired)</span>
                   </span>
-                  <span className="text-[11px] font-semibold text-amber-700">
-                    {getElapsedMinutes(currentTableSession.firstOrderTime)} ago
-                  </span>
+                  <span className="text-[10px] text-amber-700">Tap ❌ to Void</span>
                 </div>
 
-                <div className="divide-y divide-zinc-100 bg-zinc-50/60 rounded-xl p-2 border border-zinc-200/50">
+                <div className="divide-y divide-zinc-100 bg-zinc-50 rounded-lg p-2 border border-zinc-200">
                   {currentTableSession.firedItems.map((fi, idx) => (
-                    <div key={`${fi.id}-${idx}`} className="py-1.5 flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-bold text-zinc-500 w-5">
-                          {fi.quantity}×
-                        </span>
-                        <div>
-                          <p className="font-semibold text-zinc-700">{fi.name}</p>
-                          {fi.notes && <p className="text-[10px] text-zinc-400 italic">{fi.notes}</p>}
-                        </div>
+                    <div key={`${fi.id}-${idx}`} className="py-1 flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2 flex-1 pr-2">
+                        <span className="text-[11px] font-bold text-zinc-500">{fi.quantity}×</span>
+                        <span className="font-semibold text-zinc-700 truncate">{fi.name}</span>
                       </div>
-                      <span className="font-bold text-zinc-800">₹{fi.price * fi.quantity}</span>
+
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-zinc-800">₹{fi.price * fi.quantity}</span>
+                        <button
+                          onClick={() => handleVoidFiredDish(fi.name, fi.price)}
+                          className="text-zinc-300 hover:text-rose-600 p-0.5 cursor-pointer"
+                          title="Void / Cancel Dish"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Current Cart / Unfired Items Section */}
-            <div className="space-y-2">
+            {/* Current Cart / Unfired Items */}
+            <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs font-bold text-zinc-700 px-1">
-                <span>
-                  {orderMode === "DINE_IN" ? "New Items (Pending KOT)" : "Takeaway Dishes"}
-                </span>
+                <span>{orderMode === "DINE_IN" ? "New Items (Pending KOT)" : "Cart Items"}</span>
                 <span className="text-zinc-400">{cart.length} items</span>
               </div>
 
               {cart.length === 0 ? (
-                <div className="text-center py-8 border-2 border-dashed border-zinc-200 rounded-2xl">
-                  <p className="text-xs font-semibold text-zinc-400">
-                    No new items in ticket
-                  </p>
-                  <p className="text-[11px] text-zinc-400 mt-0.5">
-                    Tap any dish from the menu to add
-                  </p>
+                <div className="text-center py-6 border border-dashed border-zinc-200 rounded-lg">
+                  <p className="text-xs text-zinc-400">Cart is empty</p>
+                  <p className="text-[10px] text-zinc-400 mt-0.5">Click dishes on the left to add</p>
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   {cart.map((item) => (
                     <div
                       key={item.id}
-                      className="bg-white border border-zinc-200/80 rounded-xl p-2.5 shadow-2xs space-y-1.5"
+                      className="bg-white border border-zinc-200 rounded-lg p-2 flex items-center justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 flex-1 pr-2">
-                          <span
-                            className={`w-2 h-2 rounded-full shrink-0 ${
-                              item.isVeg ? "bg-emerald-500" : "bg-rose-500"
-                            }`}
-                          />
-                          <span className="text-xs font-bold text-zinc-800 truncate">
-                            {item.name}
-                          </span>
-                        </div>
-
-                        {/* Qty Stepper */}
-                        <div className="flex items-center gap-2 shrink-0">
-                          <div className="flex items-center bg-zinc-100 rounded-lg p-0.5">
-                            <button
-                              onClick={() => updateCartQty(item.id, -1)}
-                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-zinc-900 cursor-pointer"
-                            >
-                              <Minus size={11} />
-                            </button>
-                            <span className="text-xs font-black px-1.5 text-zinc-900 tabular-nums">
-                              {item.quantity}
-                            </span>
-                            <button
-                              onClick={() => updateCartQty(item.id, 1)}
-                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-zinc-900 cursor-pointer"
-                            >
-                              <Plus size={11} />
-                            </button>
-                          </div>
-
-                          <span className="text-xs font-bold text-zinc-900 w-12 text-right">
-                            ₹{item.price * item.quantity}
-                          </span>
-
-                          <button
-                            onClick={() => removeCartItem(item.id)}
-                            className="text-zinc-300 hover:text-rose-500 p-1 cursor-pointer"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
+                      <div className="flex items-center gap-2 flex-1 pr-2">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            item.isVeg ? "bg-emerald-500" : "bg-rose-500"
+                          }`}
+                        />
+                        <span className="text-xs font-bold text-zinc-800 truncate">{item.name}</span>
                       </div>
 
-                      {/* Special cooking instruction note */}
-                      <input
-                        type="text"
-                        placeholder="Add cooking note (e.g. less spicy)..."
-                        value={item.notes || ""}
-                        onChange={(e) => updateCartItemNote(item.id, e.target.value)}
-                        className="w-full text-[11px] px-2 py-0.5 bg-zinc-50 border border-zinc-200/70 rounded text-zinc-600 placeholder:text-zinc-400 outline-none focus:border-zinc-400"
-                      />
+                      <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center bg-zinc-100 rounded p-0.5">
+                          <button
+                            onClick={() => updateCartQty(item.id, -1)}
+                            className="p-0.5 text-zinc-600 hover:text-black cursor-pointer"
+                          >
+                            <Minus size={10} />
+                          </button>
+                          <span className="text-xs font-bold px-1 tabular-nums">{item.quantity}</span>
+                          <button
+                            onClick={() => updateCartQty(item.id, 1)}
+                            className="p-0.5 text-zinc-600 hover:text-black cursor-pointer"
+                          >
+                            <Plus size={10} />
+                          </button>
+                        </div>
+
+                        <span className="text-xs font-bold text-zinc-900 w-12 text-right">
+                          ₹{item.price * item.quantity}
+                        </span>
+
+                        <button
+                          onClick={() => removeCartItem(item.id)}
+                          className="text-zinc-300 hover:text-rose-500 p-0.5 cursor-pointer"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1390,11 +1349,13 @@ export default function PosTerminalPage() {
             </div>
           </div>
 
-          {/* Ticket Footer: Bill Calculations + Action Buttons */}
-          <div className="shrink-0 p-4 bg-zinc-50 border-t border-zinc-200/80 space-y-3">
+          {/* ═════════════════════════════════════════════════════════════════
+              INLINE TENDER DOCK (NO POPUP MODALS - SUB-5 SECOND CHECKOUT)
+             ═════════════════════════════════════════════════════════════════ */}
+          <div className="shrink-0 p-3 bg-zinc-50 border-t border-zinc-200 space-y-2.5">
             
-            {/* Price Breakdown */}
-            <div className="space-y-1.5 text-xs">
+            {/* Price Row */}
+            <div className="space-y-1 text-xs">
               <div className="flex justify-between text-zinc-500">
                 <span>Subtotal</span>
                 <span className="font-semibold text-zinc-800">₹{subtotal}</span>
@@ -1402,67 +1363,158 @@ export default function PosTerminalPage() {
 
               {effectiveDiscount > 0 && (
                 <div className="flex justify-between text-emerald-600 font-semibold">
-                  <span>Discount</span>
+                  <span>Discount ({discountPercent}%)</span>
                   <span>-₹{effectiveDiscount.toFixed(1)}</span>
                 </div>
               )}
 
               <div className="flex justify-between text-zinc-500">
-                <span>GST (5%)</span>
+                <span className="flex items-center gap-1">
+                  <span>GST (5%)</span>
+                  <button
+                    onClick={() => setShowDiscountInput((v) => !v)}
+                    className="text-[10px] text-[#E46254] underline cursor-pointer"
+                  >
+                    {discountPercent > 0 ? "Edit Disc" : "+ Discount"}
+                  </button>
+                </span>
                 <span className="font-semibold text-zinc-800">₹{taxTotal.toFixed(1)}</span>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-zinc-200 text-sm font-black text-zinc-900">
-                <div className="flex items-center gap-2">
-                  <span>Grand Total</span>
-                  <button
-                    onClick={() => setShowDiscountModal(true)}
-                    className="text-[10px] font-bold text-[#E46254] bg-[#E46254]/10 px-2 py-0.5 rounded cursor-pointer hover:bg-[#E46254]/20"
-                  >
-                    {effectiveDiscount > 0 ? "Edit Disc" : "+ Discount"}
-                  </button>
+              {/* Discount Selector Strip */}
+              {showDiscountInput && (
+                <div className="flex items-center gap-1 pt-1">
+                  {[0, 5, 10, 15, 20].map((pct) => (
+                    <button
+                      key={pct}
+                      onClick={() => {
+                        setDiscountPercent(pct);
+                        setShowDiscountInput(false);
+                      }}
+                      className={`flex-1 py-0.5 rounded text-[10px] font-bold border cursor-pointer ${
+                        discountPercent === pct
+                          ? "bg-zinc-900 text-white border-zinc-900"
+                          : "bg-white text-zinc-600 border-zinc-200"
+                      }`}
+                    >
+                      {pct === 0 ? "None" : `${pct}%`}
+                    </button>
+                  ))}
                 </div>
-                <span className="text-lg font-black text-zinc-900">₹{grandTotal}</span>
+              )}
+
+              {/* Grand Total */}
+              <div className="flex items-center justify-between pt-1.5 border-t border-zinc-200">
+                <span className="text-xs font-bold text-zinc-600">Grand Total:</span>
+                <span className="text-base font-black text-zinc-900">₹{grandTotal}</span>
               </div>
             </div>
 
-            {/* Action Buttons: High-Contrast & Clearly Positioned */}
-            <div className="grid grid-cols-2 gap-2 pt-1">
+            {/* Inline Dynamic UPI Preview */}
+            {showInlineUpi && (
+              <div className="bg-white p-2.5 rounded-lg border border-zinc-300 shadow-sm flex items-center justify-between gap-3 animate-in fade-in duration-150">
+                <div className="p-1.5 bg-white border rounded">
+                  <QRCode value={upiIntentUrl} size={80} />
+                </div>
+                <div className="flex-1 space-y-1">
+                  <p className="text-[11px] font-black text-zinc-900">Scan & Pay ₹{grandTotal}</p>
+                  <p className="text-[10px] text-zinc-400 truncate">{upiId || "UPI Active"}</p>
+                  <button
+                    disabled={isSubmitting}
+                    onClick={() => handleQuickSettle("UPI")}
+                    className="w-full py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-bold cursor-pointer"
+                  >
+                    Confirm Paid
+                  </button>
+                </div>
+                <button
+                  onClick={() => setShowInlineUpi(false)}
+                  className="p-1 text-zinc-400 hover:text-zinc-600 cursor-pointer self-start"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
+            {/* Quick Cash Change Calculator Bar */}
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                placeholder="Cash Given..."
+                value={cashTendered}
+                onChange={(e) => setCashTendered(e.target.value)}
+                className="w-24 px-2 py-1 bg-white border border-zinc-300 rounded text-xs font-bold outline-none"
+              />
+              {[grandTotal, 500, 1000, 2000]
+                .filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i)
+                .slice(0, 3)
+                .map((val) => (
+                  <button
+                    key={val}
+                    onClick={() => setCashTendered(val.toString())}
+                    className="px-1.5 py-1 bg-white border border-zinc-300 hover:bg-zinc-100 rounded text-[11px] font-bold text-zinc-700 cursor-pointer"
+                  >
+                    ₹{val}
+                  </button>
+                ))}
+              {parseFloat(cashTendered) > grandTotal && (
+                <span className="text-[11px] font-black text-emerald-600 ml-auto">
+                  Change: ₹{changeDue}
+                </span>
+              )}
+            </div>
+
+            {/* 1-TAP INLINE ACTION BUTTONS */}
+            <div className="grid grid-cols-4 gap-1.5 pt-0.5">
               
-              {/* Button 1: FIRE KOT (Amber Button) */}
+              {/* Button 1: FIRE KOT (F4) */}
               <button
                 disabled={cart.length === 0 || isSubmitting}
                 onClick={handleFireKOT}
-                className="py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                className="col-span-2 py-2 px-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-1 shadow-xs cursor-pointer"
               >
-                <Flame size={15} />
-                <span>Fire KOT</span>
+                <Flame size={13} />
+                <span>Fire KOT (F4)</span>
               </button>
 
-              {/* Button 2: Print Bill Estimate (Dine-In) OR Direct Settle */}
-              {orderMode === "DINE_IN" ? (
-                <button
-                  disabled={allCurrentItems.length === 0 || isSubmitting}
-                  onClick={handlePrintGuestBill}
-                  className="py-2.5 px-3 rounded-xl border border-zinc-300 bg-white hover:bg-zinc-100 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
-                >
-                  <Printer size={15} />
-                  <span>Print Bill</span>
-                </button>
-              ) : null}
-
-              {/* Button 3: Settle / Pay (Full Width or Primary Emerald Button) */}
+              {/* Button 2: Print Bill Estimate (F9) */}
               <button
                 disabled={allCurrentItems.length === 0 || isSubmitting}
-                onClick={() => setShowPaymentModal(true)}
-                className={`py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer ${
-                  orderMode !== "DINE_IN" ? "col-span-1" : "col-span-2"
-                }`}
+                onClick={handlePrintGuestBill}
+                className="col-span-2 py-2 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
               >
-                <CreditCard size={15} />
-                <span>
-                  {orderMode === "DINE_IN" ? "Settle Table" : "Quick Pay & Settle"}
-                </span>
+                <Printer size={13} />
+                <span>Bill (F9)</span>
+              </button>
+
+              {/* Button 3: Instant CASH Settle (F8) */}
+              <button
+                disabled={allCurrentItems.length === 0 || isSubmitting}
+                onClick={() => handleQuickSettle("CASH")}
+                className="col-span-2 py-2.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-1 shadow-xs cursor-pointer"
+              >
+                <Banknote size={14} />
+                <span>CASH (F8)</span>
+              </button>
+
+              {/* Button 4: Instant UPI QR Toggle */}
+              <button
+                disabled={allCurrentItems.length === 0 || isSubmitting}
+                onClick={() => setShowInlineUpi((v) => !v)}
+                className="col-span-1 py-2.5 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
+              >
+                <QrCode size={13} />
+                <span>UPI</span>
+              </button>
+
+              {/* Button 5: Instant CARD Settle */}
+              <button
+                disabled={allCurrentItems.length === 0 || isSubmitting}
+                onClick={() => handleQuickSettle("CARD")}
+                className="col-span-1 py-2.5 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
+              >
+                <CreditCard size={13} />
+                <span>CARD</span>
               </button>
             </div>
           </div>
@@ -1470,322 +1522,32 @@ export default function PosTerminalPage() {
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          MODAL: FULL FLOOR MAP (Table Layout Grid)
-         ═════════════════════════════════════════════════════════════════════ */}
-      {showFloorModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden border border-zinc-200 animate-in fade-in zoom-in-95 duration-200">
-            <div className="p-6 border-b border-zinc-200 flex items-center justify-between bg-zinc-50">
-              <div>
-                <h3 className="text-lg font-black text-zinc-900">Floor Tables Overview</h3>
-                <p className="text-xs text-zinc-500 mt-0.5">
-                  Select a table to open its active order ticket or start a new order.
-                </p>
-              </div>
-
-              {/* Status Legend */}
-              <div className="flex items-center gap-4 text-xs font-bold">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                  <span className="text-zinc-600">Vacant</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
-                  <span className="text-zinc-600">In Kitchen</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500" />
-                  <span className="text-zinc-600">Billed</span>
-                </div>
-                <button
-                  onClick={() => setShowFloorModal(false)}
-                  className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer ml-3"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-            </div>
-
-            <div className="p-6 max-h-[70vh] overflow-y-auto grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-              {locations.map((loc) => {
-                const session = tableSessionMap.get(loc.name);
-                const isSelected = selectedTable === loc.name;
-                const isVacant = !session || session.status === "VACANT";
-                const isCooking = session?.status === "COOKING";
-                const isBilled = session?.status === "BILLED";
-                const elapsed = getElapsedMinutes(session?.firstOrderTime);
-
-                return (
-                  <div
-                    key={loc.id}
-                    onClick={() => {
-                      setSelectedTable(loc.name);
-                      setShowFloorModal(false);
-                      clearCurrentCart();
-                    }}
-                    className={`rounded-2xl p-4 border transition-all cursor-pointer flex flex-col justify-between group active:scale-[0.98] min-h-[140px] shadow-xs ${
-                      isSelected ? "ring-2 ring-[#E46254]" : ""
-                    } ${
-                      isVacant
-                        ? "bg-white border-zinc-200 hover:border-emerald-400 hover:bg-emerald-50/20"
-                        : isCooking
-                        ? "bg-amber-50/70 border-amber-300 hover:border-amber-400"
-                        : "bg-indigo-50/70 border-indigo-300 hover:border-indigo-400"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <span
-                          className={`text-[10px] font-black uppercase px-2 py-0.5 rounded tracking-wider ${
-                            isVacant
-                              ? "bg-emerald-100 text-emerald-800"
-                              : isCooking
-                              ? "bg-amber-200 text-amber-900"
-                              : "bg-indigo-200 text-indigo-900"
-                          }`}
-                        >
-                          {isVacant ? "Vacant" : isCooking ? "Cooking" : "Billed"}
-                        </span>
-                        <h4 className="text-base font-black text-zinc-900 mt-2">{loc.name}</h4>
-                      </div>
-
-                      {elapsed && (
-                        <span className="text-[10px] font-bold text-zinc-500 bg-white/80 px-1.5 py-0.5 rounded">
-                          {elapsed}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between pt-3 mt-3 border-t border-zinc-200/60">
-                      <span className="text-xs text-zinc-500 font-medium">
-                        {isVacant ? `${loc.capacity || 4} Seats` : `${session?.firedItems.length || 0} items`}
-                      </span>
-                      <span className="text-sm font-black text-zinc-900">
-                        {isVacant ? "Available" : `₹${session?.runningTotal}`}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ═════════════════════════════════════════════════════════════════════
-          MODAL: PAYMENT & SETTLEMENT (Cash Tender / Dynamic UPI / Card)
-         ═════════════════════════════════════════════════════════════════════ */}
-      {showPaymentModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden border border-zinc-200 animate-in fade-in zoom-in-95 duration-200">
-            <div className="p-6 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-black text-zinc-900">Payment Settlement</h3>
-                <p className="text-xs text-zinc-500 mt-0.5">
-                  {orderMode === "DINE_IN" ? `Table: ${selectedTable}` : takeawayToken} · Total: ₹{grandTotal}
-                </p>
-              </div>
-              <button
-                onClick={() => setShowPaymentModal(false)}
-                className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-6">
-              {/* Payment Method Selector */}
-              <div className="grid grid-cols-3 gap-2">
-                {(["CASH", "UPI", "CARD"] as PaymentMethod[]).map((mode) => (
-                  <button
-                    key={mode}
-                    onClick={() => setSelectedPaymentMethod(mode)}
-                    className={`py-3 rounded-2xl text-xs font-black flex flex-col items-center gap-1.5 border transition-all cursor-pointer ${
-                      selectedPaymentMethod === mode
-                        ? "bg-zinc-900 text-white border-zinc-900 shadow-md"
-                        : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
-                    }`}
-                  >
-                    {mode === "CASH" && <Banknote size={18} />}
-                    {mode === "UPI" && <QrCode size={18} />}
-                    {mode === "CARD" && <CreditCard size={18} />}
-                    <span>{mode}</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* Mode-Specific Payment UI */}
-              {selectedPaymentMethod === "CASH" && (
-                <div className="space-y-4 bg-zinc-50 p-4 rounded-2xl border border-zinc-200/80">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-zinc-600">Cash Tendered:</span>
-                    <input
-                      type="number"
-                      placeholder={`₹${grandTotal}`}
-                      value={cashTendered}
-                      onChange={(e) => setCashTendered(e.target.value)}
-                      className="w-32 py-1.5 px-3 text-right bg-white border border-zinc-300 rounded-xl font-black text-sm outline-none focus:border-[#E46254]"
-                    />
-                  </div>
-
-                  {/* Fast Note Quick Buttons */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-zinc-400">Quick:</span>
-                    {[
-                      grandTotal,
-                      Math.ceil(grandTotal / 100) * 100,
-                      500,
-                      1000,
-                      2000,
-                    ]
-                      .filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i)
-                      .slice(0, 4)
-                      .map((val) => (
-                        <button
-                          key={val}
-                          onClick={() => setCashTendered(val.toString())}
-                          className="px-2.5 py-1 rounded-lg bg-white border border-zinc-300 text-xs font-bold text-zinc-700 hover:bg-zinc-100 cursor-pointer"
-                        >
-                          ₹{val}
-                        </button>
-                      ))}
-                  </div>
-
-                  {/* Return Change Calculator */}
-                  <div className="flex items-center justify-between pt-3 border-t border-zinc-200">
-                    <span className="text-xs font-black text-zinc-600">Return Change:</span>
-                    <span className="text-base font-black text-emerald-600">
-                      ₹{changeDue.toFixed(0)}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {selectedPaymentMethod === "UPI" && (
-                <div className="flex flex-col items-center justify-center p-5 bg-zinc-50 rounded-2xl border border-zinc-200/80 text-center space-y-3">
-                  <div className="p-3 bg-white rounded-2xl border border-zinc-200 shadow-sm">
-                    <QRCode value={upiIntentUrl} size={150} />
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-zinc-800">Scan & Pay ₹{grandTotal}</p>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">{upiId || "UPI Enabled"}</p>
-                  </div>
-                </div>
-              )}
-
-              {selectedPaymentMethod === "CARD" && (
-                <div className="p-6 bg-zinc-50 rounded-2xl border border-zinc-200/80 text-center space-y-2">
-                  <CreditCard size={32} className="mx-auto text-zinc-400" />
-                  <p className="text-xs font-bold text-zinc-800">Swipe / Tap on POS Terminal</p>
-                  <p className="text-[11px] text-zinc-400">
-                    Collect ₹{grandTotal} on your card machine and click Confirm below.
-                  </p>
-                </div>
-              )}
-
-              {/* Confirm Settlement Button */}
-              <button
-                disabled={isSubmitting}
-                onClick={handleSettleOrder}
-                className="w-full py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer"
-              >
-                <CheckCircle2 size={16} />
-                <span>
-                  Confirm ₹{grandTotal} via {selectedPaymentMethod} & Print Invoice
-                </span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ═════════════════════════════════════════════════════════════════════
-          MODAL: DISCOUNT SETTER
-         ═════════════════════════════════════════════════════════════════════ */}
-      {showDiscountModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden border border-zinc-200 p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-black text-zinc-900">Apply Discount</h3>
-              <button
-                onClick={() => setShowDiscountModal(false)}
-                className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="flex bg-zinc-100 p-1 rounded-xl">
-              <button
-                onClick={() => setDiscountMode("PERCENT")}
-                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                  discountMode === "PERCENT" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500"
-                }`}
-              >
-                Percentage (%)
-              </button>
-              <button
-                onClick={() => setDiscountMode("FLAT")}
-                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                  discountMode === "FLAT" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500"
-                }`}
-              >
-                Flat Amount (₹)
-              </button>
-            </div>
-
-            {discountMode === "PERCENT" ? (
-              <div className="space-y-3">
-                <div className="grid grid-cols-4 gap-2">
-                  {[5, 10, 15, 20].map((pct) => (
-                    <button
-                      key={pct}
-                      onClick={() => setDiscountPercent(pct)}
-                      className={`py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
-                        discountPercent === pct
-                          ? "bg-zinc-900 text-white border-zinc-900"
-                          : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50"
-                      }`}
-                    >
-                      {pct}%
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="number"
-                  placeholder="Custom %"
-                  value={discountPercent || ""}
-                  onChange={(e) => setDiscountPercent(parseFloat(e.target.value) || 0)}
-                  className="w-full p-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold outline-none"
-                />
-              </div>
-            ) : (
-              <input
-                type="number"
-                placeholder="Discount amount in ₹"
-                value={discountAmount || ""}
-                onChange={(e) => setDiscountAmount(parseFloat(e.target.value) || 0)}
-                className="w-full p-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold outline-none"
-              />
-            )}
-
-            <button
-              onClick={() => setShowDiscountModal(false)}
-              className="w-full py-2.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-xs font-bold cursor-pointer"
-            >
-              Apply Discount
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ═════════════════════════════════════════════════════════════════════
-          THERMAL PRINT TEMPLATE (ESC/POS 80mm / 58mm Standard Receipt)
+          THERMAL PRINT RECEIPT (80mm / 58mm Standard ESC/POS)
          ═════════════════════════════════════════════════════════════════════ */}
       <div id="thermal-chit" className="hidden print:block text-black bg-white font-mono text-[11px] leading-tight p-2">
         {printChit && (
           <div>
-            {printChit.type === "KOT" ? (
+            {printChit.type === "VOID" ? (
+              <div className="space-y-1">
+                <div className="text-center font-bold text-sm border-b pb-1">
+                  *** KOT CANCELLATION CHIT ***
+                </div>
+                <div className="flex justify-between font-bold pt-1">
+                  <span>TABLE: {printChit.tableOrToken}</span>
+                  <span>{printChit.time}</span>
+                </div>
+                <div className="border-b my-1" />
+                <div className="font-bold text-xs">
+                  {printChit.items.map((it, idx) => (
+                    <div key={idx} className="flex justify-between">
+                      <span>CANCELLED: {it.quantity}× {it.name}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="text-[10px] pt-1">Reason: {printChit.reason || "Customer Request"}</div>
+                <div className="border-t my-1" />
+              </div>
+            ) : printChit.type === "KOT" ? (
               <div className="space-y-1">
                 <div className="text-center font-bold text-sm border-b pb-1">
                   *** KITCHEN ORDER TICKET (KOT) ***
@@ -1794,9 +1556,7 @@ export default function PosTerminalPage() {
                   <span>{printChit.mode === "DINE_IN" ? "TABLE:" : "TOKEN:"}</span>
                   <span className="text-base">{printChit.tableOrToken}</span>
                 </div>
-                {printChit.kotNumber && (
-                  <div>KOT ROUND: #{printChit.kotNumber}</div>
-                )}
+                {printChit.kotNumber && <div>KOT ROUND: #{printChit.kotNumber}</div>}
                 <div>TIME: {printChit.time}</div>
                 {printChit.customerName && <div>GUEST: {printChit.customerName}</div>}
                 <div className="border-b my-1" />
