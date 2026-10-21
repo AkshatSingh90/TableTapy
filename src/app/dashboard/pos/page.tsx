@@ -25,6 +25,7 @@ import {
   AlertCircle,
   RotateCcw,
   ArrowRightLeft,
+  Merge,
   ChevronDown
 } from "lucide-react";
 import QRCode from "react-qr-code";
@@ -75,7 +76,7 @@ interface OrderRecord {
 }
 
 type OrderMode = "DINE_IN" | "TAKEAWAY" | "DELIVERY";
-type PaymentMethod = "CASH" | "UPI" | "CARD" | "SPLIT";
+type PaymentMethod = "CASH" | "UPI" | "CARD";
 
 export default function PosTerminalPage() {
   const supabase = createClient();
@@ -89,12 +90,14 @@ export default function PosTerminalPage() {
   const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Active Terminal Mode
+  // Active Terminal Mode (Dine In vs Takeaway vs Delivery)
   const [orderMode, setOrderMode] = useState<OrderMode>("DINE_IN");
 
-  // Dine-In Specific Selection
+  // Dine-In Specific Selection & Actions
   const [selectedTable, setSelectedTable] = useState<string>("");
+  const [tableFilter, setTableFilter] = useState<"ALL" | "ACTIVE" | "BILLED" | "VACANT">("ALL");
   const [showMoveTablePicker, setShowMoveTablePicker] = useState<boolean>(false);
+  const [showMergeTablePicker, setShowMergeTablePicker] = useState<boolean>(false);
 
   // Takeaway Specific Selection: Sequential Daily Token
   const [takeawayTokenNumber, setTakeawayTokenNumber] = useState<number>(1);
@@ -112,13 +115,13 @@ export default function PosTerminalPage() {
   const [selectedCategory, setSelectedCategory] = useState("ALL");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Discount (Inline)
+  // Discount
   const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [showDiscountInput, setShowDiscountInput] = useState(false);
 
-  // Inline Payment States (NO MODALS)
+  // Clean Payment Tender Drawer (Revealed only when clicking "Collect Payment")
+  const [showTenderDrawer, setShowTenderDrawer] = useState<boolean>(false);
   const [cashTendered, setCashTendered] = useState<string>("");
-  const [showInlineUpi, setShowInlineUpi] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Thermal Print State
@@ -172,7 +175,7 @@ export default function PosTerminalPage() {
         if (rest.upi_id) setUpiId(rest.upi_id);
       }
 
-      // Tables / Locations: STRICTLY ONLY WHAT OWNER CREATED (NO HARDCODING)
+      // Tables / Locations: ONLY WHAT OWNER CREATED
       const { data: locData } = await supabase
         .from("locations")
         .select("*")
@@ -189,7 +192,6 @@ export default function PosTerminalPage() {
         setLocations(loaded);
         setSelectedTable(loaded[0].name);
       } else {
-        // Zero tables if the owner hasn't created any
         setLocations([]);
         setSelectedTable("");
       }
@@ -237,7 +239,7 @@ export default function PosTerminalPage() {
     if (orderData) {
       setActiveOrders(orderData as OrderRecord[]);
 
-      // Compute next sequential Takeaway Token # based on today's count
+      // Compute sequential daily takeaway token #
       const today = new Date().toDateString();
       const todayTakeaways = orderData.filter((o) => {
         const isTk = (o.table_no || "").toLowerCase().includes("token") || (o.table_no || "").toLowerCase().includes("takeaway");
@@ -252,7 +254,7 @@ export default function PosTerminalPage() {
 
     // Realtime Postgres listener
     const channel = supabase
-      .channel("pos_fast_terminal_sync")
+      .channel("pos_dinein_pro_sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "orders" },
@@ -283,49 +285,43 @@ export default function PosTerminalPage() {
     };
   }, [restaurantId]);
 
-  /* ─── 2. Keyboard Shortcuts Engine (F1, F2, F4, F8, F9, /) ────────── */
+  /* ─── 2. Keyboard Shortcuts (F1, F2, F4, F8, F9, /) ───────────────── */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Focus search: '/'
       if (e.key === "/" && document.activeElement !== searchInputRef.current) {
         e.preventDefault();
         searchInputRef.current?.focus();
         return;
       }
-      // F1: Dine-In Mode
       if (e.key === "F1") {
         e.preventDefault();
         setOrderMode("DINE_IN");
         return;
       }
-      // F2: Takeaway Mode
       if (e.key === "F2") {
         e.preventDefault();
         setOrderMode("TAKEAWAY");
         return;
       }
-      // F4: Fire KOT
       if (e.key === "F4") {
         e.preventDefault();
         handleFireKOT();
         return;
       }
-      // F8: Instant Cash Settle
       if (e.key === "F8") {
         e.preventDefault();
-        handleQuickSettle("CASH");
+        setShowTenderDrawer(true);
         return;
       }
-      // F9: Print Bill Estimate
       if (e.key === "F9") {
         e.preventDefault();
         handlePrintGuestBill();
         return;
       }
-      // Esc: Dismiss UPI QR / Unfocus
       if (e.key === "Escape") {
-        setShowInlineUpi(false);
+        setShowTenderDrawer(false);
         setShowMoveTablePicker(false);
+        setShowMergeTablePicker(false);
         setShowDiscountInput(false);
         searchInputRef.current?.blur();
       }
@@ -421,6 +417,17 @@ export default function PosTerminalPage() {
     return tableSessionMap.get(selectedTable) || null;
   }, [tableSessionMap, orderMode, selectedTable]);
 
+  // Filtered tables based on quick status pill
+  const filteredTables = useMemo(() => {
+    return locations.filter((loc) => {
+      const s = tableSessionMap.get(loc.name);
+      if (tableFilter === "ACTIVE") return s && s.status === "COOKING";
+      if (tableFilter === "BILLED") return s && s.status === "BILLED";
+      if (tableFilter === "VACANT") return !s || s.status === "VACANT";
+      return true;
+    });
+  }, [locations, tableSessionMap, tableFilter]);
+
   /* ─── 4. Active Takeaway Tokens ───────────────────────────────────── */
   const activeTakeawayOrders = useMemo(() => {
     return activeOrders.filter((o) => {
@@ -497,7 +504,7 @@ export default function PosTerminalPage() {
     setCart([]);
     setDiscountPercent(0);
     setCashTendered("");
-    setShowInlineUpi(false);
+    setShowTenderDrawer(false);
   };
 
   /* ─── 7. Calculations ─────────────────────────────────────────────── */
@@ -611,7 +618,6 @@ export default function PosTerminalPage() {
 
     setIsSubmitting(true);
     try {
-      // Find order containing this dish
       for (const ord of currentTableSession.orders) {
         if (!Array.isArray(ord.items_json)) continue;
         const idx = ord.items_json.findIndex(
@@ -643,7 +649,6 @@ export default function PosTerminalPage() {
               .eq("id", ord.id);
           }
 
-          // Trigger Kitchen Void Chit print
           setPrintChit({
             type: "VOID",
             mode: "DINE_IN",
@@ -698,7 +703,38 @@ export default function PosTerminalPage() {
     }
   };
 
-  /* ─── 11. Actions: Print Bill Estimate (Guest Check) ──────────────── */
+  /* ─── 11. Actions: Merge Tables (Combine big group party) ─────────── */
+  const handleMergeTable = async (targetTable: string) => {
+    if (!currentTableSession || currentTableSession.orders.length === 0) {
+      showToast("No active order to merge.");
+      return;
+    }
+
+    const confirmMerge = window.confirm(`Merge ${selectedTable} into ${targetTable}? All orders will combine into ${targetTable}.`);
+    if (!confirmMerge) return;
+
+    setIsSubmitting(true);
+    try {
+      const orderIds = currentTableSession.orders.map((o) => o.id);
+      const { error } = await supabase
+        .from("orders")
+        .update({ table_no: targetTable, note: `[Merged ${selectedTable} into ${targetTable}]` })
+        .in("id", orderIds);
+
+      if (error) throw error;
+
+      showToast(`🔗 Merged ${selectedTable} ➔ ${targetTable}`);
+      setSelectedTable(targetTable);
+      setShowMergeTablePicker(false);
+      if (restaurantId) fetchActiveOrders(restaurantId);
+    } catch (err: any) {
+      showToast("Merge failed: " + (err.message || "Failed"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /* ─── 12. Actions: Print Bill Estimate with Dynamic UPI QR on Bill ── */
   const handlePrintGuestBill = async () => {
     if (allCurrentItems.length === 0) {
       showToast("No items to print bill.");
@@ -732,7 +768,7 @@ export default function PosTerminalPage() {
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
-    showToast(`🖨️ Bill Printed for ${targetDestination} (F9)`);
+    showToast(`🖨️ Bill Printed for ${targetDestination} (with UPI QR for Table)`);
     if (restaurantId) fetchActiveOrders(restaurantId);
 
     setTimeout(() => {
@@ -740,7 +776,7 @@ export default function PosTerminalPage() {
     }, 100);
   };
 
-  /* ─── 12. Actions: Fast Inline Settle (1-Click Cash/UPI/Card) ─────── */
+  /* ─── 13. Actions: 1-Click Fast Settle (Cash / UPI Paid / Card) ───── */
   const handleQuickSettle = async (method: PaymentMethod) => {
     if (allCurrentItems.length === 0) {
       showToast("No items to settle.");
@@ -833,8 +869,8 @@ export default function PosTerminalPage() {
       clearCurrentCart();
       setCustomerName("");
       setCustomerPhone("");
+      setShowTenderDrawer(false);
 
-      // Increment Takeaway token sequentially
       if (orderMode === "TAKEAWAY") {
         setTakeawayTokenNumber((prev) => prev + 1);
       }
@@ -851,12 +887,16 @@ export default function PosTerminalPage() {
     }
   };
 
-  // UPI Intent URL
+  // UPI Intent URL for Printed Bill QR
   const upiIntentUrl = useMemo(() => {
     const vpa = upiId || "merchant@upi";
     const name = encodeURIComponent(restaurantName);
     return `upi://pay?pa=${vpa}&pn=${name}&am=${grandTotal}&cu=INR`;
   }, [upiId, restaurantName, grandTotal]);
+
+  const activeTablesCount = Array.from(tableSessionMap.values()).filter((s) => s.status === "COOKING").length;
+  const billedTablesCount = Array.from(tableSessionMap.values()).filter((s) => s.status === "BILLED").length;
+  const vacantTablesCount = Array.from(tableSessionMap.values()).filter((s) => s.status === "VACANT").length;
 
   return (
     <div className="flex h-screen flex-col bg-[#F8F9FA] font-sans text-zinc-900 select-none overflow-hidden">
@@ -924,14 +964,14 @@ export default function PosTerminalPage() {
         {/* Keyboard Helper Pills */}
         <div className="hidden md:flex items-center gap-2 text-[11px] font-semibold text-zinc-400">
           <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">/ Search</span>
-          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F4 Fire KOT</span>
-          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F8 Settle Cash</span>
+          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F4 KOT</span>
+          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F8 Settle</span>
           <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F9 Bill</span>
         </div>
       </header>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          SUB-BAR: Real Tables Strip (NO Hardcoding) OR Takeaway Counter
+          DINE-IN TABLE STRIP / COUNTER BAR (Organized with Quick Status Filter)
          ═════════════════════════════════════════════════════════════════════ */}
       <div className="shrink-0 bg-white border-b border-zinc-200 px-4 py-2 flex items-center justify-between gap-3 overflow-x-auto no-scrollbar">
         {orderMode === "DINE_IN" ? (
@@ -944,54 +984,94 @@ export default function PosTerminalPage() {
               </Link>
             </div>
           ) : (
-            <div className="flex items-center gap-2 w-full overflow-x-auto no-scrollbar">
-              <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider shrink-0">
-                Tables:
-              </span>
-              {locations.map((loc) => {
-                const session = tableSessionMap.get(loc.name);
-                const isSelected = selectedTable === loc.name;
-                const isVacant = !session || session.status === "VACANT";
-                const isCooking = session?.status === "COOKING";
-                const isBilled = session?.status === "BILLED";
+            <div className="flex items-center gap-3 w-full">
+              
+              {/* Quick Status Filters for Cashier */}
+              <div className="flex items-center gap-1 shrink-0 bg-zinc-100 p-0.5 rounded-lg border border-zinc-200">
+                <button
+                  onClick={() => setTableFilter("ALL")}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold cursor-pointer ${
+                    tableFilter === "ALL" ? "bg-white text-zinc-900 shadow-2xs" : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  All ({locations.length})
+                </button>
+                <button
+                  onClick={() => setTableFilter("ACTIVE")}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
+                    tableFilter === "ACTIVE" ? "bg-amber-500 text-white shadow-2xs" : "text-amber-800 hover:bg-amber-50"
+                  }`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  <span>Cooking ({activeTablesCount})</span>
+                </button>
+                <button
+                  onClick={() => setTableFilter("BILLED")}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
+                    tableFilter === "BILLED" ? "bg-indigo-600 text-white shadow-2xs" : "text-indigo-800 hover:bg-indigo-50"
+                  }`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                  <span>Billed ({billedTablesCount})</span>
+                </button>
+                <button
+                  onClick={() => setTableFilter("VACANT")}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
+                    tableFilter === "VACANT" ? "bg-emerald-600 text-white shadow-2xs" : "text-emerald-800 hover:bg-emerald-50"
+                  }`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span>Vacant ({vacantTablesCount})</span>
+                </button>
+              </div>
 
-                return (
-                  <button
-                    key={loc.id}
-                    onClick={() => {
-                      setSelectedTable(loc.name);
-                      clearCurrentCart();
-                    }}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer border ${
-                      isSelected
-                        ? "bg-[#E46254] text-white border-[#E46254] shadow-xs"
-                        : isVacant
-                        ? "bg-white text-zinc-700 border-zinc-200 hover:border-zinc-300"
-                        : isCooking
-                        ? "bg-amber-50 text-amber-900 border-amber-300"
-                        : "bg-indigo-50 text-indigo-900 border-indigo-300"
-                    }`}
-                  >
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
+              {/* Table Buttons */}
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5 flex-1">
+                {filteredTables.map((loc) => {
+                  const session = tableSessionMap.get(loc.name);
+                  const isSelected = selectedTable === loc.name;
+                  const isVacant = !session || session.status === "VACANT";
+                  const isCooking = session?.status === "COOKING";
+                  const isBilled = session?.status === "BILLED";
+
+                  return (
+                    <button
+                      key={loc.id}
+                      onClick={() => {
+                        setSelectedTable(loc.name);
+                        clearCurrentCart();
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer border shrink-0 ${
                         isSelected
-                          ? "bg-white"
+                          ? "bg-[#E46254] text-white border-[#E46254] shadow-xs ring-1 ring-[#E46254]/30"
                           : isVacant
-                          ? "bg-emerald-500"
+                          ? "bg-white text-zinc-700 border-zinc-200 hover:border-zinc-300"
                           : isCooking
-                          ? "bg-amber-500 animate-pulse"
-                          : "bg-indigo-500"
+                          ? "bg-amber-50 text-amber-900 border-amber-300"
+                          : "bg-indigo-50 text-indigo-900 border-indigo-300"
                       }`}
-                    />
-                    <span>{loc.name}</span>
-                    {!isVacant && session?.runningTotal ? (
-                      <span className={`text-[10px] font-bold ${isSelected ? "text-white" : "text-zinc-600"}`}>
-                        ₹{session.runningTotal}
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
+                    >
+                      <span
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          isSelected
+                            ? "bg-white"
+                            : isVacant
+                            ? "bg-emerald-500"
+                            : isCooking
+                            ? "bg-amber-500 animate-pulse"
+                            : "bg-indigo-500"
+                        }`}
+                      />
+                      <span>{loc.name}</span>
+                      {!isVacant && session?.runningTotal ? (
+                        <span className={`text-[10px] font-bold ${isSelected ? "text-white" : "text-zinc-600"}`}>
+                          ₹{session.runningTotal}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )
         ) : (
@@ -1012,7 +1092,6 @@ export default function PosTerminalPage() {
               </button>
             </div>
 
-            {/* Quick in-progress takeaway pills */}
             {activeTakeawayOrders.length > 0 && (
               <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
                 <span className="text-[11px] font-bold text-zinc-400">Waiting:</span>
@@ -1060,7 +1139,7 @@ export default function PosTerminalPage() {
               )}
             </div>
 
-            {/* Category Pills Strip */}
+            {/* Category Pills */}
             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
               {categories.map((cat) => {
                 const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
@@ -1175,7 +1254,7 @@ export default function PosTerminalPage() {
           </div>
         </div>
 
-        {/* ── RIGHT: Direct Order Ticket & Inline Fast Tender Dock ── */}
+        {/* ── RIGHT: Direct Order Ticket & Clean Payment Dock ── */}
         <div className="w-[360px] xl:w-[400px] bg-white flex flex-col justify-between shrink-0 shadow-md border-l border-zinc-200 z-20">
           
           {/* Ticket Header */}
@@ -1186,19 +1265,20 @@ export default function PosTerminalPage() {
                   {orderMode === "DINE_IN" ? selectedTable || "No Table" : takeawayToken}
                 </span>
 
-                {/* Transfer Table Button */}
+                {/* Move Table */}
                 {orderMode === "DINE_IN" && locations.length > 1 && (
                   <div className="relative">
                     <button
-                      onClick={() => setShowMoveTablePicker((v) => !v)}
+                      onClick={() => {
+                        setShowMoveTablePicker((v) => !v);
+                        setShowMergeTablePicker(false);
+                      }}
                       className="px-2 py-0.5 text-[10px] font-bold text-zinc-600 bg-white border border-zinc-300 rounded hover:bg-zinc-100 flex items-center gap-1 cursor-pointer"
-                      title="Move Table"
                     >
                       <ArrowRightLeft size={10} />
                       <span>Move</span>
                     </button>
 
-                    {/* Move Table Dropdown */}
                     {showMoveTablePicker && (
                       <div className="absolute left-0 top-full mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-xl p-1 z-50 space-y-0.5">
                         <p className="text-[10px] font-bold text-zinc-400 px-2 py-1">Transfer to:</p>
@@ -1208,6 +1288,39 @@ export default function PosTerminalPage() {
                             <button
                               key={loc.id}
                               onClick={() => handleTransferTable(loc.name)}
+                              className="w-full text-left px-2 py-1 rounded text-xs font-semibold hover:bg-zinc-100 cursor-pointer"
+                            >
+                              {loc.name}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Merge Table (Big Party) */}
+                {orderMode === "DINE_IN" && locations.length > 1 && currentTableSession && currentTableSession.orders.length > 0 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => {
+                        setShowMergeTablePicker((v) => !v);
+                        setShowMoveTablePicker(false);
+                      }}
+                      className="px-2 py-0.5 text-[10px] font-bold text-zinc-600 bg-white border border-zinc-300 rounded hover:bg-zinc-100 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Merge size={10} />
+                      <span>Merge</span>
+                    </button>
+
+                    {showMergeTablePicker && (
+                      <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-zinc-200 rounded-lg shadow-xl p-1 z-50 space-y-0.5">
+                        <p className="text-[10px] font-bold text-zinc-400 px-2 py-1">Merge into Table:</p>
+                        {locations
+                          .filter((l) => l.name !== selectedTable)
+                          .map((loc) => (
+                            <button
+                              key={loc.id}
+                              onClick={() => handleMergeTable(loc.name)}
                               className="w-full text-left px-2 py-1 rounded text-xs font-semibold hover:bg-zinc-100 cursor-pointer"
                             >
                               {loc.name}
@@ -1350,7 +1463,7 @@ export default function PosTerminalPage() {
           </div>
 
           {/* ═════════════════════════════════════════════════════════════════
-              INLINE TENDER DOCK (NO POPUP MODALS - SUB-5 SECOND CHECKOUT)
+              CLEAN PAYMENT DOCK (ONE PRIMARY BUTTON · NO MODAL CONFUSION)
              ═════════════════════════════════════════════════════════════════ */}
           <div className="shrink-0 p-3 bg-zinc-50 border-t border-zinc-200 space-y-2.5">
             
@@ -1410,119 +1523,104 @@ export default function PosTerminalPage() {
               </div>
             </div>
 
-            {/* Inline Dynamic UPI Preview */}
-            {showInlineUpi && (
-              <div className="bg-white p-2.5 rounded-lg border border-zinc-300 shadow-sm flex items-center justify-between gap-3 animate-in fade-in duration-150">
-                <div className="p-1.5 bg-white border rounded">
-                  <QRCode value={upiIntentUrl} size={80} />
-                </div>
-                <div className="flex-1 space-y-1">
-                  <p className="text-[11px] font-black text-zinc-900">Scan & Pay ₹{grandTotal}</p>
-                  <p className="text-[10px] text-zinc-400 truncate">{upiId || "UPI Active"}</p>
-                  <button
-                    disabled={isSubmitting}
-                    onClick={() => handleQuickSettle("UPI")}
-                    className="w-full py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-bold cursor-pointer"
-                  >
-                    Confirm Paid
-                  </button>
-                </div>
-                <button
-                  onClick={() => setShowInlineUpi(false)}
-                  className="p-1 text-zinc-400 hover:text-zinc-600 cursor-pointer self-start"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            )}
-
-            {/* Quick Cash Change Calculator Bar */}
-            <div className="flex items-center gap-1">
-              <input
-                type="number"
-                placeholder="Cash Given..."
-                value={cashTendered}
-                onChange={(e) => setCashTendered(e.target.value)}
-                className="w-24 px-2 py-1 bg-white border border-zinc-300 rounded text-xs font-bold outline-none"
-              />
-              {[grandTotal, 500, 1000, 2000]
-                .filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i)
-                .slice(0, 3)
-                .map((val) => (
-                  <button
-                    key={val}
-                    onClick={() => setCashTendered(val.toString())}
-                    className="px-1.5 py-1 bg-white border border-zinc-300 hover:bg-zinc-100 rounded text-[11px] font-bold text-zinc-700 cursor-pointer"
-                  >
-                    ₹{val}
-                  </button>
-                ))}
-              {parseFloat(cashTendered) > grandTotal && (
-                <span className="text-[11px] font-black text-emerald-600 ml-auto">
-                  Change: ₹{changeDue}
-                </span>
-              )}
-            </div>
-
-            {/* 1-TAP INLINE ACTION BUTTONS */}
-            <div className="grid grid-cols-4 gap-1.5 pt-0.5">
-              
-              {/* Button 1: FIRE KOT (F4) */}
+            {/* ACTION ROW 1: FIRE KOT & PRINT BILL */}
+            <div className="grid grid-cols-2 gap-2">
               <button
                 disabled={cart.length === 0 || isSubmitting}
                 onClick={handleFireKOT}
-                className="col-span-2 py-2 px-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-1 shadow-xs cursor-pointer"
+                className="py-2 px-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
               >
                 <Flame size={13} />
                 <span>Fire KOT (F4)</span>
               </button>
 
-              {/* Button 2: Print Bill Estimate (F9) */}
               <button
                 disabled={allCurrentItems.length === 0 || isSubmitting}
                 onClick={handlePrintGuestBill}
-                className="col-span-2 py-2 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
+                className="py-2 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Printer size={13} />
-                <span>Bill (F9)</span>
-              </button>
-
-              {/* Button 3: Instant CASH Settle (F8) */}
-              <button
-                disabled={allCurrentItems.length === 0 || isSubmitting}
-                onClick={() => handleQuickSettle("CASH")}
-                className="col-span-2 py-2.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-1 shadow-xs cursor-pointer"
-              >
-                <Banknote size={14} />
-                <span>CASH (F8)</span>
-              </button>
-
-              {/* Button 4: Instant UPI QR Toggle */}
-              <button
-                disabled={allCurrentItems.length === 0 || isSubmitting}
-                onClick={() => setShowInlineUpi((v) => !v)}
-                className="col-span-1 py-2.5 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
-              >
-                <QrCode size={13} />
-                <span>UPI</span>
-              </button>
-
-              {/* Button 5: Instant CARD Settle */}
-              <button
-                disabled={allCurrentItems.length === 0 || isSubmitting}
-                onClick={() => handleQuickSettle("CARD")}
-                className="col-span-1 py-2.5 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
-              >
-                <CreditCard size={13} />
-                <span>CARD</span>
+                <span>Print Bill (F9)</span>
               </button>
             </div>
+
+            {/* ACTION ROW 2: SINGLE CLEAN COLLECT PAYMENT BUTTON OR 1-TOUCH DRAWER */}
+            {!showTenderDrawer ? (
+              <button
+                disabled={allCurrentItems.length === 0 || isSubmitting}
+                onClick={() => setShowTenderDrawer(true)}
+                className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-2 shadow-xs cursor-pointer transition-all"
+              >
+                <CreditCard size={15} />
+                <span>Collect Payment / Settle (₹{grandTotal}) · F8</span>
+              </button>
+            ) : (
+              <div className="bg-white border border-zinc-300 rounded-xl p-2.5 shadow-md space-y-2 animate-in fade-in zoom-in-95 duration-100">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-black text-zinc-900">
+                    Settle ₹{grandTotal} · Select Payment:
+                  </span>
+                  <button
+                    onClick={() => setShowTenderDrawer(false)}
+                    className="p-1 text-zinc-400 hover:text-zinc-600 cursor-pointer"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    disabled={isSubmitting}
+                    onClick={() => handleQuickSettle("CASH")}
+                    className="py-2 px-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-900 rounded-lg font-black text-xs flex flex-col items-center gap-1 cursor-pointer"
+                  >
+                    <Banknote size={15} className="text-emerald-700" />
+                    <span>💵 Cash</span>
+                  </button>
+
+                  <button
+                    disabled={isSubmitting}
+                    onClick={() => handleQuickSettle("UPI")}
+                    className="py-2 px-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-300 text-indigo-900 rounded-lg font-black text-xs flex flex-col items-center gap-1 cursor-pointer"
+                  >
+                    <QrCode size={15} className="text-indigo-700" />
+                    <span>📱 UPI Paid</span>
+                  </button>
+
+                  <button
+                    disabled={isSubmitting}
+                    onClick={() => handleQuickSettle("CARD")}
+                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-300 text-zinc-800 rounded-lg font-black text-xs flex flex-col items-center gap-1 cursor-pointer"
+                  >
+                    <CreditCard size={15} className="text-zinc-700" />
+                    <span>💳 Card</span>
+                  </button>
+                </div>
+
+                {/* Optional Quick Cash Calculator */}
+                <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-100 text-xs">
+                  <input
+                    type="number"
+                    placeholder="Cash Given..."
+                    value={cashTendered}
+                    onChange={(e) => setCashTendered(e.target.value)}
+                    className="w-24 px-2 py-0.5 bg-zinc-50 border border-zinc-300 rounded text-xs font-bold outline-none"
+                  />
+                  {parseFloat(cashTendered) > grandTotal && (
+                    <span className="text-[11px] font-black text-emerald-600 ml-auto">
+                      Change: ₹{changeDue}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════════
           THERMAL PRINT RECEIPT (80mm / 58mm Standard ESC/POS)
+          Includes Dynamic UPI QR on the Guest Bill for Tabletop Scanning!
          ═════════════════════════════════════════════════════════════════════ */}
       <div id="thermal-chit" className="hidden print:block text-black bg-white font-mono text-[11px] leading-tight p-2">
         {printChit && (
@@ -1627,6 +1725,18 @@ export default function PosTerminalPage() {
                     <span>{printChit.paymentMethod}</span>
                   </div>
                 )}
+                
+                {/* DYNAMIC UPI QR ON PRINTED BILL (Guest scans right from table!) */}
+                {upiId && (
+                  <div className="text-center pt-2 pb-1 border-t my-1">
+                    <div className="flex justify-center py-1">
+                      <QRCode value={upiIntentUrl} size={100} />
+                    </div>
+                    <div className="text-[10px] font-bold">SCAN TO PAY VIA UPI</div>
+                    <div className="text-[9px] text-zinc-600">{upiId}</div>
+                  </div>
+                )}
+
                 <div className="border-t my-1" />
                 <div className="text-center text-[10px]">Thank you, Visit Again!</div>
               </div>
