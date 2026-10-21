@@ -108,7 +108,6 @@ export default function UnifiedPosFloorPage() {
   const [selectedTable, setSelectedTable] = useState<string>("");
   const [tableFilter, setTableFilter] = useState<"ALL" | "ACTIVE" | "BILLED" | "VACANT">("ALL");
   const [showMovePicker, setShowMovePicker] = useState<boolean>(false);
-  const [showMergePicker, setShowMergePicker] = useState<boolean>(false);
 
   // Takeaway State
   const [takeawayCounter, setTakeawayCounter] = useState<number>(1);
@@ -331,7 +330,6 @@ export default function UnifiedPosFloorPage() {
       if (e.key === "Escape") {
         setIsPaymentDrawerOpen(false);
         setShowMovePicker(false);
-        setShowMergePicker(false);
         setShowDiscountSelector(false);
         searchInputRef.current?.blur();
       }
@@ -398,7 +396,9 @@ export default function UnifiedPosFloorPage() {
       if (ord.customer_phone) session.customerPhone = ord.customer_phone;
 
       // Classify source: Guest QR vs Staff POS vs Captain
-      const isGuestQr = !ord.note?.includes("Fired via POS");
+      const isPos = ord.note?.includes("Fired via POS");
+      const isCaptain = ord.customer_name?.toLowerCase().includes("captain") || ord.note?.toLowerCase().includes("captain");
+      const sourceTag: "QR" | "STAFF" | "CAPTAIN" = isPos ? "STAFF" : isCaptain ? "CAPTAIN" : "QR";
       const roundIdx = session.orders.length;
 
       if (Array.isArray(ord.items_json)) {
@@ -412,7 +412,7 @@ export default function UnifiedPosFloorPage() {
             isVeg: it.isVeg !== false,
             category: it.category,
             notes: raw.notes || "",
-            source: isGuestQr ? "QR" : "STAFF",
+            source: sourceTag,
             roundNumber: roundIdx,
             orderId: ord.id,
             createdAt: ord.created_at,
@@ -717,35 +717,26 @@ export default function UnifiedPosFloorPage() {
     }
   };
 
-  /* ─── 11. Actions: Merge Tables (Party of 8+) ─────────────────────── */
-  const handleMergeTable = async (targetTable: string) => {
-    if (!currentTableSession || currentTableSession.orders.length === 0) {
-      showToast("No active check to merge.");
-      return;
-    }
+  /* ─── 11. Actions: Reprint KOT Chit ───────────────────────────────── */
+  const handleReprintKOT = (roundNum: number) => {
+    if (!currentTableSession) return;
+    const roundItems = currentTableSession.firedRounds.filter((r) => r.roundNumber === roundNum);
+    if (roundItems.length === 0) return;
 
-    const confirmMerge = window.confirm(`Merge ${selectedTable} into ${targetTable}? All orders will combine.`);
-    if (!confirmMerge) return;
+    setPrintChit({
+      type: "KOT",
+      mode: terminalMode,
+      tableOrToken: selectedTable,
+      kotNumber: roundNum,
+      customerName: currentTableSession.customerName,
+      items: roundItems.map((c) => ({ name: c.name, quantity: c.quantity, notes: c.notes })),
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    });
 
-    setIsSubmitting(true);
-    try {
-      const orderIds = currentTableSession.orders.map((o) => o.id);
-      const { error } = await supabase
-        .from("orders")
-        .update({ table_no: targetTable, note: `[Merged ${selectedTable} into ${targetTable}]` })
-        .in("id", orderIds);
-
-      if (error) throw error;
-
-      showToast(`Merged ${selectedTable} into ${targetTable}`);
-      setSelectedTable(targetTable);
-      setShowMergePicker(false);
-      if (restaurantId) fetchActiveOrders(restaurantId);
-    } catch (err: any) {
-      showToast("Merge failed: " + (err.message || "Failed"));
-    } finally {
-      setIsSubmitting(false);
-    }
+    showToast(`Reprinting KOT for ${selectedTable} (Round ${roundNum})`);
+    setTimeout(() => {
+      window.print();
+    }, 100);
   };
 
   /* ─── 12. Actions: Print Bill with Dynamic Tabletop UPI QR ─────────── */
@@ -1276,10 +1267,7 @@ export default function UnifiedPosFloorPage() {
                 {terminalMode === "DINE_IN" && locations.length > 1 && (
                   <div className="relative">
                     <button
-                      onClick={() => {
-                        setShowMovePicker((v) => !v);
-                        setShowMergePicker(false);
-                      }}
+                      onClick={() => setShowMovePicker((v) => !v)}
                       className="px-2 py-0.5 text-[10px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded hover:bg-zinc-50 flex items-center gap-1 cursor-pointer"
                     >
                       <ArrowRightLeft size={9} />
@@ -1304,39 +1292,6 @@ export default function UnifiedPosFloorPage() {
                     )}
                   </div>
                 )}
-
-                {/* Merge Table */}
-                {terminalMode === "DINE_IN" && locations.length > 1 && currentTableSession && currentTableSession.orders.length > 0 && (
-                  <div className="relative">
-                    <button
-                      onClick={() => {
-                        setShowMergePicker((v) => !v);
-                        setShowMovePicker(false);
-                      }}
-                      className="px-2 py-0.5 text-[10px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded hover:bg-zinc-50 flex items-center gap-1 cursor-pointer"
-                    >
-                      <Merge size={9} />
-                      <span>Merge</span>
-                    </button>
-
-                    {showMergePicker && (
-                      <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-zinc-200 rounded-lg shadow-lg p-1 z-50 space-y-0.5">
-                        <p className="text-[10px] font-semibold text-zinc-400 px-2 py-1">Merge into Table:</p>
-                        {locations
-                          .filter((l) => l.name !== selectedTable)
-                          .map((loc) => (
-                            <button
-                              key={loc.id}
-                              onClick={() => handleMergeTable(loc.name)}
-                              className="w-full text-left px-2 py-1 rounded text-xs hover:bg-zinc-100 cursor-pointer"
-                            >
-                              {loc.name}
-                            </button>
-                          ))}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
 
               {cart.length > 0 && (
@@ -1349,29 +1304,35 @@ export default function UnifiedPosFloorPage() {
               )}
             </div>
 
-            {/* Guest Notes / Info */}
-            <div className="grid grid-cols-2 gap-2 mt-2">
-              <input
-                type="text"
-                placeholder="Guest Name (Optional)"
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                className="w-full px-2 py-1 bg-white border border-zinc-200/80 rounded text-xs outline-none focus:border-zinc-400"
-              />
-              <input
-                type="tel"
-                placeholder="Phone (Optional)"
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
-                className="w-full px-2 py-1 bg-white border border-zinc-200/80 rounded text-xs outline-none focus:border-zinc-400"
-              />
+            {/* Guest Notes / Info - Auto-filled from active table order */}
+            <div className="mt-2 flex items-center justify-between bg-white px-2.5 py-1.5 rounded border border-zinc-200/80 text-xs">
+              <div className="flex items-center gap-2 truncate">
+                <span className="text-[10px] uppercase font-bold text-zinc-400">Guest:</span>
+                <span className="font-semibold text-zinc-800 truncate">
+                  {currentTableSession?.customerName || customerName || "Dine-in Guest"}
+                </span>
+                {currentTableSession?.customerPhone && (
+                  <span className="text-zinc-400 font-mono text-[11px]">
+                    · {currentTableSession.customerPhone}
+                  </span>
+                )}
+              </div>
+              {terminalMode === "TAKEAWAY" && (
+                <input
+                  type="tel"
+                  placeholder="Phone..."
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  className="w-24 px-1.5 py-0.5 bg-zinc-50 border border-zinc-200 rounded text-[11px] font-mono outline-none"
+                />
+              )}
             </div>
           </div>
 
           {/* Ticket Items Stream */}
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
             
-            {/* IN KITCHEN (Fired via QR or previous staff rounds) */}
+            {/* IN KITCHEN (Fired via QR, Captain, or previous staff rounds) */}
             {terminalMode === "DINE_IN" && currentTableSession?.firedRounds && currentTableSession.firedRounds.length > 0 && (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-600 bg-zinc-100/70 px-2.5 py-1 rounded border border-zinc-200/60">
@@ -1386,9 +1347,20 @@ export default function UnifiedPosFloorPage() {
                         <span className="text-[11px] font-mono text-zinc-500">{fi.quantity}×</span>
                         <div>
                           <p className="font-medium text-zinc-800">{fi.name}</p>
-                          <span className="text-[9px] font-mono text-zinc-400 uppercase">
-                            {fi.source === "QR" ? "Guest QR" : `Round ${fi.roundNumber}`}
-                          </span>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <span className={`text-[9px] font-bold px-1 py-0.2 rounded uppercase ${
+                              fi.source === "QR"
+                                ? "bg-blue-50 text-blue-700 border border-blue-200"
+                                : fi.source === "CAPTAIN"
+                                ? "bg-purple-50 text-purple-700 border border-purple-200"
+                                : "bg-zinc-100 text-zinc-700 border border-zinc-200"
+                            }`}>
+                              {fi.source === "QR" ? "Online QR" : fi.source === "CAPTAIN" ? "Captain App" : "POS Counter"}
+                            </span>
+                            <span className="text-[9px] font-mono text-zinc-400">
+                              Round #{fi.roundNumber}
+                            </span>
+                          </div>
                         </div>
                       </div>
 
@@ -1396,6 +1368,17 @@ export default function UnifiedPosFloorPage() {
                         <span className="font-semibold text-zinc-900 font-mono tabular-nums">
                           ₹{fi.price * fi.quantity}
                         </span>
+                        
+                        {/* 1-Click KOT Reprint */}
+                        <button
+                          onClick={() => handleReprintKOT(fi.roundNumber)}
+                          className="text-zinc-400 hover:text-zinc-700 p-0.5 cursor-pointer"
+                          title="Reprint KOT Chit"
+                        >
+                          <Printer size={12} />
+                        </button>
+
+                        {/* Void Item */}
                         <button
                           onClick={() => handleVoidFiredDish(fi.name, fi.price, fi.orderId)}
                           className="text-zinc-300 hover:text-rose-600 p-0.5 cursor-pointer transition-colors"
