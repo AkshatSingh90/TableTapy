@@ -5,31 +5,36 @@ import {
   Search,
   Plus,
   Minus,
+  Trash2,
   Receipt,
   CreditCard,
   Banknote,
   QrCode,
   X,
   Check,
-  Tag,
   ChefHat,
   Printer,
   Clock,
-  Sparkles,
   LayoutGrid,
   UtensilsCrossed,
-  ArrowRight,
-  RotateCcw,
+  ShoppingBag,
+  Bike,
   User,
   Phone,
   Flame,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Percent,
+  RotateCcw,
+  Sparkles,
+  ChevronRight,
+  Hash,
+  ArrowRight
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
 
-/* ─── Interfaces ─────────────────────────────────────────── */
+/* ─── Type Definitions ────────────────────────────────────────────── */
 interface MenuItem {
   id: string;
   name: string;
@@ -48,7 +53,7 @@ interface Location {
   capacity?: number;
 }
 
-interface OrderItem {
+interface CartItem {
   id: string;
   name: string;
   price: number;
@@ -56,11 +61,9 @@ interface OrderItem {
   isVeg: boolean;
   category?: string;
   notes?: string;
-  isFired?: boolean; // true = already sent to kitchen (KOT)
-  firedAt?: string;
 }
 
-interface ActiveOrderRecord {
+interface OrderRecord {
   id: string;
   restaurant_id: string;
   table_no: string;
@@ -75,17 +78,7 @@ interface ActiveOrderRecord {
   note?: string;
 }
 
-interface TableSessionState {
-  table_no: string;
-  status: "VACANT" | "OCCUPIED" | "BILLED";
-  activeOrders: ActiveOrderRecord[];
-  firedItems: OrderItem[];
-  runningTotal: number;
-  firstOrderTime?: string;
-  customerName?: string;
-  customerPhone?: string;
-}
-
+type OrderMode = "DINE_IN" | "TAKEAWAY" | "DELIVERY";
 type PaymentMethod = "CASH" | "UPI" | "CARD";
 
 export default function PosTerminalPage() {
@@ -97,25 +90,31 @@ export default function PosTerminalPage() {
   const [upiId, setUpiId] = useState<string>("");
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
-  const [rawOrders, setRawOrders] = useState<ActiveOrderRecord[]>([]);
+  const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // View Mode: 'TABLES' (Floor view) or 'ORDER_PAD' (Menu & Cart)
-  const [activeView, setActiveView] = useState<"TABLES" | "ORDER_PAD">("TABLES");
+  // Active Terminal Mode (Dine In vs Takeaway vs Delivery)
+  const [orderMode, setOrderMode] = useState<OrderMode>("DINE_IN");
 
-  // Selected Table & Guest Details
+  // Dine-In Specific Selection
   const [selectedTable, setSelectedTable] = useState<string>("");
-  const [guestCount, setGuestCount] = useState<number>(2);
+  const [showFloorModal, setShowFloorModal] = useState<boolean>(false);
+
+  // Takeaway Specific Selection
+  const [takeawayToken, setTakeawayToken] = useState<string>(() => `TK-${Math.floor(100 + Math.random() * 900)}`);
+
+  // Customer Info
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  const [deliveryAddress, setDeliveryAddress] = useState("");
 
-  // Cart (Items added in the current ordering round)
-  const [cart, setCart] = useState<OrderItem[]>([]);
+  // Cart / Pending Items (Round items to be fired or settled)
+  const [cart, setCart] = useState<CartItem[]>([]);
 
-  // Menu Search & Category
-  const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
+  // Search & Categories
   const [searchQuery, setSearchQuery] = useState("");
-  const [vegOnly, setVegOnly] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState("ALL");
+  const [vegOnlyFilter, setVegOnlyFilter] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Discount State
@@ -130,28 +129,31 @@ export default function PosTerminalPage() {
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Thermal Print State
+  // Thermal Print State (KOT chit or Tax invoice)
   const [printChit, setPrintChit] = useState<{
     type: "KOT" | "BILL";
-    tableNo: string;
+    mode: OrderMode;
+    tableOrToken: string;
     kotNumber?: number;
-    items: { name: string; quantity: number; notes?: string; price?: number }[];
+    customerName?: string;
+    customerPhone?: string;
+    items: Array<{ name: string; quantity: number; price?: number; notes?: string }>;
     subtotal?: number;
-    tax?: number;
     discount?: number;
+    tax?: number;
     grandTotal?: number;
+    paymentMethod?: string;
     time: string;
   } | null>(null);
 
-  // Toast Notification
+  // Quick Toast Notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  /* ─── 1. Load Initial Data & Realtime Sync ────────────────────────── */
+  /* ─── 1. Load Store Data & Active Sessions ────────────────────────── */
   const loadInitialData = async () => {
     setIsLoading(true);
     try {
@@ -196,14 +198,14 @@ export default function PosTerminalPage() {
       } else {
         // Fallback default floor tables
         loadedLocs = [
-          { id: "t1", name: "Table 01", capacity: 2 },
-          { id: "t2", name: "Table 02", capacity: 4 },
-          { id: "t3", name: "Table 03", capacity: 4 },
-          { id: "t4", name: "Table 04", capacity: 6 },
-          { id: "t5", name: "Table 05", capacity: 2 },
-          { id: "t6", name: "Table 06", capacity: 4 },
-          { id: "t7", name: "Table 07", capacity: 8 },
-          { id: "t8", name: "Table 08", capacity: 4 },
+          { id: "t1", name: "Table 1", capacity: 2 },
+          { id: "t2", name: "Table 2", capacity: 4 },
+          { id: "t3", name: "Table 3", capacity: 4 },
+          { id: "t4", name: "Table 4", capacity: 6 },
+          { id: "t5", name: "Table 5", capacity: 2 },
+          { id: "t6", name: "Table 6", capacity: 4 },
+          { id: "t7", name: "Table 7", capacity: 8 },
+          { id: "t8", name: "Table 8", capacity: 4 },
         ];
       }
       setLocations(loadedLocs);
@@ -224,7 +226,7 @@ export default function PosTerminalPage() {
           menuData.map((row: any) => ({
             id: row.id,
             name: row.name,
-            category: row.category || "Main Course",
+            category: row.category || "General",
             subcategory: row.subcategory || "",
             base_price: Number(row.base_price || 0),
             description: (row.description || "").replace(/\[REST:[^\]]+\]\s*/, ""),
@@ -234,10 +236,10 @@ export default function PosTerminalPage() {
         );
       }
 
-      // 4. Active Orders across tables
+      // 4. Fetch Active Orders
       await fetchActiveOrders(restId);
     } catch (err) {
-      console.error("Error loading POS data:", err);
+      console.error("Error loading POS initial data:", err);
     } finally {
       setIsLoading(false);
     }
@@ -252,16 +254,16 @@ export default function PosTerminalPage() {
       .order("created_at", { ascending: true });
 
     if (orderData) {
-      setRawOrders(orderData as ActiveOrderRecord[]);
+      setActiveOrders(orderData as OrderRecord[]);
     }
   };
 
   useEffect(() => {
     loadInitialData();
 
-    // Supabase Realtime channel: listen to live order updates, kitchen KDS bumps, and menu 86 availability
+    // Realtime listener for orders and stock toggles
     const channel = supabase
-      .channel("pos_dinein_live_sync")
+      .channel("pos_master_sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "orders" },
@@ -300,6 +302,7 @@ export default function PosTerminalPage() {
         searchInputRef.current?.focus();
       }
       if (e.key === "Escape") {
+        setShowFloorModal(false);
         setShowPaymentModal(false);
         setShowDiscountModal(false);
       }
@@ -308,120 +311,171 @@ export default function PosTerminalPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  /* ─── 2. Build Table Sessions State (Occupied, Vacant, Billed) ───── */
-  const tableSessions = useMemo(() => {
-    const map = new Map<string, TableSessionState>();
+  /* ─── 2. Dine-In Table Status Computation ─────────────────────────── */
+  // Categorizes all tables into Vacant, Cooking (KOT Active), or Billed
+  const tableSessionMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        tableNo: string;
+        status: "VACANT" | "COOKING" | "BILLED";
+        orders: OrderRecord[];
+        firedItems: CartItem[];
+        runningTotal: number;
+        firstOrderTime?: string;
+        customerName?: string;
+        customerPhone?: string;
+      }
+    >();
 
-    // Initialize all floor tables as VACANT
     locations.forEach((loc) => {
       map.set(loc.name, {
-        table_no: loc.name,
+        tableNo: loc.name,
         status: "VACANT",
-        activeOrders: [],
+        orders: [],
         firedItems: [],
         runningTotal: 0,
       });
     });
 
-    // Populate with running orders from database
-    rawOrders.forEach((ord) => {
+    activeOrders.forEach((ord) => {
       if (!ord.table_no) return;
+      const isTakeaway =
+        ord.table_no.toLowerCase().startsWith("takeaway") ||
+        ord.table_no.toLowerCase().startsWith("tk-") ||
+        ord.table_no.toLowerCase().startsWith("counter");
+
+      if (isTakeaway) return; // Handled separately in Takeaway drawer
+
       let session = map.get(ord.table_no);
       if (!session) {
         session = {
-          table_no: ord.table_no,
+          tableNo: ord.table_no,
           status: "VACANT",
-          activeOrders: [],
+          orders: [],
           firedItems: [],
           runningTotal: 0,
         };
         map.set(ord.table_no, session);
       }
 
-      session.activeOrders.push(ord);
-      session.status = ord.note?.includes("[POS Bill Printed]") ? "BILLED" : "OCCUPIED";
+      session.orders.push(ord);
+      session.runningTotal += Number(ord.total || 0);
       if (!session.firstOrderTime || new Date(ord.created_at) < new Date(session.firstOrderTime)) {
         session.firstOrderTime = ord.created_at;
       }
-      if (ord.customer_name && !session.customerName) {
-        session.customerName = ord.customer_name;
-      }
-      if (ord.customer_phone && !session.customerPhone) {
-        session.customerPhone = ord.customer_phone;
+      if (ord.customer_name) session.customerName = ord.customer_name;
+      if (ord.customer_phone) session.customerPhone = ord.customer_phone;
+
+      // Extract fired kitchen items
+      if (Array.isArray(ord.items_json)) {
+        ord.items_json.forEach((raw: any) => {
+          const it = raw.item || {};
+          const qty = raw.quantity || 1;
+          const price = raw.price || it.basePrice || 0;
+          session!.firedItems.push({
+            id: it.id || raw.id || Math.random().toString(),
+            name: it.name || raw.name || "Item",
+            price: price,
+            quantity: qty,
+            isVeg: it.isVeg !== false,
+            category: it.category,
+            notes: raw.notes || "",
+          });
+        });
       }
 
-      // Aggregate all items previously fired to kitchen
-      const rawItems: any[] = Array.isArray(ord.items_json) ? ord.items_json : [];
-      rawItems.forEach((it, idx) => {
-        const itemObj = it.item || it;
-        session!.firedItems.push({
-          id: `${ord.id}_${itemObj.id || idx}`,
-          name: itemObj.name || "Item",
-          price: Number(it.price || itemObj.basePrice || itemObj.price || 0),
-          quantity: Number(it.quantity || 1),
-          isVeg: itemObj.isVeg ?? itemObj.is_veg ?? true,
-          category: itemObj.category,
-          notes: it.notes || "",
-          isFired: true,
-          firedAt: ord.created_at,
-        });
-        session!.runningTotal += Number(it.price || itemObj.basePrice || 0) * Number(it.quantity || 1);
-      });
+      // Check if bill was printed (proforma estimate)
+      if (ord.note && ord.note.includes("[POS Bill Printed")) {
+        session.status = "BILLED";
+      } else {
+        session.status = "COOKING";
+      }
     });
 
-    return Array.from(map.values());
-  }, [locations, rawOrders]);
+    return map;
+  }, [locations, activeOrders]);
 
   // Current selected table session
-  const currentSession = useMemo(() => {
-    return tableSessions.find((s) => s.table_no === selectedTable) || null;
-  }, [tableSessions, selectedTable]);
+  const currentTableSession = useMemo(() => {
+    if (orderMode !== "DINE_IN" || !selectedTable) return null;
+    return tableSessionMap.get(selectedTable) || null;
+  }, [tableSessionMap, orderMode, selectedTable]);
 
-  // When clicking a table from the Floor View
-  const handleSelectTable = (tableNo: string) => {
-    setSelectedTable(tableNo);
-    const s = tableSessions.find((t) => t.table_no === tableNo);
-    if (s && s.customerName) setCustomerName(s.customerName);
-    if (s && s.customerPhone) setCustomerPhone(s.customerPhone);
-    setActiveView("ORDER_PAD");
+  /* ─── 3. Active Takeaway & Delivery Orders ─────────────────────────── */
+  const activeTakeawayOrders = useMemo(() => {
+    return activeOrders.filter((o) => {
+      const t = (o.table_no || "").toLowerCase();
+      return t.startsWith("takeaway") || t.startsWith("tk-") || t.startsWith("counter") || t.startsWith("delivery");
+    });
+  }, [activeOrders]);
+
+  // Switch to an active takeaway order
+  const handleSelectActiveTakeaway = (ord: OrderRecord) => {
+    setOrderMode(ord.table_no.toLowerCase().startsWith("delivery") ? "DELIVERY" : "TAKEAWAY");
+    setTakeawayToken(ord.table_no);
+    setCustomerName(ord.customer_name || "");
+    setCustomerPhone(ord.customer_phone || "");
+
+    // Load items into cart
+    if (Array.isArray(ord.items_json)) {
+      const loaded: CartItem[] = ord.items_json.map((raw: any) => {
+        const it = raw.item || {};
+        return {
+          id: it.id || raw.id || Math.random().toString(),
+          name: it.name || raw.name || "Item",
+          price: raw.price || it.basePrice || 0,
+          quantity: raw.quantity || 1,
+          isVeg: it.isVeg !== false,
+          category: it.category,
+          notes: raw.notes || "",
+        };
+      });
+      setCart(loaded);
+    }
   };
 
-  /* ─── 3. Menu Categories & Filtered Items ────────────────────────── */
+  const handleStartNewTakeaway = () => {
+    setOrderMode("TAKEAWAY");
+    setTakeawayToken(`TK-${Math.floor(100 + Math.random() * 900)}`);
+    setCustomerName("");
+    setCustomerPhone("");
+    setCart([]);
+    showToast("Started New Takeaway Order");
+  };
+
+  /* ─── 4. Categories & Menu Filtering ──────────────────────────────── */
   const categories = useMemo(() => {
     const set = new Set<string>();
-    menuItems.forEach((item) => {
-      if (item.category && item.category.trim()) {
-        set.add(item.category.trim());
-      }
+    menuItems.forEach((i) => {
+      if (i.category && i.category.trim()) set.add(i.category.trim());
     });
     return ["ALL", ...Array.from(set)];
   }, [menuItems]);
 
   const filteredItems = useMemo(() => {
     return menuItems.filter((item) => {
-      if (item.is_available === false) return false;
-      if (vegOnly && !item.is_veg) return false;
+      if (!item.is_available) return false;
+      if (vegOnlyFilter && !item.is_veg) return false;
       if (selectedCategory !== "ALL" && item.category.toLowerCase() !== selectedCategory.toLowerCase()) {
         return false;
       }
       if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        return (
-          item.name.toLowerCase().includes(q) ||
-          item.category.toLowerCase().includes(q) ||
-          (item.subcategory && item.subcategory.toLowerCase().includes(q))
-        );
+        const q = searchQuery.toLowerCase().trim();
+        const matchesName = item.name.toLowerCase().includes(q);
+        const matchesCat = item.category.toLowerCase().includes(q);
+        if (!matchesName && !matchesCat) return false;
       }
       return true;
     });
-  }, [menuItems, selectedCategory, searchQuery, vegOnly]);
+  }, [menuItems, selectedCategory, searchQuery, vegOnlyFilter]);
 
-  /* ─── 4. Cart Operations (Adding / Stepping items) ────────────────── */
+  /* ─── 5. Cart Operations ──────────────────────────────────────────── */
   const addToCart = (item: MenuItem) => {
     setCart((prev) => {
-      const existing = prev.find((c) => c.id === item.id);
+      const existing = prev.find((i) => i.id === item.id);
       if (existing) {
-        return prev.map((c) => (c.id === item.id ? { ...c, quantity: c.quantity + 1 } : c));
+        return prev.map((i) => (i.id === item.id ? { ...i, quantity: i.quantity + 1 } : i));
       }
       return [
         ...prev,
@@ -432,40 +486,52 @@ export default function PosTerminalPage() {
           quantity: 1,
           isVeg: item.is_veg,
           category: item.category,
-          isFired: false,
         },
       ];
     });
   };
 
-  const updateQuantity = (itemId: string, delta: number) => {
-    setCart((prev) => {
-      return prev
-        .map((c) => {
-          if (c.id === itemId) {
-            const newQty = c.quantity + delta;
-            return newQty > 0 ? { ...c, quantity: newQty } : null;
+  const updateCartQty = (id: string, delta: number) => {
+    setCart((prev) =>
+      prev
+        .map((i) => {
+          if (i.id === id) {
+            const next = i.quantity + delta;
+            return next > 0 ? { ...i, quantity: next } : null;
           }
-          return c;
+          return i;
         })
-        .filter(Boolean) as OrderItem[];
-    });
+        .filter(Boolean) as CartItem[]
+    );
   };
 
-  const clearCart = () => {
+  const removeCartItem = (id: string) => {
+    setCart((prev) => prev.filter((i) => i.id !== id));
+  };
+
+  const updateCartItemNote = (id: string, note: string) => {
+    setCart((prev) => prev.map((i) => (i.id === id ? { ...i, notes: note } : i)));
+  };
+
+  const clearCurrentCart = () => {
     setCart([]);
+    setDiscountPercent(0);
+    setDiscountAmount(0);
   };
 
-  /* ─── 5. Billing Calculations ────────────────────────────────────── */
-  // Combined Items = Previously Fired Items on table + Unfired Cart Items
-  const allTableItems = useMemo(() => {
-    const fired = currentSession?.firedItems || [];
-    return [...fired, ...cart];
-  }, [currentSession, cart]);
+  /* ─── 6. Billing & Calculations ───────────────────────────────────── */
+  // If Dine-In: includes items previously fired to kitchen + new items in cart
+  const allCurrentItems = useMemo(() => {
+    if (orderMode === "DINE_IN") {
+      const fired = currentTableSession?.firedItems || [];
+      return [...fired, ...cart];
+    }
+    return cart;
+  }, [orderMode, currentTableSession, cart]);
 
   const subtotal = useMemo(() => {
-    return allTableItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  }, [allTableItems]);
+    return allCurrentItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  }, [allCurrentItems]);
 
   const effectiveDiscount = useMemo(() => {
     if (discountMode === "PERCENT") {
@@ -483,14 +549,16 @@ export default function PosTerminalPage() {
     return Math.max(0, tendered - grandTotal);
   }, [cashTendered, grandTotal]);
 
-  /* ─── 6. FIRE KOT ACTION (Send to Kitchen Display & Print KOT Chit) ── */
+  /* ─── 7. Actions: Fire KOT (Dine-In or Takeaway) ──────────────────── */
   const handleFireKOT = async () => {
     if (cart.length === 0) {
-      showToast("No new dishes in cart to send to kitchen.");
+      showToast("No new items in cart to send to kitchen.");
       return;
     }
-    if (!selectedTable) {
-      showToast("Please choose a table first.");
+
+    const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
+    if (!targetDestination) {
+      showToast("Please choose a table or takeaway token first.");
       return;
     }
 
@@ -510,41 +578,47 @@ export default function PosTerminalPage() {
         isReady: false,
       }));
 
-      const kotRoundNum = (currentSession?.activeOrders.length || 0) + 1;
+      const isDineIn = orderMode === "DINE_IN";
+      const kotRoundNum = isDineIn ? (currentTableSession?.orders.length || 0) + 1 : 1;
+      const orderTag = isDineIn
+        ? `[KOT #${kotRoundNum} Fired via POS]`
+        : `[TAKEAWAY KOT Fired via POS]`;
 
-      const { data: newOrder, error } = await supabase
-        .from("orders")
-        .insert({
-          restaurant_id: restaurantId,
-          table_no: selectedTable,
-          total: cart.reduce((s, it) => s + it.price * it.quantity, 0),
-          status: "PREPARING",
-          payment_status: "PENDING",
-          customer_name: customerName.trim() || `Guest (${selectedTable})`,
-          customer_phone: customerPhone.trim() || null,
-          items_json: kotPayload,
-          note: `[KOT #${kotRoundNum} Fired via POS]`,
-        })
-        .select()
-        .single();
+      const { error } = await supabase.from("orders").insert({
+        restaurant_id: restaurantId,
+        table_no: targetDestination,
+        total: cart.reduce((s, it) => s + it.price * it.quantity, 0),
+        status: "PREPARING",
+        payment_status: "PENDING",
+        customer_name:
+          customerName.trim() ||
+          (isDineIn ? `Guest (${selectedTable})` : `Takeaway Guest (${targetDestination})`),
+        customer_phone: customerPhone.trim() || null,
+        items_json: kotPayload,
+        note: orderTag,
+      });
 
       if (error) throw error;
 
-      showToast(`🔥 KOT #${kotRoundNum} sent to Kitchen for ${selectedTable}!`);
+      showToast(
+        `🔥 KOT sent to Kitchen for ${targetDestination}! (${cart.length} dishes)`
+      );
 
       // Trigger standard thermal print for Kitchen Chit
       setPrintChit({
         type: "KOT",
-        tableNo: selectedTable,
+        mode: orderMode,
+        tableOrToken: targetDestination,
         kotNumber: kotRoundNum,
+        customerName: customerName.trim(),
+        customerPhone: customerPhone.trim(),
         items: cart.map((c) => ({ name: c.name, quantity: c.quantity, notes: c.notes })),
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
-      clearCart();
+      clearCurrentCart();
       if (restaurantId) fetchActiveOrders(restaurantId);
 
-      // Brief delay to trigger browser ESC/POS print dialog
       setTimeout(() => {
         window.print();
       }, 150);
@@ -555,16 +629,18 @@ export default function PosTerminalPage() {
     }
   };
 
-  /* ─── 7. PRINT BILL ESTIMATE (For guest review before paying) ─────── */
+  /* ─── 8. Actions: Print Bill Estimate (Dine-In Guest Check) ──────── */
   const handlePrintGuestBill = async () => {
-    if (allTableItems.length === 0) {
+    if (allCurrentItems.length === 0) {
       showToast("No items on table to generate bill.");
       return;
     }
 
+    const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
+
     // Mark active orders on this table as Billed in database note
-    if (currentSession && currentSession.activeOrders.length > 0) {
-      const orderIds = currentSession.activeOrders.map((o) => o.id);
+    if (currentTableSession && currentTableSession.orders.length > 0) {
+      const orderIds = currentTableSession.orders.map((o) => o.id);
       await supabase
         .from("orders")
         .update({ note: `[POS Bill Printed ${new Date().toLocaleTimeString()}]` })
@@ -573,8 +649,11 @@ export default function PosTerminalPage() {
 
     setPrintChit({
       type: "BILL",
-      tableNo: selectedTable,
-      items: allTableItems.map((c) => ({
+      mode: orderMode,
+      tableOrToken: targetDestination,
+      customerName: customerName.trim() || currentTableSession?.customerName,
+      customerPhone: customerPhone.trim() || currentTableSession?.customerPhone,
+      items: allCurrentItems.map((c) => ({
         name: c.name,
         quantity: c.quantity,
         price: c.price,
@@ -586,7 +665,7 @@ export default function PosTerminalPage() {
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
-    showToast(`🖨️ Bill Estimate printed for ${selectedTable}`);
+    showToast(`🖨️ Bill Estimate printed for ${targetDestination}`);
     if (restaurantId) fetchActiveOrders(restaurantId);
 
     setTimeout(() => {
@@ -594,60 +673,94 @@ export default function PosTerminalPage() {
     }, 150);
   };
 
-  /* ─── 8. SETTLE & VACATE TABLE (Payment Settlement) ───────────────── */
-  const handleSettleAndVacate = async () => {
-    if (allTableItems.length === 0) {
-      showToast("Cannot settle empty table.");
+  /* ─── 9. Actions: Settle Payment & Close Order ────────────────────── */
+  const handleSettleOrder = async () => {
+    if (allCurrentItems.length === 0) {
+      showToast("Cannot settle an empty order.");
       return;
     }
 
+    const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
     setIsSubmitting(true);
+
     try {
-      // 1. If there were unsent cart items, combine them into a final round
-      if (cart.length > 0) {
-        const remainingPayload = cart.map((c) => ({
-          item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
-          price: c.price,
-          quantity: c.quantity,
-          notes: c.notes || "",
-        }));
+      if (orderMode === "DINE_IN" && currentTableSession && currentTableSession.orders.length > 0) {
+        // Settle existing table orders
+        const orderIds = currentTableSession.orders.map((o) => o.id);
 
-        await supabase.from("orders").insert({
-          restaurant_id: restaurantId,
-          table_no: selectedTable,
-          total: cart.reduce((s, it) => s + it.price * it.quantity, 0),
-          status: "COMPLETED",
-          payment_status: "PAID",
-          payment_method: selectedPaymentMethod,
-          customer_name: customerName.trim() || `Guest (${selectedTable})`,
-          customer_phone: customerPhone.trim() || null,
-          items_json: remainingPayload,
-          note: `[POS Final Direct Settle]`,
-        });
-      }
-
-      // 2. Mark all existing active orders for this table as COMPLETED & PAID
-      if (currentSession && currentSession.activeOrders.length > 0) {
-        const orderIds = currentSession.activeOrders.map((o) => o.id);
         const { error } = await supabase
           .from("orders")
           .update({
             status: "COMPLETED",
             payment_status: "PAID",
             payment_method: selectedPaymentMethod,
+            total: grandTotal,
+            note: `[POS Settled Dine-In: ${selectedPaymentMethod}]`,
           })
           .in("id", orderIds);
 
         if (error) throw error;
+
+        // If there were any unsaved cart items on the table, save them into a completed record
+        if (cart.length > 0) {
+          const unsavedPayload = cart.map((c) => ({
+            item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
+            price: c.price,
+            quantity: c.quantity,
+            notes: c.notes || "",
+            isReady: true,
+          }));
+
+          await supabase.from("orders").insert({
+            restaurant_id: restaurantId,
+            table_no: selectedTable,
+            total: cart.reduce((s, it) => s + it.price * it.quantity, 0),
+            status: "COMPLETED",
+            payment_status: "PAID",
+            payment_method: selectedPaymentMethod,
+            customer_name: customerName.trim() || `Guest (${selectedTable})`,
+            customer_phone: customerPhone.trim() || null,
+            items_json: unsavedPayload,
+            note: `[POS Additional Settled: ${selectedPaymentMethod}]`,
+          });
+        }
+      } else {
+        // Direct Takeaway or Instant Settle
+        const itemsPayload = allCurrentItems.map((c) => ({
+          item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
+          price: c.price,
+          quantity: c.quantity,
+          notes: c.notes || "",
+          isReady: true,
+        }));
+
+        const { error } = await supabase.from("orders").insert({
+          restaurant_id: restaurantId,
+          table_no: targetDestination,
+          total: grandTotal,
+          status: "COMPLETED",
+          payment_status: "PAID",
+          payment_method: selectedPaymentMethod,
+          customer_name: customerName.trim() || `${orderMode === "TAKEAWAY" ? "Takeaway" : "Delivery"} Guest`,
+          customer_phone: customerPhone.trim() || null,
+          items_json: itemsPayload,
+          note: `[POS Settled ${orderMode}: ${selectedPaymentMethod}]`,
+        });
+
+        if (error) throw error;
       }
 
-      showToast(`✅ Table ${selectedTable} Settled (₹${grandTotal} via ${selectedPaymentMethod}) & Vacated.`);
+      showToast(`✅ ${targetDestination} Settled (₹${grandTotal}) via ${selectedPaymentMethod}!`);
 
-      // Trigger final invoice receipt print
+      // Prepare Tax Invoice Print
       setPrintChit({
         type: "BILL",
-        tableNo: selectedTable,
-        items: allTableItems.map((c) => ({
+        mode: orderMode,
+        tableOrToken: targetDestination,
+        customerName: customerName.trim(),
+        customerPhone: customerPhone.trim(),
+        paymentMethod: selectedPaymentMethod,
+        items: allCurrentItems.map((c) => ({
           name: c.name,
           quantity: c.quantity,
           price: c.price,
@@ -660,17 +773,18 @@ export default function PosTerminalPage() {
       });
 
       setShowPaymentModal(false);
-      clearCart();
+      clearCurrentCart();
       setCustomerName("");
       setCustomerPhone("");
       setCashTendered("");
       setDiscountPercent(0);
       setDiscountAmount(0);
 
-      if (restaurantId) fetchActiveOrders(restaurantId);
+      if (orderMode === "TAKEAWAY") {
+        setTakeawayToken(`TK-${Math.floor(100 + Math.random() * 900)}`);
+      }
 
-      // Return to Floor view
-      setActiveView("TABLES");
+      if (restaurantId) fetchActiveOrders(restaurantId);
 
       setTimeout(() => {
         window.print();
@@ -682,7 +796,7 @@ export default function PosTerminalPage() {
     }
   };
 
-  // Helper for running table elapsed time
+  // Helper for elapsed time
   const getElapsedMinutes = (dateStr?: string) => {
     if (!dateStr) return null;
     const diffMs = Date.now() - new Date(dateStr).getTime();
@@ -690,779 +804,974 @@ export default function PosTerminalPage() {
     return mins > 0 ? `${mins}m` : "1m";
   };
 
+  // UPI Intent URL
+  const upiIntentUrl = useMemo(() => {
+    const vpa = upiId || "merchant@upi";
+    const name = encodeURIComponent(restaurantName);
+    return `upi://pay?pa=${vpa}&pn=${name}&am=${grandTotal}&cu=INR`;
+  }, [upiId, restaurantName, grandTotal]);
+
   return (
-    <div className="flex h-screen flex-col bg-zinc-950 font-sans text-zinc-100 select-none overflow-hidden">
+    <div className="flex h-screen flex-col bg-[#F8F9FA] font-sans text-zinc-900 select-none overflow-hidden">
       
       {/* ── Top Toast Notice ── */}
       {toastMessage && (
-        <div className="fixed top-4 right-4 z-[300] bg-zinc-900 border border-zinc-700 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200">
+        <div className="fixed top-4 right-4 z-[300] bg-zinc-900 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200">
           <CheckCircle2 size={15} className="text-emerald-400" />
           <span>{toastMessage}</span>
         </div>
       )}
 
       {/* ═════════════════════════════════════════════════════════════════════
-          TOP PETPOOJA-STYLE HEADER & VIEW SWITCHER
-          High-contrast, bold indicators, immediate floor switching
+          TOP MASTER BAR: Brand + Order Mode Switcher + Stats
          ═════════════════════════════════════════════════════════════════════ */}
-      <header className="shrink-0 h-14 bg-zinc-900 border-b border-zinc-800 px-5 flex items-center justify-between z-30">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#E46254] flex items-center justify-center font-black text-white text-sm shadow-md">
+      <header className="shrink-0 h-16 bg-white border-b border-zinc-200/80 px-6 flex items-center justify-between z-30 shadow-xs">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-[#E46254] flex items-center justify-center font-black text-white text-base shadow-sm">
               T
             </div>
             <div>
-              <h1 className="text-sm font-black tracking-tight text-white leading-tight">
+              <h1 className="text-sm font-bold text-zinc-900 tracking-tight leading-tight">
                 {restaurantName}
               </h1>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                POS Dine-In Active
-              </span>
+              <p className="text-[11px] font-medium text-zinc-400">
+                POS Terminal & Kitchen Ticketing
+              </p>
             </div>
           </div>
 
-          {/* Floor Switcher Toggle (Tables Grid vs Order Pad) */}
-          <div className="flex bg-zinc-800 p-0.5 rounded-xl border border-zinc-700/60 ml-4">
+          {/* Primary Order Mode Switcher: DINE-IN vs TAKEAWAY vs DELIVERY */}
+          <div className="flex bg-zinc-100 p-1 rounded-xl border border-zinc-200/60">
             <button
-              onClick={() => setActiveView("TABLES")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeView === "TABLES"
-                  ? "bg-[#E46254] text-white shadow-sm"
-                  : "text-zinc-400 hover:text-white"
+              onClick={() => {
+                setOrderMode("DINE_IN");
+                if (!selectedTable && locations.length > 0) setSelectedTable(locations[0].name);
+              }}
+              className={`px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                orderMode === "DINE_IN"
+                  ? "bg-white text-zinc-900 shadow-sm border border-zinc-200/50"
+                  : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <LayoutGrid size={14} />
-              <span>Floor Tables ({tableSessions.filter((s) => s.status !== "VACANT").length}/{tableSessions.length})</span>
+              <UtensilsCrossed size={14} className={orderMode === "DINE_IN" ? "text-[#E46254]" : ""} />
+              <span>Dine-In</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-zinc-200/60 text-zinc-700">
+                {Array.from(tableSessionMap.values()).filter((s) => s.status !== "VACANT").length} Active
+              </span>
             </button>
 
             <button
-              onClick={() => setActiveView("ORDER_PAD")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeView === "ORDER_PAD"
-                  ? "bg-[#E46254] text-white shadow-sm"
-                  : "text-zinc-400 hover:text-white"
+              onClick={() => {
+                setOrderMode("TAKEAWAY");
+                if (!takeawayToken) setTakeawayToken(`TK-${Math.floor(100 + Math.random() * 900)}`);
+              }}
+              className={`px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                orderMode === "TAKEAWAY"
+                  ? "bg-white text-zinc-900 shadow-sm border border-zinc-200/50"
+                  : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <UtensilsCrossed size={14} />
-              <span>Order Pad {selectedTable ? `(${selectedTable})` : ""}</span>
+              <ShoppingBag size={14} className={orderMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
+              <span>Takeaway / Parcel</span>
+              {activeTakeawayOrders.length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 text-amber-800">
+                  {activeTakeawayOrders.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => {
+                setOrderMode("DELIVERY");
+                setTakeawayToken(`DEL-${Math.floor(100 + Math.random() * 900)}`);
+              }}
+              className={`px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                orderMode === "DELIVERY"
+                  ? "bg-white text-zinc-900 shadow-sm border border-zinc-200/50"
+                  : "text-zinc-500 hover:text-zinc-900"
+              }`}
+            >
+              <Bike size={14} className={orderMode === "DELIVERY" ? "text-[#E46254]" : ""} />
+              <span>Delivery</span>
             </button>
           </div>
         </div>
 
-        {/* Top Right Live Stats & Fast Actions */}
+        {/* Top Right Quick Stats & Floor Map Trigger */}
         <div className="flex items-center gap-3">
-          {/* Quick Table Jump Dropdown */}
-          <div className="flex items-center gap-2 bg-zinc-800/80 border border-zinc-700 rounded-lg px-2.5 py-1 text-xs font-semibold">
-            <span className="text-zinc-400 text-[11px]">Table:</span>
-            <select
-              value={selectedTable}
-              onChange={(e) => handleSelectTable(e.target.value)}
-              className="bg-transparent text-white font-bold outline-none cursor-pointer text-xs"
+          {orderMode === "DINE_IN" && (
+            <button
+              onClick={() => setShowFloorModal(true)}
+              className="px-3.5 py-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-bold text-zinc-700 flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
             >
-              {locations.map((loc) => {
-                const s = tableSessions.find((t) => t.table_no === loc.name);
-                const isOcc = s && s.status !== "VACANT";
-                return (
-                  <option key={loc.id} value={loc.name} className="bg-zinc-900 text-white">
-                    {loc.name} {isOcc ? `(₹${s?.runningTotal})` : "(Vacant)"}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
+              <LayoutGrid size={14} className="text-[#E46254]" />
+              <span>Floor Map</span>
+            </button>
+          )}
 
-          {/* Quick Cash Register Indicator */}
-          <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-lg bg-zinc-800/40 border border-zinc-800 text-[11px] font-semibold text-zinc-300">
-            <Clock size={12} className="text-zinc-400" />
-            <span>Shift Running</span>
+          {orderMode === "TAKEAWAY" && (
+            <button
+              onClick={handleStartNewTakeaway}
+              className="px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+            >
+              <Plus size={14} />
+              <span>New Takeaway</span>
+            </button>
+          )}
+
+          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-100 border border-zinc-200/70 text-xs font-semibold text-zinc-600">
+            <Clock size={13} className="text-zinc-400" />
+            <span>Shift Active</span>
           </div>
         </div>
       </header>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          MAIN VIEW CONTAINER
+          SUB-BAR: Contextual Selector Strip
+          - If DINE_IN: Fast Table Selector Strip with Status Colors
+          - If TAKEAWAY: Active Takeaways & Customer Quick Info
          ═════════════════════════════════════════════════════════════════════ */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="shrink-0 bg-white border-b border-zinc-200/70 px-6 py-2.5 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar">
+        {orderMode === "DINE_IN" ? (
+          <div className="flex items-center gap-2 w-full">
+            <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider shrink-0 mr-1">
+              Select Table:
+            </span>
+            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+              {locations.map((loc) => {
+                const session = tableSessionMap.get(loc.name);
+                const isSelected = selectedTable === loc.name;
+                const isVacant = !session || session.status === "VACANT";
+                const isCooking = session?.status === "COOKING";
+                const isBilled = session?.status === "BILLED";
+
+                return (
+                  <button
+                    key={loc.id}
+                    onClick={() => {
+                      setSelectedTable(loc.name);
+                      clearCurrentCart();
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap transition-all cursor-pointer border ${
+                      isSelected
+                        ? "bg-[#E46254] text-white border-[#E46254] shadow-sm ring-2 ring-[#E46254]/20"
+                        : isVacant
+                        ? "bg-white text-zinc-700 border-zinc-200 hover:border-emerald-400 hover:bg-emerald-50/30"
+                        : isCooking
+                        ? "bg-amber-50 text-amber-900 border-amber-300 hover:border-amber-400"
+                        : "bg-indigo-50 text-indigo-900 border-indigo-300 hover:border-indigo-400"
+                    }`}
+                  >
+                    {/* Status Dot */}
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        isSelected
+                          ? "bg-white"
+                          : isVacant
+                          ? "bg-emerald-500"
+                          : isCooking
+                          ? "bg-amber-500 animate-pulse"
+                          : "bg-indigo-500"
+                      }`}
+                    />
+                    <span>{loc.name}</span>
+                    {!isVacant && session?.runningTotal ? (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.2 rounded-md font-bold tabular-nums ${
+                          isSelected ? "bg-white/20 text-white" : "bg-zinc-200/80 text-zinc-800"
+                        }`}
+                      >
+                        ₹{session.runningTotal}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between w-full gap-4">
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                Active Takeaways:
+              </span>
+              {activeTakeawayOrders.length === 0 ? (
+                <span className="text-xs text-zinc-400 italic">No pending takeaways</span>
+              ) : (
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                  {activeTakeawayOrders.map((ord) => {
+                    const isSelected = takeawayToken === ord.table_no;
+                    return (
+                      <button
+                        key={ord.id}
+                        onClick={() => handleSelectActiveTakeaway(ord)}
+                        className={`px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all cursor-pointer ${
+                          isSelected
+                            ? "bg-zinc-900 text-white border-zinc-900"
+                            : "bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100"
+                        }`}
+                      >
+                        <span>{ord.table_no}</span>
+                        <span className="text-[10px] bg-white/30 px-1 rounded font-bold">
+                          ₹{ord.total}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-zinc-400">Current Token:</span>
+              <span className="px-2.5 py-1 bg-zinc-100 border border-zinc-300 rounded-lg text-xs font-black text-zinc-900">
+                {takeawayToken}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ═════════════════════════════════════════════════════════════════════
+          MAIN WORKSPACE: Split Layout
+          - Left: Search + Category Pills + Dish Grid (65%)
+          - Right: Live Order Pad & Billing Ticket (35%)
+         ═════════════════════════════════════════════════════════════════════ */}
+      <div className="flex flex-1 overflow-hidden">
         
-        {/* ── OPTION A: FLOOR MAP / TABLES VIEW ────────────────────────── */}
-        {activeView === "TABLES" && (
-          <div className="flex-1 overflow-y-auto bg-zinc-950 p-6 md:p-8 space-y-6">
-            
-            {/* Top Legend Bar (Vacant / Cooking / Billed) */}
-            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
-              <div>
-                <h2 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
-                  <span>Dining Floor Map</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 font-semibold">
-                    {locations.length} Tables Registered
+        {/* ── LEFT SECTION: Menu Catalog & Selection ── */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-[#FAFAFA] border-r border-zinc-200">
+          
+          {/* Top Search & Filter Bar */}
+          <div className="shrink-0 p-4 bg-white border-b border-zinc-100 flex items-center gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search dishes or categories... (Press '/' to focus)"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-9 py-2 bg-zinc-50 border border-zinc-200 hover:border-zinc-300 focus:border-[#E46254] focus:bg-white focus:ring-2 focus:ring-[#E46254]/10 rounded-xl text-xs font-medium transition-all outline-none"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            {/* Veg Only Filter Pill */}
+            <button
+              onClick={() => setVegOnlyFilter((v) => !v)}
+              className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all cursor-pointer shrink-0 ${
+                vegOnlyFilter
+                  ? "bg-emerald-500 text-white border-emerald-500 shadow-xs"
+                  : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300"
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 border border-white" />
+              <span>Veg Only</span>
+            </button>
+          </div>
+
+          {/* Clean Horizontal Category Pills */}
+          <div className="shrink-0 px-4 py-2.5 bg-white border-b border-zinc-200/60 flex items-center gap-2 overflow-x-auto no-scrollbar">
+            {categories.map((cat) => {
+              const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
+              const count =
+                cat === "ALL"
+                  ? menuItems.length
+                  : menuItems.filter((i) => i.category.toLowerCase() === cat.toLowerCase()).length;
+
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(cat)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 border shrink-0 ${
+                    isSelected
+                      ? "bg-[#E46254] text-white border-[#E46254] shadow-xs"
+                      : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300 hover:text-zinc-900"
+                  }`}
+                >
+                  <span>{cat === "ALL" ? "All Items" : cat}</span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded-md font-bold tabular-nums ${
+                      isSelected ? "bg-white/20 text-white" : "bg-zinc-100 text-zinc-500"
+                    }`}
+                  >
+                    {count}
                   </span>
-                </h2>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Dish Grid: Touch-optimized Cards with immediate Add actions */}
+          <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+            {filteredItems.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center p-12 bg-white rounded-2xl border border-zinc-200">
+                <Receipt size={32} className="text-zinc-300 mb-2" />
+                <h3 className="text-sm font-bold text-zinc-800">No dishes found</h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Tap any table to start a new order, add items, fire KOT, or print guest bill.
+                  Try switching categories or clearing the veg filter
                 </p>
               </div>
+            ) : (
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5">
+                {filteredItems.map((dish) => {
+                  const cartItem = cart.find((c) => c.id === dish.id);
+                  const inCartQty = cartItem ? cartItem.quantity : 0;
 
-              {/* Status Indicator Legend */}
-              <div className="flex items-center gap-4 text-xs font-bold">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded-md bg-emerald-500 shadow-sm" />
-                  <span className="text-zinc-300">Vacant ({tableSessions.filter((s) => s.status === "VACANT").length})</span>
+                  return (
+                    <div
+                      key={dish.id}
+                      onClick={() => addToCart(dish)}
+                      className={`bg-white rounded-2xl p-3.5 border transition-all cursor-pointer flex flex-col justify-between group select-none hover:shadow-md hover:border-[#E46254]/40 active:scale-[0.98] ${
+                        inCartQty > 0
+                          ? "border-[#E46254] ring-1 ring-[#E46254]/20 shadow-xs"
+                          : "border-zinc-200/80"
+                      }`}
+                    >
+                      <div>
+                        {/* Top Indicator: Veg/Non-Veg + Category */}
+                        <div className="flex items-center justify-between mb-2">
+                          <span
+                            className={`w-3.5 h-3.5 border flex items-center justify-center shrink-0 rounded-xs ${
+                              dish.is_veg ? "border-emerald-600" : "border-rose-600"
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                dish.is_veg ? "bg-emerald-600" : "bg-rose-600"
+                              }`}
+                            />
+                          </span>
+
+                          <span className="text-[10px] font-semibold text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded uppercase tracking-wider truncate max-w-[100px]">
+                            {dish.category}
+                          </span>
+                        </div>
+
+                        {/* Dish Name */}
+                        <h4 className="text-xs font-bold text-zinc-800 group-hover:text-zinc-900 leading-snug line-clamp-2 min-h-[32px]">
+                          {dish.name}
+                        </h4>
+                      </div>
+
+                      {/* Bottom Price & Add Action */}
+                      <div className="flex items-center justify-between pt-3 mt-2 border-t border-zinc-100">
+                        <span className="text-xs font-extrabold text-zinc-900">
+                          ₹{dish.base_price}
+                        </span>
+
+                        {inCartQty > 0 ? (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center gap-1.5 bg-[#E46254] text-white px-1.5 py-0.5 rounded-lg shadow-xs"
+                          >
+                            <button
+                              onClick={() => updateCartQty(dish.id, -1)}
+                              className="p-0.5 hover:bg-white/20 rounded cursor-pointer"
+                            >
+                              <Minus size={11} />
+                            </button>
+                            <span className="text-[11px] font-bold px-1">{inCartQty}</span>
+                            <button
+                              onClick={() => updateCartQty(dish.id, 1)}
+                              className="p-0.5 hover:bg-white/20 rounded cursor-pointer"
+                            >
+                              <Plus size={11} />
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] font-bold text-[#E46254] bg-[#E46254]/10 hover:bg-[#E46254] hover:text-white px-2 py-0.5 rounded-lg transition-colors">
+                            + Add
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── RIGHT SECTION: Order Ticket & Billing Pad ── */}
+        <div className="w-[380px] xl:w-[420px] bg-white flex flex-col justify-between shrink-0 shadow-lg z-20">
+          
+          {/* Ticket Header */}
+          <div className="shrink-0 p-4 border-b border-zinc-200/80 bg-zinc-50/50">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-wider text-zinc-400">
+                  Active Ticket
+                </span>
+                <h3 className="text-base font-black text-zinc-900 flex items-center gap-2">
+                  <span>{orderMode === "DINE_IN" ? selectedTable || "No Table" : takeawayToken}</span>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                      orderMode === "DINE_IN"
+                        ? currentTableSession?.status === "COOKING"
+                          ? "bg-amber-100 text-amber-800"
+                          : currentTableSession?.status === "BILLED"
+                          ? "bg-indigo-100 text-indigo-800"
+                          : "bg-emerald-100 text-emerald-800"
+                        : "bg-blue-100 text-blue-800"
+                    }`}
+                  >
+                    {orderMode === "DINE_IN"
+                      ? currentTableSession?.status || "VACANT"
+                      : orderMode}
+                  </span>
+                </h3>
+              </div>
+
+              {/* Reset / Clear Button */}
+              {cart.length > 0 && (
+                <button
+                  onClick={clearCurrentCart}
+                  className="text-xs text-rose-600 hover:text-rose-700 font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw size={12} />
+                  <span>Clear Cart</span>
+                </button>
+              )}
+            </div>
+
+            {/* Customer Details Strip */}
+            <div className="grid grid-cols-2 gap-2 mt-3 pt-2.5 border-t border-zinc-200/60">
+              <div className="relative">
+                <User size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+                <input
+                  type="text"
+                  placeholder="Customer Name"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  className="w-full pl-7 pr-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-medium outline-none focus:border-[#E46254]"
+                />
+              </div>
+
+              <div className="relative">
+                <Phone size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+                <input
+                  type="tel"
+                  placeholder="Phone Number"
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  className="w-full pl-7 pr-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-medium outline-none focus:border-[#E46254]"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Ticket Items Scroll Area */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            
+            {/* If Dine-In: Previously Fired Kitchen Items (Read-only status) */}
+            {orderMode === "DINE_IN" && currentTableSession?.firedItems && currentTableSession.firedItems.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-800 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200/70">
+                  <span className="flex items-center gap-1.5">
+                    <ChefHat size={14} className="text-amber-600" />
+                    <span>In Kitchen (Fired)</span>
+                  </span>
+                  <span className="text-[11px] font-semibold text-amber-700">
+                    {getElapsedMinutes(currentTableSession.firstOrderTime)} ago
+                  </span>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded-md bg-amber-500 shadow-sm" />
-                  <span className="text-zinc-300">KOT Active / Cooking ({tableSessions.filter((s) => s.status === "OCCUPIED").length})</span>
+
+                <div className="divide-y divide-zinc-100 bg-zinc-50/60 rounded-xl p-2 border border-zinc-200/50">
+                  {currentTableSession.firedItems.map((fi, idx) => (
+                    <div key={`${fi.id}-${idx}`} className="py-1.5 flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-bold text-zinc-500 w-5">
+                          {fi.quantity}×
+                        </span>
+                        <div>
+                          <p className="font-semibold text-zinc-700">{fi.name}</p>
+                          {fi.notes && <p className="text-[10px] text-zinc-400 italic">{fi.notes}</p>}
+                        </div>
+                      </div>
+                      <span className="font-bold text-zinc-800">₹{fi.price * fi.quantity}</span>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded-md bg-indigo-500 shadow-sm" />
-                  <span className="text-zinc-300">Bill Printed ({tableSessions.filter((s) => s.status === "BILLED").length})</span>
+              </div>
+            )}
+
+            {/* Current Cart / Unfired Items Section */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-zinc-700 px-1">
+                <span>
+                  {orderMode === "DINE_IN" ? "New Items (Pending KOT)" : "Takeaway Dishes"}
+                </span>
+                <span className="text-zinc-400">{cart.length} items</span>
+              </div>
+
+              {cart.length === 0 ? (
+                <div className="text-center py-8 border-2 border-dashed border-zinc-200 rounded-2xl">
+                  <p className="text-xs font-semibold text-zinc-400">
+                    No new items in ticket
+                  </p>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Tap any dish from the menu to add
+                  </p>
                 </div>
+              ) : (
+                <div className="space-y-2">
+                  {cart.map((item) => (
+                    <div
+                      key={item.id}
+                      className="bg-white border border-zinc-200/80 rounded-xl p-2.5 shadow-2xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 flex-1 pr-2">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              item.isVeg ? "bg-emerald-500" : "bg-rose-500"
+                            }`}
+                          />
+                          <span className="text-xs font-bold text-zinc-800 truncate">
+                            {item.name}
+                          </span>
+                        </div>
+
+                        {/* Qty Stepper */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="flex items-center bg-zinc-100 rounded-lg p-0.5">
+                            <button
+                              onClick={() => updateCartQty(item.id, -1)}
+                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-zinc-900 cursor-pointer"
+                            >
+                              <Minus size={11} />
+                            </button>
+                            <span className="text-xs font-black px-1.5 text-zinc-900 tabular-nums">
+                              {item.quantity}
+                            </span>
+                            <button
+                              onClick={() => updateCartQty(item.id, 1)}
+                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-zinc-900 cursor-pointer"
+                            >
+                              <Plus size={11} />
+                            </button>
+                          </div>
+
+                          <span className="text-xs font-bold text-zinc-900 w-12 text-right">
+                            ₹{item.price * item.quantity}
+                          </span>
+
+                          <button
+                            onClick={() => removeCartItem(item.id)}
+                            className="text-zinc-300 hover:text-rose-500 p-1 cursor-pointer"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Special cooking instruction note */}
+                      <input
+                        type="text"
+                        placeholder="Add cooking note (e.g. less spicy)..."
+                        value={item.notes || ""}
+                        onChange={(e) => updateCartItemNote(item.id, e.target.value)}
+                        className="w-full text-[11px] px-2 py-0.5 bg-zinc-50 border border-zinc-200/70 rounded text-zinc-600 placeholder:text-zinc-400 outline-none focus:border-zinc-400"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Ticket Footer: Bill Calculations + Action Buttons */}
+          <div className="shrink-0 p-4 bg-zinc-50 border-t border-zinc-200/80 space-y-3">
+            
+            {/* Price Breakdown */}
+            <div className="space-y-1.5 text-xs">
+              <div className="flex justify-between text-zinc-500">
+                <span>Subtotal</span>
+                <span className="font-semibold text-zinc-800">₹{subtotal}</span>
+              </div>
+
+              {effectiveDiscount > 0 && (
+                <div className="flex justify-between text-emerald-600 font-semibold">
+                  <span>Discount</span>
+                  <span>-₹{effectiveDiscount.toFixed(1)}</span>
+                </div>
+              )}
+
+              <div className="flex justify-between text-zinc-500">
+                <span>GST (5%)</span>
+                <span className="font-semibold text-zinc-800">₹{taxTotal.toFixed(1)}</span>
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-zinc-200 text-sm font-black text-zinc-900">
+                <div className="flex items-center gap-2">
+                  <span>Grand Total</span>
+                  <button
+                    onClick={() => setShowDiscountModal(true)}
+                    className="text-[10px] font-bold text-[#E46254] bg-[#E46254]/10 px-2 py-0.5 rounded cursor-pointer hover:bg-[#E46254]/20"
+                  >
+                    {effectiveDiscount > 0 ? "Edit Disc" : "+ Discount"}
+                  </button>
+                </div>
+                <span className="text-lg font-black text-zinc-900">₹{grandTotal}</span>
               </div>
             </div>
 
-            {/* Interactive Table Grid Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-4">
-              {tableSessions.map((session) => {
-                const isVacant = session.status === "VACANT";
-                const isOccupied = session.status === "OCCUPIED";
-                const isBilled = session.status === "BILLED";
-                const isSelected = selectedTable === session.table_no;
-                const elapsed = getElapsedMinutes(session.firstOrderTime);
+            {/* Action Buttons: High-Contrast & Clearly Positioned */}
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              
+              {/* Button 1: FIRE KOT (Amber Button) */}
+              <button
+                disabled={cart.length === 0 || isSubmitting}
+                onClick={handleFireKOT}
+                className="py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
+              >
+                <Flame size={15} />
+                <span>Fire KOT</span>
+              </button>
+
+              {/* Button 2: Print Bill Estimate (Dine-In) OR Direct Settle */}
+              {orderMode === "DINE_IN" ? (
+                <button
+                  disabled={allCurrentItems.length === 0 || isSubmitting}
+                  onClick={handlePrintGuestBill}
+                  className="py-2.5 px-3 rounded-xl border border-zinc-300 bg-white hover:bg-zinc-100 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                >
+                  <Printer size={15} />
+                  <span>Print Bill</span>
+                </button>
+              ) : null}
+
+              {/* Button 3: Settle / Pay (Full Width or Primary Emerald Button) */}
+              <button
+                disabled={allCurrentItems.length === 0 || isSubmitting}
+                onClick={() => setShowPaymentModal(true)}
+                className={`py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer ${
+                  orderMode !== "DINE_IN" ? "col-span-1" : "col-span-2"
+                }`}
+              >
+                <CreditCard size={15} />
+                <span>
+                  {orderMode === "DINE_IN" ? "Settle Table" : "Quick Pay & Settle"}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ═════════════════════════════════════════════════════════════════════
+          MODAL: FULL FLOOR MAP (Table Layout Grid)
+         ═════════════════════════════════════════════════════════════════════ */}
+      {showFloorModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden border border-zinc-200 animate-in fade-in zoom-in-95 duration-200">
+            <div className="p-6 border-b border-zinc-200 flex items-center justify-between bg-zinc-50">
+              <div>
+                <h3 className="text-lg font-black text-zinc-900">Floor Tables Overview</h3>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  Select a table to open its active order ticket or start a new order.
+                </p>
+              </div>
+
+              {/* Status Legend */}
+              <div className="flex items-center gap-4 text-xs font-bold">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                  <span className="text-zinc-600">Vacant</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                  <span className="text-zinc-600">In Kitchen</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500" />
+                  <span className="text-zinc-600">Billed</span>
+                </div>
+                <button
+                  onClick={() => setShowFloorModal(false)}
+                  className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer ml-3"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 max-h-[70vh] overflow-y-auto grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+              {locations.map((loc) => {
+                const session = tableSessionMap.get(loc.name);
+                const isSelected = selectedTable === loc.name;
+                const isVacant = !session || session.status === "VACANT";
+                const isCooking = session?.status === "COOKING";
+                const isBilled = session?.status === "BILLED";
+                const elapsed = getElapsedMinutes(session?.firstOrderTime);
 
                 return (
                   <div
-                    key={session.table_no}
-                    onClick={() => handleSelectTable(session.table_no)}
-                    className={`rounded-2xl p-4.5 border transition-all cursor-pointer flex flex-col justify-between group relative overflow-hidden select-none active:scale-[0.98] min-h-[160px] shadow-lg ${
-                      isSelected ? "ring-2 ring-white" : ""
+                    key={loc.id}
+                    onClick={() => {
+                      setSelectedTable(loc.name);
+                      setShowFloorModal(false);
+                      clearCurrentCart();
+                    }}
+                    className={`rounded-2xl p-4 border transition-all cursor-pointer flex flex-col justify-between group active:scale-[0.98] min-h-[140px] shadow-xs ${
+                      isSelected ? "ring-2 ring-[#E46254]" : ""
                     } ${
                       isVacant
-                        ? "bg-zinc-900/60 border-emerald-500/30 hover:border-emerald-500/70 hover:bg-zinc-900"
-                        : isOccupied
-                        ? "bg-amber-950/20 border-amber-500/50 hover:border-amber-400 hover:bg-amber-950/30"
-                        : "bg-indigo-950/20 border-indigo-500/50 hover:border-indigo-400 hover:bg-indigo-950/30"
+                        ? "bg-white border-zinc-200 hover:border-emerald-400 hover:bg-emerald-50/20"
+                        : isCooking
+                        ? "bg-amber-50/70 border-amber-300 hover:border-amber-400"
+                        : "bg-indigo-50/70 border-indigo-300 hover:border-indigo-400"
                     }`}
                   >
-                    {/* Top Table Badge + Seating Status */}
                     <div className="flex items-start justify-between">
                       <div>
                         <span
-                          className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md tracking-wider ${
+                          className={`text-[10px] font-black uppercase px-2 py-0.5 rounded tracking-wider ${
                             isVacant
-                              ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
-                              : isOccupied
-                              ? "bg-amber-500/15 text-amber-300 border border-amber-500/20"
-                              : "bg-indigo-500/15 text-indigo-300 border border-indigo-500/20"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : isCooking
+                              ? "bg-amber-200 text-amber-900"
+                              : "bg-indigo-200 text-indigo-900"
                           }`}
                         >
-                          {isVacant ? "VACANT" : isOccupied ? "COOKING" : "BILLED"}
+                          {isVacant ? "Vacant" : isCooking ? "Cooking" : "Billed"}
                         </span>
-                        <h3 className="text-xl font-black text-white mt-1.5 tracking-tight group-hover:text-[#E46254] transition-colors">
-                          {session.table_no}
-                        </h3>
+                        <h4 className="text-base font-black text-zinc-900 mt-2">{loc.name}</h4>
                       </div>
 
-                      {/* Seated Elapsed Time */}
-                      {!isVacant && elapsed && (
-                        <div className="flex items-center gap-1 text-[11px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20 tabular-nums">
-                          <Clock size={11} />
-                          <span>{elapsed}</span>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Middle: Running Guest / Items info */}
-                    <div className="my-2">
-                      {!isVacant ? (
-                        <div className="space-y-0.5">
-                          <p className="text-xs font-semibold text-zinc-300 truncate">
-                            {session.customerName || "Dine-in Guests"}
-                          </p>
-                          <p className="text-[11px] font-medium text-zinc-400">
-                            {session.firedItems.reduce((s, it) => s + it.quantity, 0)} items ordered
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-xs text-zinc-500 font-medium">Ready for guests</p>
-                      )}
-                    </div>
-
-                    {/* Bottom Running Bill & Action */}
-                    <div className="pt-2.5 border-t border-zinc-800/80 flex items-center justify-between">
-                      {!isVacant ? (
-                        <>
-                          <div>
-                            <span className="text-[10px] font-medium text-zinc-400 block uppercase">Bill Due</span>
-                            <span className="text-base font-black text-white tabular-nums">
-                              ₹{session.runningTotal.toFixed(0)}
-                            </span>
-                          </div>
-                          <button className="px-2.5 py-1 rounded-lg bg-zinc-800 text-xs font-bold text-zinc-200 group-hover:bg-[#E46254] group-hover:text-white transition-colors">
-                            Manage →
-                          </button>
-                        </>
-                      ) : (
-                        <span className="text-xs font-bold text-emerald-400 flex items-center gap-1">
-                          + Tap to Start
+                      {elapsed && (
+                        <span className="text-[10px] font-bold text-zinc-500 bg-white/80 px-1.5 py-0.5 rounded">
+                          {elapsed}
                         </span>
                       )}
+                    </div>
+
+                    <div className="flex items-center justify-between pt-3 mt-3 border-t border-zinc-200/60">
+                      <span className="text-xs text-zinc-500 font-medium">
+                        {isVacant ? `${loc.capacity || 4} Seats` : `${session?.firedItems.length || 0} items`}
+                      </span>
+                      <span className="text-sm font-black text-zinc-900">
+                        {isVacant ? "Available" : `₹${session?.runningTotal}`}
+                      </span>
                     </div>
                   </div>
                 );
               })}
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* ── OPTION B: ORDER PAD (Menu Grid Left, Running Ticket Right) ── */}
-        {activeView === "ORDER_PAD" && (
-          <div className="flex-1 flex overflow-hidden">
-            
-            {/* ── Left Area: Menu Catalog & Categories ── */}
-            <div className="flex-1 flex flex-col bg-zinc-950 overflow-hidden">
-              
-              {/* Table Switcher Bar (Quick Table Pill Strip) */}
-              <div className="shrink-0 bg-zinc-900 border-b border-zinc-800 px-5 py-2.5 flex items-center gap-2 overflow-x-auto slim-scrollbar">
-                <span className="text-xs font-bold text-zinc-400 shrink-0 uppercase tracking-wider text-[11px]">
-                  Tables:
-                </span>
-                {locations.map((loc) => {
-                  const s = tableSessions.find((t) => t.table_no === loc.name);
-                  const isOcc = s && s.status !== "VACANT";
-                  const isCur = selectedTable === loc.name;
-
-                  return (
-                    <button
-                      key={loc.id}
-                      onClick={() => setSelectedTable(loc.name)}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold shrink-0 transition-all cursor-pointer flex items-center gap-1.5 ${
-                        isCur
-                          ? "bg-white text-zinc-950 shadow-md font-black"
-                          : isOcc
-                          ? "bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25"
-                          : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white"
-                      }`}
-                    >
-                      <span className={`w-1.5 h-1.5 rounded-full ${isOcc ? "bg-amber-400" : "bg-emerald-400"}`} />
-                      <span>{loc.name}</span>
-                      {isOcc && <span className="tabular-nums text-[10px] text-amber-200/90 font-normal">₹{s.runningTotal}</span>}
-                    </button>
-                  );
-                })}
+      {/* ═════════════════════════════════════════════════════════════════════
+          MODAL: PAYMENT & SETTLEMENT (Cash Tender / Dynamic UPI / Card)
+         ═════════════════════════════════════════════════════════════════════ */}
+      {showPaymentModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden border border-zinc-200 animate-in fade-in zoom-in-95 duration-200">
+            <div className="p-6 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-black text-zinc-900">Payment Settlement</h3>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  {orderMode === "DINE_IN" ? `Table: ${selectedTable}` : takeawayToken} · Total: ₹{grandTotal}
+                </p>
               </div>
+              <button
+                onClick={() => setShowPaymentModal(false)}
+                className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
 
-              {/* Search Bar + Veg Toggle */}
-              <div className="shrink-0 px-5 pt-3 pb-2 flex items-center gap-3 bg-zinc-950">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    placeholder="Search dish name, category, or code... (Press '/' to focus)"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-9 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs font-medium text-white placeholder-zinc-500 outline-none focus:border-[#E46254] transition-all"
-                  />
-                  {searchQuery && (
-                    <button
-                      onClick={() => setSearchQuery("")}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
-                    >
-                      <X size={14} />
-                    </button>
-                  )}
-                </div>
-
-                {/* Pure Veg Filter Toggle Button */}
-                <button
-                  onClick={() => setVegOnly(!vegOnly)}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all cursor-pointer ${
-                    vegOnly
-                      ? "bg-emerald-950/40 border-emerald-500 text-emerald-400 shadow-sm"
-                      : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white"
-                  }`}
-                >
-                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                  <span>Veg Only</span>
-                </button>
-              </div>
-
-              {/* Category Pills Strip */}
-              <div className="shrink-0 px-5 py-2 flex items-center gap-2 overflow-x-auto slim-scrollbar border-b border-zinc-800/60 bg-zinc-950">
-                {categories.map((cat) => (
+            <div className="p-6 space-y-6">
+              {/* Payment Method Selector */}
+              <div className="grid grid-cols-3 gap-2">
+                {(["CASH", "UPI", "CARD"] as PaymentMethod[]).map((mode) => (
                   <button
-                    key={cat}
-                    onClick={() => setSelectedCategory(cat)}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold shrink-0 transition-all cursor-pointer ${
-                      selectedCategory === cat
-                        ? "bg-[#E46254] text-white shadow-sm"
-                        : "bg-zinc-900 border border-zinc-800/80 text-zinc-400 hover:text-white hover:border-zinc-700"
+                    key={mode}
+                    onClick={() => setSelectedPaymentMethod(mode)}
+                    className={`py-3 rounded-2xl text-xs font-black flex flex-col items-center gap-1.5 border transition-all cursor-pointer ${
+                      selectedPaymentMethod === mode
+                        ? "bg-zinc-900 text-white border-zinc-900 shadow-md"
+                        : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
                     }`}
                   >
-                    {cat}
+                    {mode === "CASH" && <Banknote size={18} />}
+                    {mode === "UPI" && <QrCode size={18} />}
+                    {mode === "CARD" && <CreditCard size={18} />}
+                    <span>{mode}</span>
                   </button>
                 ))}
               </div>
 
-              {/* Dishes Grid */}
-              <div className="flex-1 overflow-y-auto p-5 slim-scrollbar">
-                {filteredItems.length === 0 ? (
-                  <div className="h-64 flex flex-col items-center justify-center text-center p-6 text-zinc-500">
-                    <UtensilsCrossed size={36} className="text-zinc-700 mb-2" />
-                    <p className="text-sm font-bold text-zinc-400">No dishes found</p>
-                    <p className="text-xs text-zinc-500 mt-1">Try another category or clear search</p>
+              {/* Mode-Specific Payment UI */}
+              {selectedPaymentMethod === "CASH" && (
+                <div className="space-y-4 bg-zinc-50 p-4 rounded-2xl border border-zinc-200/80">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-zinc-600">Cash Tendered:</span>
+                    <input
+                      type="number"
+                      placeholder={`₹${grandTotal}`}
+                      value={cashTendered}
+                      onChange={(e) => setCashTendered(e.target.value)}
+                      className="w-32 py-1.5 px-3 text-right bg-white border border-zinc-300 rounded-xl font-black text-sm outline-none focus:border-[#E46254]"
+                    />
                   </div>
-                ) : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5">
-                    {filteredItems.map((item) => {
-                      const inCart = cart.find((c) => c.id === item.id);
 
-                      return (
-                        <div
-                          key={item.id}
-                          onClick={() => addToCart(item)}
-                          className={`rounded-2xl p-3.5 border transition-all cursor-pointer flex flex-col justify-between group relative overflow-hidden select-none active:scale-[0.98] min-h-[125px] ${
-                            inCart
-                              ? "bg-zinc-900 border-[#E46254] ring-1 ring-[#E46254]/40"
-                              : "bg-zinc-900/90 border-zinc-800/90 hover:border-zinc-700 hover:bg-zinc-900"
-                          }`}
-                        >
-                          <div>
-                            <div className="flex items-center justify-between mb-1.5">
-                              {/* Veg / Non-Veg Indicator */}
-                              <div
-                                className={`w-3.5 h-3.5 border flex items-center justify-center rounded-[3px] shrink-0 ${
-                                  item.is_veg ? "border-emerald-500" : "border-rose-500"
-                                }`}
-                              >
-                                <div
-                                  className={`w-1.5 h-1.5 rounded-full ${
-                                    item.is_veg ? "bg-emerald-500" : "bg-rose-500"
-                                  }`}
-                                />
-                              </div>
-
-                              {inCart ? (
-                                <span className="text-[10px] font-black bg-[#E46254] text-white px-2 py-0.5 rounded-md tabular-nums shadow-xs">
-                                  {inCart.quantity} in order
-                                </span>
-                              ) : (
-                                <span className="text-[10px] text-zinc-500 font-semibold truncate max-w-[100px]">
-                                  {item.category}
-                                </span>
-                              )}
-                            </div>
-
-                            <h4 className="text-[13.5px] font-bold text-white group-hover:text-[#E46254] transition-colors leading-snug">
-                              {item.name}
-                            </h4>
-                          </div>
-
-                          <div className="mt-3 pt-2.5 border-t border-zinc-800/70 flex items-center justify-between">
-                            <span className="text-sm font-black text-white tabular-nums">
-                              ₹{item.base_price}
-                            </span>
-
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                addToCart(item);
-                              }}
-                              className={`h-7 px-2.5 rounded-lg flex items-center gap-1 text-[11px] font-black transition-all cursor-pointer ${
-                                inCart
-                                  ? "bg-[#E46254] text-white shadow-xs"
-                                  : "bg-zinc-800 text-zinc-200 hover:bg-[#E46254] hover:text-white"
-                              }`}
-                            >
-                              <Plus size={12} strokeWidth={3} />
-                              <span>Add</span>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* ── Right Area: Live Table Ticket (Fired KOTs + Unfired Cart) ── */}
-            <div className="w-80 lg:w-96 shrink-0 bg-zinc-900 border-l border-zinc-800 flex flex-col z-20">
-              
-              {/* Table Header: Table Name, Elapsed time, Guest details */}
-              <div className="p-4 border-b border-zinc-800 bg-zinc-900/90 space-y-2.5">
-                <div className="flex items-center justify-between">
+                  {/* Fast Note Quick Buttons */}
                   <div className="flex items-center gap-2">
-                    <span className="text-lg font-black text-white tracking-tight">
-                      {selectedTable}
-                    </span>
-                    <span
-                      className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md tracking-wider ${
-                        currentSession?.status === "OCCUPIED"
-                          ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                          : currentSession?.status === "BILLED"
-                          ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
-                          : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                      }`}
-                    >
-                      {currentSession?.status || "VACANT"}
-                    </span>
-                  </div>
-
-                  <button
-                    onClick={() => setActiveView("TABLES")}
-                    className="text-xs font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer"
-                  >
-                    View Floor →
-                  </button>
-                </div>
-
-                {/* Optional Customer info on ticket */}
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <input
-                    type="text"
-                    placeholder="Guest Name (Opt)"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    className="w-full py-1.5 px-2.5 bg-zinc-800/80 border border-zinc-700/80 rounded-lg text-xs text-white placeholder-zinc-500 outline-none focus:border-[#E46254]"
-                  />
-                  <input
-                    type="tel"
-                    placeholder="Phone (Opt)"
-                    value={customerPhone}
-                    onChange={(e) => setCustomerPhone(e.target.value)}
-                    className="w-full py-1.5 px-2.5 bg-zinc-800/80 border border-zinc-700/80 rounded-lg text-xs text-white placeholder-zinc-500 outline-none focus:border-[#E46254]"
-                  />
-                </div>
-              </div>
-
-              {/* Scrollable Ticket Items List */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-3 slim-scrollbar">
-                
-                {/* 1. Previously Fired KOT Items (Sent to kitchen) */}
-                {currentSession && currentSession.firedItems.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between pb-1 border-b border-zinc-800">
-                      <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1">
-                        <Flame size={12} />
-                        <span>Fired in Kitchen ({currentSession.firedItems.length})</span>
-                      </span>
-                      <span className="text-[10px] text-zinc-500 font-bold">KOT Dispatched</span>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      {currentSession.firedItems.map((item, idx) => (
-                        <div
-                          key={`fired_${idx}`}
-                          className="bg-zinc-800/40 rounded-xl p-2.5 border border-zinc-800 flex items-center justify-between gap-2"
+                    <span className="text-[11px] font-bold text-zinc-400">Quick:</span>
+                    {[
+                      grandTotal,
+                      Math.ceil(grandTotal / 100) * 100,
+                      500,
+                      1000,
+                      2000,
+                    ]
+                      .filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i)
+                      .slice(0, 4)
+                      .map((val) => (
+                        <button
+                          key={val}
+                          onClick={() => setCashTendered(val.toString())}
+                          className="px-2.5 py-1 rounded-lg bg-white border border-zinc-300 text-xs font-bold text-zinc-700 hover:bg-zinc-100 cursor-pointer"
                         >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                  item.isVeg ? "bg-emerald-500" : "bg-rose-500"
-                                }`}
-                              />
-                              <span className="text-xs font-bold text-zinc-200 truncate">
-                                {item.name}
-                              </span>
-                            </div>
-                            {item.notes && (
-                              <span className="text-[10px] text-amber-300/80 block pl-3">
-                                ⚡ {item.notes}
-                              </span>
-                            )}
-                          </div>
-
-                          <span className="text-xs font-bold text-zinc-400 shrink-0 tabular-nums">
-                            {item.quantity} &times; ₹{item.price}
-                          </span>
-                          <span className="text-xs font-bold text-white shrink-0 tabular-nums w-14 text-right">
-                            ₹{item.price * item.quantity}
-                          </span>
-                        </div>
+                          ₹{val}
+                        </button>
                       ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 2. Unfired Items in Current Cart (Newly added dishes) */}
-                <div className="space-y-2 pt-2">
-                  <div className="flex items-center justify-between pb-1 border-b border-zinc-800">
-                    <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1">
-                      <Plus size={12} />
-                      <span>New Round / Pending Firing ({cart.length})</span>
-                    </span>
-                    {cart.length > 0 && (
-                      <button
-                        onClick={clearCart}
-                        className="text-[10px] font-bold text-zinc-500 hover:text-rose-400 transition-colors"
-                      >
-                        Clear Round
-                      </button>
-                    )}
                   </div>
 
-                  {cart.length === 0 ? (
-                    <div className="py-6 text-center text-zinc-600 text-xs">
-                      {currentSession?.firedItems.length === 0
-                        ? "Select dishes from the menu to start order"
-                        : "No new items added. Table has running orders."}
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {cart.map((item) => (
-                        <div
-                          key={item.id}
-                          className="bg-zinc-800/90 rounded-xl p-2.5 border border-[#E46254]/40 space-y-1.5"
-                        >
-                          <div className="flex items-center justify-between gap-1.5">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1.5">
-                                <div
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    item.isVeg ? "bg-emerald-500" : "bg-rose-500"
-                                  }`}
-                                />
-                                <h5 className="text-xs font-bold text-white truncate">{item.name}</h5>
-                              </div>
-                              <span className="text-[10.5px] text-zinc-400 font-medium pl-3.5 block">
-                                ₹{item.price} each
-                              </span>
-                            </div>
-
-                            {/* Stepper */}
-                            <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-700 rounded-lg p-0.5 shrink-0">
-                              <button
-                                onClick={() => updateQuantity(item.id, -1)}
-                                className="w-5 h-5 rounded flex items-center justify-center text-zinc-400 hover:text-white"
-                              >
-                                <Minus size={11} strokeWidth={2.5} />
-                              </button>
-                              <span className="text-xs font-bold w-4 text-center tabular-nums text-white">
-                                {item.quantity}
-                              </span>
-                              <button
-                                onClick={() => updateQuantity(item.id, 1)}
-                                className="w-5 h-5 rounded flex items-center justify-center bg-[#E46254] text-white hover:bg-[#D35546]"
-                              >
-                                <Plus size={11} strokeWidth={2.5} />
-                              </button>
-                            </div>
-
-                            <span className="text-xs font-bold text-white tabular-nums w-12 text-right">
-                              ₹{item.price * item.quantity}
-                            </span>
-                          </div>
-
-                          {/* Quick Cooking Instructions */}
-                          <input
-                            type="text"
-                            placeholder="Kitchen note (e.g. less spicy, extra butter)..."
-                            value={item.notes || ""}
-                            onChange={(e) => {
-                              const noteVal = e.target.value;
-                              setCart((prev) =>
-                                prev.map((i) => (i.id === item.id ? { ...i, notes: noteVal } : i))
-                              );
-                            }}
-                            className="w-full text-[10.5px] bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-300 placeholder-zinc-600 outline-none focus:border-zinc-500"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-              </div>
-
-              {/* Bottom Breakdown & 3 Core Industry Actions */}
-              <div className="p-4 border-t border-zinc-800 bg-zinc-900 space-y-3">
-                
-                {/* Discount Trigger */}
-                <div className="flex items-center justify-between text-xs">
-                  <button
-                    onClick={() => setShowDiscountModal(true)}
-                    className="text-[11.5px] font-bold text-[#E46254] hover:underline cursor-pointer flex items-center gap-1"
-                  >
-                    <Tag size={12} />
-                    <span>
-                      {effectiveDiscount > 0
-                        ? `Discount Applied: ₹${effectiveDiscount.toFixed(0)}`
-                        : "+ Add Discount"}
-                    </span>
-                  </button>
-                  {effectiveDiscount > 0 && (
-                    <button
-                      onClick={() => {
-                        setDiscountPercent(0);
-                        setDiscountAmount(0);
-                      }}
-                      className="text-[10px] text-zinc-400 hover:text-white"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-
-                {/* Subtotal, GST, Grand Total */}
-                <div className="space-y-1 text-xs text-zinc-400 pt-1 border-t border-zinc-800">
-                  <div className="flex justify-between text-[11.5px]">
-                    <span>Table Subtotal</span>
-                    <span className="font-semibold text-zinc-200 tabular-nums">₹{subtotal.toFixed(0)}</span>
-                  </div>
-                  {effectiveDiscount > 0 && (
-                    <div className="flex justify-between text-emerald-400 font-bold text-[11.5px]">
-                      <span>Discount</span>
-                      <span className="tabular-nums">-₹{effectiveDiscount.toFixed(0)}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between text-[11.5px]">
-                    <span>GST (5%)</span>
-                    <span className="font-semibold text-zinc-200 tabular-nums">₹{taxTotal.toFixed(0)}</span>
-                  </div>
-                  <div className="flex justify-between items-baseline pt-2 border-t border-dashed border-zinc-700">
-                    <span className="font-bold text-white text-xs">Total Bill Due</span>
-                    <span className="text-xl font-black text-[#E46254] tabular-nums">
-                      ₹{grandTotal}
+                  {/* Return Change Calculator */}
+                  <div className="flex items-center justify-between pt-3 border-t border-zinc-200">
+                    <span className="text-xs font-black text-zinc-600">Return Change:</span>
+                    <span className="text-base font-black text-emerald-600">
+                      ₹{changeDue.toFixed(0)}
                     </span>
                   </div>
                 </div>
+              )}
 
-                {/* ═══ 3 PRIMARY BUTTONS: FIRE KOT | PRINT BILL | SETTLE ═══ */}
-                <div className="space-y-2 pt-1">
-                  
-                  {/* Fire KOT Button (High priority during rush) */}
-                  <button
-                    disabled={cart.length === 0 || isSubmitting}
-                    onClick={handleFireKOT}
-                    className="w-full py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-30 cursor-pointer shadow-lg active:scale-[0.98]"
-                  >
-                    <Flame size={15} />
-                    <span>
-                      {cart.length > 0
-                        ? `Fire KOT (${cart.length} dishes)`
-                        : "Send KOT to Kitchen"}
-                    </span>
-                  </button>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {/* Print Guest Bill Button */}
-                    <button
-                      disabled={allTableItems.length === 0 || isSubmitting}
-                      onClick={handlePrintGuestBill}
-                      className="py-2.5 px-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-30 cursor-pointer border border-zinc-700"
-                    >
-                      <Printer size={13} />
-                      <span>Print Bill</span>
-                    </button>
-
-                    {/* Settle & Close Table Button */}
-                    <button
-                      disabled={allTableItems.length === 0 || isSubmitting}
-                      onClick={() => setShowPaymentModal(true)}
-                      className="py-2.5 px-2 rounded-xl bg-[#E46254] hover:bg-[#D35546] text-white font-black text-xs flex items-center justify-center gap-1.5 transition-all shadow-[0_4px_16px_rgba(228,98,84,0.3)] disabled:opacity-30 cursor-pointer active:scale-[0.98]"
-                    >
-                      <CreditCard size={13} />
-                      <span>Settle ₹{grandTotal}</span>
-                    </button>
+              {selectedPaymentMethod === "UPI" && (
+                <div className="flex flex-col items-center justify-center p-5 bg-zinc-50 rounded-2xl border border-zinc-200/80 text-center space-y-3">
+                  <div className="p-3 bg-white rounded-2xl border border-zinc-200 shadow-sm">
+                    <QRCode value={upiIntentUrl} size={150} />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-zinc-800">Scan & Pay ₹{grandTotal}</p>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">{upiId || "UPI Enabled"}</p>
                   </div>
                 </div>
+              )}
 
-              </div>
+              {selectedPaymentMethod === "CARD" && (
+                <div className="p-6 bg-zinc-50 rounded-2xl border border-zinc-200/80 text-center space-y-2">
+                  <CreditCard size={32} className="mx-auto text-zinc-400" />
+                  <p className="text-xs font-bold text-zinc-800">Swipe / Tap on POS Terminal</p>
+                  <p className="text-[11px] text-zinc-400">
+                    Collect ₹{grandTotal} on your card machine and click Confirm below.
+                  </p>
+                </div>
+              )}
+
+              {/* Confirm Settlement Button */}
+              <button
+                disabled={isSubmitting}
+                onClick={handleSettleOrder}
+                className="w-full py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer"
+              >
+                <CheckCircle2 size={16} />
+                <span>
+                  Confirm ₹{grandTotal} via {selectedPaymentMethod} & Print Invoice
+                </span>
+              </button>
             </div>
-
           </div>
-        )}
-
-      </div>
+        </div>
+      )}
 
       {/* ═════════════════════════════════════════════════════════════════════
-          DISCOUNT MODAL
+          MODAL: DISCOUNT SETTER
          ═════════════════════════════════════════════════════════════════════ */}
       {showDiscountModal && (
-        <div
-          onClick={() => setShowDiscountModal(false)}
-          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-zinc-900 rounded-3xl p-6 shadow-2xl border border-zinc-800 space-y-4"
-          >
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
-                <Tag size={15} className="text-[#E46254]" /> Add Bill Discount
-              </h3>
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden border border-zinc-200 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-black text-zinc-900">Apply Discount</h3>
               <button
                 onClick={() => setShowDiscountModal(false)}
-                className="text-zinc-400 hover:text-white"
+                className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer"
               >
                 <X size={16} />
               </button>
             </div>
 
-            {/* Mode Switcher: % vs Flat ₹ */}
-            <div className="grid grid-cols-2 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
+            <div className="flex bg-zinc-100 p-1 rounded-xl">
               <button
                 onClick={() => setDiscountMode("PERCENT")}
-                className={`py-1.5 rounded-lg text-xs font-bold transition-all ${
-                  discountMode === "PERCENT"
-                    ? "bg-[#E46254] text-white"
-                    : "text-zinc-400 hover:text-white"
+                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  discountMode === "PERCENT" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500"
                 }`}
               >
                 Percentage (%)
               </button>
               <button
                 onClick={() => setDiscountMode("FLAT")}
-                className={`py-1.5 rounded-lg text-xs font-bold transition-all ${
-                  discountMode === "FLAT"
-                    ? "bg-[#E46254] text-white"
-                    : "text-zinc-400 hover:text-white"
+                className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  discountMode === "FLAT" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500"
                 }`}
               >
                 Flat Amount (₹)
               </button>
             </div>
 
-            {/* Quick Presets */}
             {discountMode === "PERCENT" ? (
-              <div className="grid grid-cols-4 gap-2">
-                {[5, 10, 15, 20].map((pct) => (
-                  <button
-                    key={pct}
-                    onClick={() => setDiscountPercent(pct)}
-                    className={`py-2 rounded-xl text-xs font-bold border transition-all ${
-                      discountPercent === pct
-                        ? "bg-[#E46254] border-[#E46254] text-white"
-                        : "bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-                    }`}
-                  >
-                    {pct}%
-                  </button>
-                ))}
+              <div className="space-y-3">
+                <div className="grid grid-cols-4 gap-2">
+                  {[5, 10, 15, 20].map((pct) => (
+                    <button
+                      key={pct}
+                      onClick={() => setDiscountPercent(pct)}
+                      className={`py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                        discountPercent === pct
+                          ? "bg-zinc-900 text-white border-zinc-900"
+                          : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50"
+                      }`}
+                    >
+                      {pct}%
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="number"
+                  placeholder="Custom %"
+                  value={discountPercent || ""}
+                  onChange={(e) => setDiscountPercent(parseFloat(e.target.value) || 0)}
+                  className="w-full p-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold outline-none"
+                />
               </div>
             ) : (
-              <div className="grid grid-cols-4 gap-2">
-                {[50, 100, 200, 500].map((amt) => (
-                  <button
-                    key={amt}
-                    onClick={() => setDiscountAmount(amt)}
-                    className={`py-2 rounded-xl text-xs font-bold border transition-all ${
-                      discountAmount === amt
-                        ? "bg-[#E46254] border-[#E46254] text-white"
-                        : "bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-                    }`}
-                  >
-                    ₹{amt}
-                  </button>
-                ))}
-              </div>
+              <input
+                type="number"
+                placeholder="Discount amount in ₹"
+                value={discountAmount || ""}
+                onChange={(e) => setDiscountAmount(parseFloat(e.target.value) || 0)}
+                className="w-full p-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold outline-none"
+              />
             )}
 
             <button
               onClick={() => setShowDiscountModal(false)}
-              className="w-full py-2.5 rounded-xl bg-white text-zinc-950 font-bold text-xs"
+              className="w-full py-2.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-xs font-bold cursor-pointer"
             >
               Apply Discount
             </button>
@@ -1471,240 +1780,120 @@ export default function PosTerminalPage() {
       )}
 
       {/* ═════════════════════════════════════════════════════════════════════
-          PAYMENT & SETTLEMENT MODAL (CASH, DYNAMIC UPI QR, CARD)
+          THERMAL PRINT TEMPLATE (ESC/POS 80mm / 58mm Standard Receipt)
          ═════════════════════════════════════════════════════════════════════ */}
-      {showPaymentModal && (
-        <div
-          onClick={() => setShowPaymentModal(false)}
-          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md bg-zinc-900 rounded-3xl p-6 shadow-2xl border border-zinc-800 space-y-4"
-          >
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <div>
-                <h3 className="text-base font-black text-white">Settle {selectedTable}</h3>
-                <p className="text-xs text-zinc-400">Total Due: <strong className="text-[#E46254] text-sm">₹{grandTotal}</strong></p>
-              </div>
-              <button
-                onClick={() => setShowPaymentModal(false)}
-                className="text-zinc-400 hover:text-white"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Payment Mode Selector */}
-            <div className="grid grid-cols-3 gap-2">
-              {(["CASH", "UPI", "CARD"] as PaymentMethod[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setSelectedPaymentMethod(m)}
-                  className={`py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 border transition-all ${
-                    selectedPaymentMethod === m
-                      ? "bg-[#E46254] border-[#E46254] text-white shadow-md"
-                      : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700 hover:text-white"
-                  }`}
-                >
-                  {m === "CASH" && <Banknote size={14} />}
-                  {m === "UPI" && <QrCode size={14} />}
-                  {m === "CARD" && <CreditCard size={14} />}
-                  <span>{m}</span>
-                </button>
-              ))}
-            </div>
-
-            {/* Mode Specific Inputs */}
-            {selectedPaymentMethod === "CASH" && (
-              <div className="space-y-3 pt-2">
-                <label className="text-xs font-bold text-zinc-300 block">Cash Tendered by Guest</label>
-                <div className="relative">
-                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400 font-bold">₹</span>
-                  <input
-                    type="number"
-                    value={cashTendered}
-                    onChange={(e) => setCashTendered(e.target.value)}
-                    placeholder={grandTotal.toString()}
-                    className="w-full pl-8 pr-4 py-2.5 bg-zinc-950 border border-zinc-700 rounded-xl text-lg font-black text-white outline-none focus:border-[#E46254]"
-                  />
+      <div id="thermal-chit" className="hidden print:block text-black bg-white font-mono text-[11px] leading-tight p-2">
+        {printChit && (
+          <div>
+            {printChit.type === "KOT" ? (
+              <div className="space-y-1">
+                <div className="text-center font-bold text-sm border-b pb-1">
+                  *** KITCHEN ORDER TICKET (KOT) ***
                 </div>
-
-                {/* Preset Fast Currency Notes */}
-                <div className="grid grid-cols-4 gap-2">
-                  {[grandTotal, 500, 1000, 2000].map((amt) => (
-                    <button
-                      key={amt}
-                      onClick={() => setCashTendered(amt.toString())}
-                      className="py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-200 border border-zinc-700"
-                    >
-                      {amt === grandTotal ? "Exact" : `₹${amt}`}
-                    </button>
+                <div className="flex justify-between font-bold pt-1">
+                  <span>{printChit.mode === "DINE_IN" ? "TABLE:" : "TOKEN:"}</span>
+                  <span className="text-base">{printChit.tableOrToken}</span>
+                </div>
+                {printChit.kotNumber && (
+                  <div>KOT ROUND: #{printChit.kotNumber}</div>
+                )}
+                <div>TIME: {printChit.time}</div>
+                {printChit.customerName && <div>GUEST: {printChit.customerName}</div>}
+                <div className="border-b my-1" />
+                <div className="space-y-1 font-bold">
+                  {printChit.items.map((it, idx) => (
+                    <div key={idx} className="flex justify-between">
+                      <span>{it.quantity}× {it.name}</span>
+                      {it.notes && <span className="text-[10px] italic">({it.notes})</span>}
+                    </div>
                   ))}
                 </div>
-
-                {changeDue > 0 && (
-                  <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30 flex items-center justify-between text-xs">
-                    <span className="font-bold text-emerald-400">Return Change:</span>
-                    <span className="text-base font-black text-emerald-300 tabular-nums">₹{changeDue}</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {selectedPaymentMethod === "UPI" && (
-              <div className="py-3 flex flex-col items-center justify-center text-center space-y-3">
-                <div className="p-3 bg-white rounded-2xl shadow-md">
-                  <QRCode
-                    value={`upi://pay?pa=${upiId || "merchant@upi"}&pn=${encodeURIComponent(
-                      restaurantName
-                    )}&am=${grandTotal}&cu=INR`}
-                    size={140}
-                  />
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-white">Scan to pay exact ₹{grandTotal}</p>
-                  <p className="text-[11px] text-zinc-400 font-mono mt-0.5">{upiId || "UPI Active"}</p>
+                <div className="border-t my-1" />
+                <div className="text-center text-[10px]">
+                  {printChit.mode === "DINE_IN" ? "[DINE-IN PLATING]" : "[PARCEL / TAKEAWAY PACKING]"}
                 </div>
               </div>
-            )}
-
-            {selectedPaymentMethod === "CARD" && (
-              <div className="py-6 text-center text-zinc-400 text-xs">
-                <CreditCard size={28} className="mx-auto text-zinc-600 mb-2" />
-                <p className="font-bold text-white">Swipe or Tap Card on EDC Machine</p>
-                <p className="text-[11px] text-zinc-500 mt-1">Press confirm once transaction slips print</p>
-              </div>
-            )}
-
-            {/* Confirm & Close Table Button */}
-            <button
-              disabled={isSubmitting}
-              onClick={handleSettleAndVacate}
-              className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm flex items-center justify-center gap-2 transition-all shadow-lg active:scale-[0.98] cursor-pointer"
-            >
-              <Check size={16} strokeWidth={3} />
-              <span>Confirm Payment & Vacate Table</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ═════════════════════════════════════════════════════════════════════
-          HIDDEN THERMAL PRINT LAYOUT (KOT Chit & Guest Tax Invoice Bill)
-          Strictly ESC/POS 80mm/58mm standard format
-         ═════════════════════════════════════════════════════════════════════ */}
-      {printChit && (
-        <div id="thermal-chit" className="hidden print:block text-black bg-white p-2">
-          {printChit.type === "KOT" ? (
-            /* ── KITCHEN KOT CHIT ── */
-            <div className="w-[72mm] mx-auto text-left font-mono">
-              <div className="text-center pb-2 border-b-2 border-dashed border-black">
-                <h2 className="text-base font-black uppercase">*** KITCHEN KOT ***</h2>
-                <p className="text-xs font-bold">KOT #{printChit.kotNumber || 1}</p>
-                <p className="text-sm font-black mt-1">TABLE: {printChit.tableNo}</p>
-                <p className="text-[10px] mt-0.5">{printChit.time}</p>
-              </div>
-
-              <div className="py-2 border-b-2 border-dashed border-black space-y-1.5 text-xs">
-                <div className="flex justify-between font-black pb-1 text-[11px] border-b border-black">
-                  <span>ITEM</span>
-                  <span>QTY</span>
+            ) : (
+              <div className="space-y-1">
+                <div className="text-center font-bold text-base">{restaurantName}</div>
+                <div className="text-center text-[10px]">TAX INVOICE / GUEST BILL</div>
+                <div className="border-b my-1" />
+                <div className="flex justify-between">
+                  <span>{printChit.mode === "DINE_IN" ? "Table:" : "Token:"} {printChit.tableOrToken}</span>
+                  <span>{printChit.time}</span>
                 </div>
-                {printChit.items.map((it, idx) => (
-                  <div key={idx} className="space-y-0.5">
-                    <div className="flex justify-between font-bold text-sm">
-                      <span className="uppercase">{it.name}</span>
-                      <span className="text-base font-black">&times; {it.quantity}</span>
-                    </div>
-                    {it.notes && (
-                      <p className="text-[10px] font-bold italic pl-2">
-                        &gt;&gt; NOTE: {it.notes}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <div className="text-center pt-2 text-[10px]">
-                <p className="font-bold">*** END OF KOT ***</p>
-              </div>
-            </div>
-          ) : (
-            /* ── GUEST TAX INVOICE BILL ── */
-            <div className="w-[72mm] mx-auto text-left font-mono">
-              <div className="text-center pb-2 border-b-2 border-dashed border-black">
-                <h2 className="text-base font-black uppercase">{restaurantName}</h2>
-                <p className="text-[10px]">Dine-In Tax Invoice</p>
-                <p className="text-sm font-black mt-1">TABLE: {printChit.tableNo}</p>
-                <p className="text-[10px]">{printChit.time}</p>
-              </div>
-
-              <div className="py-2 border-b-2 border-dashed border-black space-y-1 text-xs">
-                <div className="flex justify-between font-bold pb-1 text-[10px]">
-                  <span>ITEM</span>
-                  <span className="text-right">QTY &nbsp; AMT</span>
-                </div>
-                {printChit.items.map((it, idx) => (
-                  <div key={idx} className="flex justify-between text-xs">
-                    <span className="truncate pr-1">{it.name}</span>
-                    <span className="shrink-0 text-right tabular-nums">
-                      {it.quantity} &times; ₹{it.price} = ₹{(it.quantity * (it.price || 0)).toFixed(0)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="py-2 border-b-2 border-dashed border-black space-y-1 text-xs">
+                {printChit.customerName && <div>Customer: {printChit.customerName}</div>}
+                <div className="border-b my-1" />
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="border-b">
+                      <th>Item</th>
+                      <th className="text-center">Qty</th>
+                      <th className="text-right">Price</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {printChit.items.map((it, idx) => (
+                      <tr key={idx}>
+                        <td className="py-0.5">{it.name}</td>
+                        <td className="text-center">{it.quantity}</td>
+                        <td className="text-right">₹{(it.price || 0) * it.quantity}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="border-t my-1" />
                 <div className="flex justify-between">
                   <span>Subtotal:</span>
-                  <span>₹{printChit.subtotal?.toFixed(0)}</span>
+                  <span>₹{printChit.subtotal}</span>
                 </div>
                 {printChit.discount ? (
-                  <div className="flex justify-between font-bold">
+                  <div className="flex justify-between">
                     <span>Discount:</span>
-                    <span>-₹{printChit.discount.toFixed(0)}</span>
+                    <span>-₹{printChit.discount.toFixed(1)}</span>
                   </div>
                 ) : null}
                 <div className="flex justify-between">
                   <span>GST (5%):</span>
-                  <span>₹{printChit.tax?.toFixed(0)}</span>
+                  <span>₹{printChit.tax?.toFixed(1)}</span>
                 </div>
-                <div className="flex justify-between text-sm font-black pt-1 border-t border-black">
-                  <span>GRAND TOTAL:</span>
-                  <span>₹{printChit.grandTotal?.toFixed(0)}</span>
+                <div className="flex justify-between font-bold text-sm border-t pt-1">
+                  <span>Grand Total:</span>
+                  <span>₹{printChit.grandTotal}</span>
                 </div>
+                {printChit.paymentMethod && (
+                  <div className="flex justify-between text-[10px] pt-0.5">
+                    <span>Paid via:</span>
+                    <span>{printChit.paymentMethod}</span>
+                  </div>
+                )}
+                <div className="border-t my-1" />
+                <div className="text-center text-[10px]">Thank you, Visit Again!</div>
               </div>
+            )}
+          </div>
+        )}
+      </div>
 
-              <div className="text-center pt-2 text-[10px] space-y-0.5">
-                <p className="font-bold">Thank you for dining with us!</p>
-                <p className="text-[9px] text-zinc-600">Powered by TableTapy POS</p>
-              </div>
-            </div>
-          )}
-
-          <style jsx global>{`
-            @media print {
-              body * {
-                visibility: hidden !important;
-              }
-              #thermal-chit,
-              #thermal-chit * {
-                visibility: visible !important;
-              }
-              #thermal-chit {
-                position: absolute !important;
-                left: 0 !important;
-                top: 0 !important;
-                width: 100% !important;
-                margin: 0 !important;
-                padding: 0 !important;
-              }
-            }
-          `}</style>
-        </div>
-      )}
-
+      <style jsx global>{`
+        @media print {
+          body * {
+            visibility: hidden !important;
+          }
+          #thermal-chit,
+          #thermal-chit * {
+            visibility: visible !important;
+          }
+          #thermal-chit {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 80mm !important;
+            margin: 0 !important;
+            padding: 4mm !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }
