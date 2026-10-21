@@ -100,6 +100,8 @@ interface TableSessionData {
   firstOrderAt?: string;
   latestOrderAt?: string;
   hasNewRound: boolean;
+  hasBillRequest: boolean;
+  hasUpiVerifyRequest: boolean;
 }
 
 interface NewStaffItem {
@@ -150,6 +152,14 @@ export default function PosPage() {
   const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Split Tender State
+  const [isSplitMode, setIsSplitMode] = useState(false);
+  const [splitUpiAmount, setSplitUpiAmount] = useState<string>("");
+  const [splitCashAmount, setSplitCashAmount] = useState<string>("");
+
+  // Table Bill Printed State (In-Memory tracking per session)
+  const [printedTables, setPrintedTables] = useState<Set<string>>(new Set());
 
   // Takeaway Tokens
   const [takeawayCounter, setTakeawayCounter] = useState<number>(1);
@@ -323,6 +333,8 @@ export default function PosPage() {
         allItems: [],
         totalBill: 0,
         hasNewRound: false,
+        hasBillRequest: false,
+        hasUpiVerifyRequest: false,
       });
     });
 
@@ -340,6 +352,8 @@ export default function PosPage() {
         allItems: [],
         totalBill: 0,
         hasNewRound: false,
+        hasBillRequest: false,
+        hasUpiVerifyRequest: false,
       };
 
       existing.orders.push(order);
@@ -349,8 +363,20 @@ export default function PosPage() {
         existing.hasNewRound = true;
       }
 
+      // Check payment status alerts
+      const payStatus = (order.payment_status || "").toUpperCase();
+      if (payStatus === "CASH_REQUESTED" || payStatus === "BILL_REQUESTED") {
+        existing.hasBillRequest = true;
+      } else if (payStatus === "UPI_VERIFICATION_PENDING" || payStatus === "VERIFY_UPI") {
+        existing.hasUpiVerifyRequest = true;
+      }
+
       if (order.customer_name && !existing.customerName) {
-        existing.customerName = order.customer_name;
+        // Strip auto-generated 'Table X' names so it doesn't display as a guest name
+        const cleanName = order.customer_name.trim();
+        if (!cleanName.toLowerCase().startsWith("table ")) {
+          existing.customerName = cleanName;
+        }
       }
       if (order.customer_phone && !existing.customerPhone) {
         existing.customerPhone = order.customer_phone;
@@ -479,6 +505,9 @@ export default function PosPage() {
     }
     setManualCart([]);
     setIsPaymentDrawerOpen(false);
+    setIsSplitMode(false);
+    setSplitUpiAmount("");
+    setSplitCashAmount("");
     setDiscountPercent(0);
     setCustomDiscountRupees("");
     setSelectedDrawerCat("ALL");
@@ -602,7 +631,7 @@ export default function PosPage() {
         total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
         status: "PREPARING",
         payment_status: "PENDING",
-        customer_name: manualCustomerName.trim() || activeSession?.customerName || `Table ${activeTableModal}`,
+        customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
         customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
         items_json: itemsPayload,
         note: `[POS Fired Round #${roundNum}]`,
@@ -658,11 +687,14 @@ export default function PosPage() {
       return;
     }
 
+    // Mark table as Check Printed in state
+    setPrintedTables((prev) => new Set(prev).add(activeTableModal));
+
     setPrintChit({
       type: "BILL",
       mode: "DINE_IN",
       tableOrToken: activeTableModal,
-      customerName: manualCustomerName.trim() || activeSession?.customerName || `Table ${activeTableModal}`,
+      customerName: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
       customerPhone: manualCustomerPhone.trim() || activeSession?.customerPhone,
       items: combinedItems,
       subtotal,
@@ -671,6 +703,8 @@ export default function PosPage() {
       grandTotal,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
+
+    showToast(`Bill printed for Table ${activeTableModal}`);
 
     setTimeout(() => {
       window.print();
@@ -700,7 +734,7 @@ export default function PosPage() {
     }, 100);
   };
 
-  const handleSettleTable = async (method: PaymentMethod) => {
+  const handleSettleTable = async (method: PaymentMethod, splitDetails?: { upi: number; cash: number }) => {
     if (!activeTableModal || subtotal === 0) {
       showToast("No items to settle");
       return;
@@ -709,6 +743,9 @@ export default function PosPage() {
     setIsSubmitting(true);
     try {
       const orderIds = (activeSession?.orders || []).map((o) => o.id);
+      const settleNote = splitDetails 
+        ? `[POS Settled: Split UPI ₹${splitDetails.upi} + Cash ₹${splitDetails.cash}]`
+        : `[POS Settled: ${method}]`;
 
       if (orderIds.length > 0) {
         await supabase
@@ -716,9 +753,9 @@ export default function PosPage() {
           .update({
             status: "COMPLETED",
             payment_status: "PAID",
-            payment_method: method,
+            payment_method: splitDetails ? "UPI" : method,
             total: grandTotal,
-            note: `[POS Settled: ${method}]`,
+            note: settleNote,
           })
           .in("id", orderIds);
       }
@@ -738,15 +775,26 @@ export default function PosPage() {
           total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
           status: "COMPLETED",
           payment_status: "PAID",
-          payment_method: method,
-          customer_name: manualCustomerName.trim() || activeSession?.customerName || `Guest (${activeTableModal})`,
+          payment_method: splitDetails ? "UPI" : method,
+          customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
           customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
           items_json: unsavedPayload,
-          note: `[POS Addon Settled: ${method}]`,
+          note: settleNote,
         });
       }
 
-      showToast(`Table ${activeTableModal} settled ₹${grandTotal} via ${method}`);
+      // Clear from printed list
+      setPrintedTables((prev) => {
+        const copy = new Set(prev);
+        copy.delete(activeTableModal);
+        return copy;
+      });
+
+      const methodLabel = splitDetails 
+        ? `Split (UPI ₹${splitDetails.upi} + Cash ₹${splitDetails.cash})` 
+        : method;
+
+      showToast(`Table ${activeTableModal} settled ₹${grandTotal} via ${methodLabel}`);
 
       const combinedItems = [
         ...(activeSession?.allItems || []),
@@ -970,12 +1018,20 @@ export default function PosPage() {
               const hasCaptain = session?.allItems.some((i) => i.source === "CAPTAIN");
               const hasPOS = session?.allItems.some((i) => i.source === "STAFF");
 
+              const isBillPrinted = printedTables.has(loc.name);
+              const hasBillRequest = session?.hasBillRequest || false;
+              const hasUpiVerifyRequest = session?.hasUpiVerifyRequest || false;
+
               return (
                 <div
                   key={loc.id}
                   onClick={() => setActiveTableModal(loc.name)}
                   className={`relative rounded-2xl p-4.5 border transition-all duration-200 cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-md select-none group ${
-                    isOccupied
+                    hasBillRequest || hasUpiVerifyRequest
+                      ? "bg-amber-50/70 border-amber-300 ring-2 ring-amber-400/40"
+                      : isBillPrinted
+                      ? "bg-purple-50/40 border-purple-200/90"
+                      : isOccupied
                       ? "bg-white border-[#E46254]/30 hover:border-[#E46254] ring-1 ring-[#E46254]/10"
                       : "bg-white border-zinc-200/80 hover:border-zinc-300"
                   }`}
@@ -994,17 +1050,31 @@ export default function PosPage() {
                       </div>
 
                       {/* Status Indicator */}
-                      {isOccupied ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
-                          <span className="w-1.5 h-1.5 rounded-full bg-[#E46254] animate-pulse" />
-                          Active
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 text-[10.5px] font-semibold border border-emerald-500/20">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                          Vacant
-                        </span>
-                      )}
+                      <div className="flex items-center gap-1 flex-wrap justify-end">
+                        {hasBillRequest ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold shadow-xs animate-pulse">
+                            🔔 Bill Call
+                          </span>
+                        ) : hasUpiVerifyRequest ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-600 text-white text-[10px] font-bold shadow-xs animate-pulse">
+                            📱 Verify UPI
+                          </span>
+                        ) : isBillPrinted ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 text-[10.5px] font-bold border border-purple-200">
+                            🧾 Billed
+                          </span>
+                        ) : isOccupied ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#E46254] animate-pulse" />
+                            Active
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 text-[10.5px] font-semibold border border-emerald-500/20">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                            Vacant
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     {/* Middle: Active Session Details or Vacant State */}
@@ -1550,64 +1620,149 @@ export default function PosPage() {
                   </div>
                 </div>
               ) : (
-                /* SETTLE DRAWER: CASH / UPI / CARD */
+                /* SETTLE DRAWER: CASH / UPI / CARD / SPLIT */
                 <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2.5 animate-in fade-in zoom-in-95 duration-100">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-zinc-900">
                       Settle ₹{grandTotal} · Select Payment:
                     </span>
                     <button
-                      onClick={() => setIsPaymentDrawerOpen(false)}
-                      className="text-zinc-400 hover:text-zinc-600 p-0.5"
+                      onClick={() => {
+                        setIsPaymentDrawerOpen(false);
+                        setIsSplitMode(false);
+                      }}
+                      className="text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
                     >
                       <X size={14} />
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      disabled={isSubmitting}
-                      onClick={() => handleSettleTable("CASH")}
-                      className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                    >
-                      <Banknote size={15} className="text-zinc-700" />
-                      <span>Cash</span>
-                    </button>
+                  {!isSplitMode ? (
+                    <>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          disabled={isSubmitting}
+                          onClick={() => handleSettleTable("CASH")}
+                          className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <Banknote size={15} className="text-zinc-700" />
+                          <span>Cash</span>
+                        </button>
 
-                    <button
-                      disabled={isSubmitting}
-                      onClick={() => handleSettleTable("UPI")}
-                      className="py-2 px-1 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/30 text-[#C2410C] rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                    >
-                      <QrCode size={15} className="text-[#E46254]" />
-                      <span>UPI</span>
-                    </button>
+                        <button
+                          disabled={isSubmitting}
+                          onClick={() => handleSettleTable("UPI")}
+                          className="py-2 px-1 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/30 text-[#C2410C] rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <QrCode size={15} className="text-[#E46254]" />
+                          <span>UPI</span>
+                        </button>
 
-                    <button
-                      disabled={isSubmitting}
-                      onClick={() => handleSettleTable("CARD")}
-                      className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                    >
-                      <CreditCard size={15} className="text-zinc-700" />
-                      <span>Card</span>
-                    </button>
-                  </div>
+                        <button
+                          disabled={isSubmitting}
+                          onClick={() => handleSettleTable("CARD")}
+                          className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <CreditCard size={15} className="text-zinc-700" />
+                          <span>Card</span>
+                        </button>
+                      </div>
 
-                  {/* Cash Change Tendered */}
-                  <div className="flex items-center gap-2 pt-1 border-t border-zinc-200 text-xs">
-                    <input
-                      type="number"
-                      placeholder="Cash given..."
-                      value={cashTendered}
-                      onChange={(e) => setCashTendered(e.target.value)}
-                      className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-md text-xs font-mono outline-none"
-                    />
-                    {parseFloat(cashTendered) > grandTotal && (
-                      <span className="text-xs font-bold text-emerald-600 ml-auto font-mono">
-                        Return Change: ₹{changeDue}
-                      </span>
-                    )}
-                  </div>
+                      {/* Cash Tendered & Split Toggle */}
+                      <div className="flex items-center justify-between pt-1 border-t border-zinc-200 text-xs">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            placeholder="Cash given..."
+                            value={cashTendered}
+                            onChange={(e) => setCashTendered(e.target.value)}
+                            className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-md text-xs font-mono outline-none"
+                          />
+                          {parseFloat(cashTendered) > grandTotal && (
+                            <span className="text-xs font-bold text-emerald-600 font-mono">
+                              Change: ₹{changeDue}
+                            </span>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsSplitMode(true);
+                            setSplitUpiAmount(Math.floor(grandTotal / 2).toString());
+                            setSplitCashAmount(Math.ceil(grandTotal / 2).toString());
+                          }}
+                          className="text-[11px] font-semibold text-[#E46254] hover:underline cursor-pointer"
+                        >
+                          Split Tender?
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    /* SPLIT TENDER SUB-PANEL */
+                    <div className="space-y-2.5 pt-1">
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
+                            UPI Portion (₹)
+                          </label>
+                          <input
+                            type="number"
+                            value={splitUpiAmount}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSplitUpiAmount(val);
+                              const numVal = parseFloat(val) || 0;
+                              setSplitCashAmount(Math.max(0, grandTotal - numVal).toString());
+                            }}
+                            className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
+                            placeholder="0"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
+                            Cash Portion (₹)
+                          </label>
+                          <input
+                            type="number"
+                            value={splitCashAmount}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSplitCashAmount(val);
+                              const numVal = parseFloat(val) || 0;
+                              setSplitUpiAmount(Math.max(0, grandTotal - numVal).toString());
+                            }}
+                            className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-200">
+                        <button
+                          type="button"
+                          onClick={() => setIsSplitMode(false)}
+                          className="text-zinc-500 hover:text-zinc-800 text-[11px] font-medium cursor-pointer"
+                        >
+                          Cancel Split
+                        </button>
+
+                        <button
+                          disabled={isSubmitting || (parseFloat(splitUpiAmount || "0") + parseFloat(splitCashAmount || "0")) !== grandTotal}
+                          onClick={() =>
+                            handleSettleTable("UPI", {
+                              upi: parseFloat(splitUpiAmount || "0"),
+                              cash: parseFloat(splitCashAmount || "0"),
+                            })
+                          }
+                          className="py-1.5 px-3 bg-zinc-900 hover:bg-black disabled:opacity-40 text-white rounded-lg font-bold text-xs cursor-pointer shadow-2xs"
+                        >
+                          Confirm Split Settle
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
