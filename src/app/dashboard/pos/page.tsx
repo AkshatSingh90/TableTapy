@@ -13,25 +13,22 @@ import {
   QrCode,
   X,
   Check,
-  ChefHat,
   Printer,
   UtensilsCrossed,
   ShoppingBag,
-  Bike,
-  User,
-  Phone,
-  Flame,
-  CheckCircle2,
-  AlertCircle,
+  Send,
   RotateCcw,
   ArrowRightLeft,
   Merge,
+  AlertCircle,
+  Clock,
+  Sparkles,
   ChevronDown
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
 
-/* ─── Types ───────────────────────────────────────────────────────── */
+/* ─── Domain Models ────────────────────────────────────────────────── */
 interface MenuItem {
   id: string;
   name: string;
@@ -60,6 +57,20 @@ interface CartItem {
   notes?: string;
 }
 
+interface FiredRoundItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+  isVeg: boolean;
+  category?: string;
+  notes?: string;
+  source: "QR" | "STAFF" | "CAPTAIN";
+  roundNumber: number;
+  orderId: string;
+  createdAt: string;
+}
+
 interface OrderRecord {
   id: string;
   restaurant_id: string;
@@ -75,13 +86,13 @@ interface OrderRecord {
   note?: string;
 }
 
-type OrderMode = "DINE_IN" | "TAKEAWAY" | "DELIVERY";
+type TerminalMode = "DINE_IN" | "TAKEAWAY";
 type PaymentMethod = "CASH" | "UPI" | "CARD";
 
-export default function PosTerminalPage() {
+export default function UnifiedPosFloorPage() {
   const supabase = createClient();
 
-  // Core Data
+  // Core Data State
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
   const [restaurantName, setRestaurantName] = useState<string>("Restaurant");
   const [upiId, setUpiId] = useState<string>("");
@@ -90,44 +101,44 @@ export default function PosTerminalPage() {
   const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Active Terminal Mode (Dine In vs Takeaway vs Delivery)
-  const [orderMode, setOrderMode] = useState<OrderMode>("DINE_IN");
+  // Terminal Navigation Mode
+  const [terminalMode, setTerminalMode] = useState<TerminalMode>("DINE_IN");
 
-  // Dine-In Specific Selection & Actions
+  // Dine-In Table Management
   const [selectedTable, setSelectedTable] = useState<string>("");
   const [tableFilter, setTableFilter] = useState<"ALL" | "ACTIVE" | "BILLED" | "VACANT">("ALL");
-  const [showMoveTablePicker, setShowMoveTablePicker] = useState<boolean>(false);
-  const [showMergeTablePicker, setShowMergeTablePicker] = useState<boolean>(false);
+  const [showMovePicker, setShowMovePicker] = useState<boolean>(false);
+  const [showMergePicker, setShowMergePicker] = useState<boolean>(false);
 
-  // Takeaway Specific Selection: Sequential Daily Token
-  const [takeawayTokenNumber, setTakeawayTokenNumber] = useState<number>(1);
-  const takeawayToken = `Token #${takeawayTokenNumber}`;
+  // Takeaway State
+  const [takeawayCounter, setTakeawayCounter] = useState<number>(1);
+  const currentTakeawayToken = `Token #${takeawayCounter.toString().padStart(2, "0")}`;
 
-  // Customer Info (Compact)
+  // Guest Info
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
 
-  // Cart / Pending Items
+  // Cart / New Staff Round to be sent to kitchen
   const [cart, setCart] = useState<CartItem[]>([]);
 
-  // Search & Categories
+  // Menu Search & Category
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("ALL");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Discount
   const [discountPercent, setDiscountPercent] = useState<number>(0);
-  const [showDiscountInput, setShowDiscountInput] = useState(false);
+  const [showDiscountSelector, setShowDiscountSelector] = useState(false);
 
-  // Clean Payment Tender Drawer (Revealed only when clicking "Collect Payment")
-  const [showTenderDrawer, setShowTenderDrawer] = useState<boolean>(false);
+  // Payment Drawer
+  const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Thermal Print State
+  // Thermal Chit Printing
   const [printChit, setPrintChit] = useState<{
     type: "KOT" | "BILL" | "VOID";
-    mode: OrderMode;
+    mode: TerminalMode;
     tableOrToken: string;
     kotNumber?: number;
     customerName?: string;
@@ -141,14 +152,14 @@ export default function PosTerminalPage() {
     reason?: string;
   } | null>(null);
 
-  // Quick Toast
+  // Minimal Toast Notice
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  /* ─── 1. Load Real Data from Supabase ────────────────────────────── */
+  /* ─── 1. Fetch Real Data & Listen to Supabase Realtime ─────────────── */
   const loadInitialData = async () => {
     setIsLoading(true);
     try {
@@ -175,7 +186,7 @@ export default function PosTerminalPage() {
         if (rest.upi_id) setUpiId(rest.upi_id);
       }
 
-      // Tables / Locations: ONLY WHAT OWNER CREATED
+      // Tables (Strictly owner-created, no dummy mocks)
       const { data: locData } = await supabase
         .from("locations")
         .select("*")
@@ -183,20 +194,20 @@ export default function PosTerminalPage() {
         .order("name", { ascending: true });
 
       if (locData && locData.length > 0) {
-        const loaded = locData.map((l: any) => ({
+        const mappedLocs = locData.map((l: any) => ({
           id: l.id,
           name: l.name,
           type: l.type,
-          capacity: l.capacity,
+          capacity: l.capacity || 4,
         }));
-        setLocations(loaded);
-        setSelectedTable(loaded[0].name);
+        setLocations(mappedLocs);
+        setSelectedTable(mappedLocs[0].name);
       } else {
         setLocations([]);
         setSelectedTable("");
       }
 
-      // Menu Items (Tenant Scoped)
+      // Menu Items
       const { data: menuData } = await supabase
         .from("menu_items_v2")
         .select("*")
@@ -219,10 +230,9 @@ export default function PosTerminalPage() {
         );
       }
 
-      // Active Orders
       await fetchActiveOrders(restId);
     } catch (err) {
-      console.error("Error loading POS data:", err);
+      console.error("Failed to load POS data:", err);
     } finally {
       setIsLoading(false);
     }
@@ -239,22 +249,22 @@ export default function PosTerminalPage() {
     if (orderData) {
       setActiveOrders(orderData as OrderRecord[]);
 
-      // Compute sequential daily takeaway token #
+      // Update Takeaway sequential token based on today's count
       const today = new Date().toDateString();
       const todayTakeaways = orderData.filter((o) => {
         const isTk = (o.table_no || "").toLowerCase().includes("token") || (o.table_no || "").toLowerCase().includes("takeaway");
         return isTk && new Date(o.created_at).toDateString() === today;
       });
-      setTakeawayTokenNumber(todayTakeaways.length + 1);
+      setTakeawayCounter(todayTakeaways.length + 1);
     }
   };
 
   useEffect(() => {
     loadInitialData();
 
-    // Realtime Postgres listener
+    // Supabase Realtime channel for instant sync across QR, Waiter, and Kitchen
     const channel = supabase
-      .channel("pos_dinein_pro_sync")
+      .channel("unified_floor_live_sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "orders" },
@@ -267,12 +277,12 @@ export default function PosTerminalPage() {
         { event: "UPDATE", schema: "public", table: "menu_items_v2" },
         (payload) => {
           const updated = payload.new as any;
-          if (updated && updated.id) {
+          if (updated?.id) {
             setMenuItems((prev) =>
-              prev.map((item) =>
-                item.id === updated.id
-                  ? { ...item, is_available: updated.is_available !== false }
-                  : item
+              prev.map((it) =>
+                it.id === updated.id
+                  ? { ...it, is_available: updated.is_available !== false }
+                  : it
               )
             );
           }
@@ -285,9 +295,9 @@ export default function PosTerminalPage() {
     };
   }, [restaurantId]);
 
-  /* ─── 2. Keyboard Shortcuts (F1, F2, F4, F8, F9, /) ───────────────── */
+  /* ─── 2. Keyboard Ergonomics (F1, F2, F4, F8, F9, /) ──────────────── */
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "/" && document.activeElement !== searchInputRef.current) {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -295,22 +305,22 @@ export default function PosTerminalPage() {
       }
       if (e.key === "F1") {
         e.preventDefault();
-        setOrderMode("DINE_IN");
+        setTerminalMode("DINE_IN");
         return;
       }
       if (e.key === "F2") {
         e.preventDefault();
-        setOrderMode("TAKEAWAY");
+        setTerminalMode("TAKEAWAY");
         return;
       }
       if (e.key === "F4") {
         e.preventDefault();
-        handleFireKOT();
+        handleSendToKitchen();
         return;
       }
       if (e.key === "F8") {
         e.preventDefault();
-        setShowTenderDrawer(true);
+        setIsPaymentDrawerOpen(true);
         return;
       }
       if (e.key === "F9") {
@@ -319,19 +329,19 @@ export default function PosTerminalPage() {
         return;
       }
       if (e.key === "Escape") {
-        setShowTenderDrawer(false);
-        setShowMoveTablePicker(false);
-        setShowMergeTablePicker(false);
-        setShowDiscountInput(false);
+        setIsPaymentDrawerOpen(false);
+        setShowMovePicker(false);
+        setShowMergePicker(false);
+        setShowDiscountSelector(false);
         searchInputRef.current?.blur();
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  /* ─── 3. Dine-In Table Status Computation ─────────────────────────── */
+  /* ─── 3. Unified Realtime Table State Machine ─────────────────────── */
   const tableSessionMap = useMemo(() => {
     const map = new Map<
       string,
@@ -339,7 +349,7 @@ export default function PosTerminalPage() {
         tableNo: string;
         status: "VACANT" | "COOKING" | "BILLED";
         orders: OrderRecord[];
-        firedItems: CartItem[];
+        firedRounds: FiredRoundItem[];
         runningTotal: number;
         firstOrderTime?: string;
         customerName?: string;
@@ -352,7 +362,7 @@ export default function PosTerminalPage() {
         tableNo: loc.name,
         status: "VACANT",
         orders: [],
-        firedItems: [],
+        firedRounds: [],
         runningTotal: 0,
       });
     });
@@ -372,7 +382,7 @@ export default function PosTerminalPage() {
           tableNo: ord.table_no,
           status: "VACANT",
           orders: [],
-          firedItems: [],
+          firedRounds: [],
           runningTotal: 0,
         };
         map.set(ord.table_no, session);
@@ -380,24 +390,32 @@ export default function PosTerminalPage() {
 
       session.orders.push(ord);
       session.runningTotal += Number(ord.total || 0);
+
       if (!session.firstOrderTime || new Date(ord.created_at) < new Date(session.firstOrderTime)) {
         session.firstOrderTime = ord.created_at;
       }
       if (ord.customer_name) session.customerName = ord.customer_name;
       if (ord.customer_phone) session.customerPhone = ord.customer_phone;
 
-      // Extract fired kitchen items
+      // Classify source: Guest QR vs Staff POS vs Captain
+      const isGuestQr = !ord.note?.includes("Fired via POS");
+      const roundIdx = session.orders.length;
+
       if (Array.isArray(ord.items_json)) {
         ord.items_json.forEach((raw: any) => {
           const it = raw.item || {};
-          session!.firedItems.push({
+          session!.firedRounds.push({
             id: it.id || raw.id || Math.random().toString(),
-            name: it.name || raw.name || "Dish",
+            name: it.name || raw.name || "Item",
             price: raw.price || it.basePrice || 0,
             quantity: raw.quantity || 1,
             isVeg: it.isVeg !== false,
             category: it.category,
             notes: raw.notes || "",
+            source: isGuestQr ? "QR" : "STAFF",
+            roundNumber: roundIdx,
+            orderId: ord.id,
+            createdAt: ord.created_at,
           });
         });
       }
@@ -413,11 +431,11 @@ export default function PosTerminalPage() {
   }, [locations, activeOrders]);
 
   const currentTableSession = useMemo(() => {
-    if (orderMode !== "DINE_IN" || !selectedTable) return null;
+    if (terminalMode !== "DINE_IN" || !selectedTable) return null;
     return tableSessionMap.get(selectedTable) || null;
-  }, [tableSessionMap, orderMode, selectedTable]);
+  }, [tableSessionMap, terminalMode, selectedTable]);
 
-  // Filtered tables based on quick status pill
+  // Quick Table Status Filter
   const filteredTables = useMemo(() => {
     return locations.filter((loc) => {
       const s = tableSessionMap.get(loc.name);
@@ -428,15 +446,15 @@ export default function PosTerminalPage() {
     });
   }, [locations, tableSessionMap, tableFilter]);
 
-  /* ─── 4. Active Takeaway Tokens ───────────────────────────────────── */
-  const activeTakeawayOrders = useMemo(() => {
+  /* ─── 4. Active Takeaways ─────────────────────────────────────────── */
+  const activeTakeaways = useMemo(() => {
     return activeOrders.filter((o) => {
       const t = (o.table_no || "").toLowerCase();
       return t.includes("token") || t.includes("takeaway") || t.includes("counter");
     });
   }, [activeOrders]);
 
-  /* ─── 5. Categories & Menu Filtering ──────────────────────────────── */
+  /* ─── 5. Categories & Dish Filters ────────────────────────────────── */
   const categories = useMemo(() => {
     const set = new Set<string>();
     menuItems.forEach((i) => {
@@ -461,7 +479,7 @@ export default function PosTerminalPage() {
     });
   }, [menuItems, selectedCategory, searchQuery]);
 
-  /* ─── 6. Cart Operations ──────────────────────────────────────────── */
+  /* ─── 6. Cart Management ──────────────────────────────────────────── */
   const addToCart = (item: MenuItem) => {
     setCart((prev) => {
       const existing = prev.find((i) => i.id === item.id);
@@ -504,17 +522,17 @@ export default function PosTerminalPage() {
     setCart([]);
     setDiscountPercent(0);
     setCashTendered("");
-    setShowTenderDrawer(false);
+    setIsPaymentDrawerOpen(false);
   };
 
-  /* ─── 7. Calculations ─────────────────────────────────────────────── */
+  /* ─── 7. Financial Calculations ───────────────────────────────────── */
   const allCurrentItems = useMemo(() => {
-    if (orderMode === "DINE_IN") {
-      const fired = currentTableSession?.firedItems || [];
+    if (terminalMode === "DINE_IN") {
+      const fired = currentTableSession?.firedRounds || [];
       return [...fired, ...cart];
     }
     return cart;
-  }, [orderMode, currentTableSession, cart]);
+  }, [terminalMode, currentTableSession, cart]);
 
   const subtotal = useMemo(() => {
     return allCurrentItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
@@ -525,7 +543,7 @@ export default function PosTerminalPage() {
   }, [subtotal, discountPercent]);
 
   const taxableAmount = Math.max(0, subtotal - effectiveDiscount);
-  const taxTotal = (taxableAmount * 5) / 100; // 5% GST
+  const taxTotal = (taxableAmount * 5) / 100; // Standard 5% GST
   const grandTotal = Math.round(taxableAmount + taxTotal);
 
   const changeDue = useMemo(() => {
@@ -533,14 +551,14 @@ export default function PosTerminalPage() {
     return Math.max(0, tendered - grandTotal);
   }, [cashTendered, grandTotal]);
 
-  /* ─── 8. Actions: Fire KOT ────────────────────────────────────────── */
-  const handleFireKOT = async () => {
+  /* ─── 8. Actions: Send to Kitchen (KOT) ────────────────────────────── */
+  const handleSendToKitchen = async () => {
     if (cart.length === 0) {
-      showToast("No new items in cart to send to kitchen.");
+      showToast("No new dishes in cart to send to kitchen.");
       return;
     }
 
-    const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
+    const targetDestination = terminalMode === "DINE_IN" ? selectedTable : currentTakeawayToken;
     if (!targetDestination) {
       showToast("Please choose a table first.");
       return;
@@ -562,7 +580,7 @@ export default function PosTerminalPage() {
         isReady: false,
       }));
 
-      const isDineIn = orderMode === "DINE_IN";
+      const isDineIn = terminalMode === "DINE_IN";
       const kotRoundNum = isDineIn ? (currentTableSession?.orders.length || 0) + 1 : 1;
       const orderTag = isDineIn
         ? `[KOT #${kotRoundNum} Fired via POS]`
@@ -584,11 +602,11 @@ export default function PosTerminalPage() {
 
       if (error) throw error;
 
-      showToast(`🔥 KOT fired to Kitchen for ${targetDestination}!`);
+      showToast(`Kitchen Chit sent for ${targetDestination} (Round ${kotRoundNum})`);
 
       setPrintChit({
         type: "KOT",
-        mode: orderMode,
+        mode: terminalMode,
         tableOrToken: targetDestination,
         kotNumber: kotRoundNum,
         customerName: customerName.trim(),
@@ -603,82 +621,78 @@ export default function PosTerminalPage() {
         window.print();
       }, 100);
     } catch (err: any) {
-      showToast("Failed to fire KOT: " + (err.message || "Error"));
+      showToast("Failed to dispatch KOT: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  /* ─── 9. Actions: Void / Cancel Dish on Fired Order ───────────────── */
-  const handleVoidFiredDish = async (dishName: string, itemPrice: number) => {
-    if (!currentTableSession || currentTableSession.orders.length === 0) return;
-
-    const confirmVoid = window.confirm(`Void / Cancel 1x "${dishName}" from Table ${selectedTable}?`);
+  /* ─── 9. Actions: Void Fired Dish ─────────────────────────────────── */
+  const handleVoidFiredDish = async (dishName: string, itemPrice: number, orderId: string) => {
+    const confirmVoid = window.confirm(`Cancel 1x "${dishName}" from Table ${selectedTable}?`);
     if (!confirmVoid) return;
 
     setIsSubmitting(true);
     try {
-      for (const ord of currentTableSession.orders) {
-        if (!Array.isArray(ord.items_json)) continue;
-        const idx = ord.items_json.findIndex(
-          (raw: any) => (raw.item?.name || raw.name) === dishName
-        );
+      const targetOrder = currentTableSession?.orders.find((o) => o.id === orderId);
+      if (!targetOrder || !Array.isArray(targetOrder.items_json)) return;
 
-        if (idx !== -1) {
-          const updatedItems = [...ord.items_json];
-          const target = updatedItems[idx];
+      const updatedItems = [...targetOrder.items_json];
+      const idx = updatedItems.findIndex(
+        (raw: any) => (raw.item?.name || raw.name) === dishName
+      );
 
-          if (target.quantity > 1) {
-            target.quantity -= 1;
-          } else {
-            updatedItems.splice(idx, 1);
-          }
-
-          const newTotal = Math.max(0, Number(ord.total || 0) - itemPrice);
-
-          if (updatedItems.length === 0) {
-            await supabase.from("orders").delete().eq("id", ord.id);
-          } else {
-            await supabase
-              .from("orders")
-              .update({
-                items_json: updatedItems,
-                total: newTotal,
-                note: `[KOT Item Voided: ${dishName}]`,
-              })
-              .eq("id", ord.id);
-          }
-
-          setPrintChit({
-            type: "VOID",
-            mode: "DINE_IN",
-            tableOrToken: selectedTable,
-            items: [{ name: dishName, quantity: 1 }],
-            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            reason: "Customer Cancelled / Mistake",
-          });
-
-          showToast(`🚫 Cancelled 1x ${dishName} on Table ${selectedTable}`);
-          if (restaurantId) fetchActiveOrders(restaurantId);
-
-          setTimeout(() => {
-            window.print();
-          }, 100);
-          break;
+      if (idx !== -1) {
+        const itemObj = updatedItems[idx];
+        if (itemObj.quantity > 1) {
+          itemObj.quantity -= 1;
+        } else {
+          updatedItems.splice(idx, 1);
         }
+
+        const newTotal = Math.max(0, Number(targetOrder.total || 0) - itemPrice);
+
+        if (updatedItems.length === 0) {
+          await supabase.from("orders").delete().eq("id", targetOrder.id);
+        } else {
+          await supabase
+            .from("orders")
+            .update({
+              items_json: updatedItems,
+              total: newTotal,
+              note: `[KOT Void: ${dishName}]`,
+            })
+            .eq("id", targetOrder.id);
+        }
+
+        setPrintChit({
+          type: "VOID",
+          mode: "DINE_IN",
+          tableOrToken: selectedTable,
+          items: [{ name: dishName, quantity: 1 }],
+          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          reason: "Customer cancellation",
+        });
+
+        showToast(`Cancelled 1x ${dishName} on Table ${selectedTable}`);
+        if (restaurantId) fetchActiveOrders(restaurantId);
+
+        setTimeout(() => {
+          window.print();
+        }, 100);
       }
     } catch (err: any) {
-      showToast("Error voiding item: " + (err.message || "Failed"));
+      showToast("Failed to void item: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  /* ─── 10. Actions: Move / Transfer Table ──────────────────────────── */
+  /* ─── 10. Actions: Move Table ─────────────────────────────────────── */
   const handleTransferTable = async (targetTable: string) => {
     if (!currentTableSession || currentTableSession.orders.length === 0) {
       setSelectedTable(targetTable);
-      setShowMoveTablePicker(false);
+      setShowMovePicker(false);
       return;
     }
 
@@ -692,9 +706,9 @@ export default function PosTerminalPage() {
 
       if (error) throw error;
 
-      showToast(`↔️ Moved ${selectedTable} ➔ ${targetTable}`);
+      showToast(`Transferred ${selectedTable} to ${targetTable}`);
       setSelectedTable(targetTable);
-      setShowMoveTablePicker(false);
+      setShowMovePicker(false);
       if (restaurantId) fetchActiveOrders(restaurantId);
     } catch (err: any) {
       showToast("Transfer failed: " + (err.message || "Failed"));
@@ -703,14 +717,14 @@ export default function PosTerminalPage() {
     }
   };
 
-  /* ─── 11. Actions: Merge Tables (Combine big group party) ─────────── */
+  /* ─── 11. Actions: Merge Tables (Party of 8+) ─────────────────────── */
   const handleMergeTable = async (targetTable: string) => {
     if (!currentTableSession || currentTableSession.orders.length === 0) {
-      showToast("No active order to merge.");
+      showToast("No active check to merge.");
       return;
     }
 
-    const confirmMerge = window.confirm(`Merge ${selectedTable} into ${targetTable}? All orders will combine into ${targetTable}.`);
+    const confirmMerge = window.confirm(`Merge ${selectedTable} into ${targetTable}? All orders will combine.`);
     if (!confirmMerge) return;
 
     setIsSubmitting(true);
@@ -723,9 +737,9 @@ export default function PosTerminalPage() {
 
       if (error) throw error;
 
-      showToast(`🔗 Merged ${selectedTable} ➔ ${targetTable}`);
+      showToast(`Merged ${selectedTable} into ${targetTable}`);
       setSelectedTable(targetTable);
-      setShowMergeTablePicker(false);
+      setShowMergePicker(false);
       if (restaurantId) fetchActiveOrders(restaurantId);
     } catch (err: any) {
       showToast("Merge failed: " + (err.message || "Failed"));
@@ -734,14 +748,14 @@ export default function PosTerminalPage() {
     }
   };
 
-  /* ─── 12. Actions: Print Bill Estimate with Dynamic UPI QR on Bill ── */
+  /* ─── 12. Actions: Print Bill with Dynamic Tabletop UPI QR ─────────── */
   const handlePrintGuestBill = async () => {
     if (allCurrentItems.length === 0) {
-      showToast("No items to print bill.");
+      showToast("No items on table to generate bill.");
       return;
     }
 
-    const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
+    const targetDestination = terminalMode === "DINE_IN" ? selectedTable : currentTakeawayToken;
 
     if (currentTableSession && currentTableSession.orders.length > 0) {
       const orderIds = currentTableSession.orders.map((o) => o.id);
@@ -753,7 +767,7 @@ export default function PosTerminalPage() {
 
     setPrintChit({
       type: "BILL",
-      mode: orderMode,
+      mode: terminalMode,
       tableOrToken: targetDestination,
       customerName: customerName.trim() || currentTableSession?.customerName,
       items: allCurrentItems.map((c) => ({
@@ -768,7 +782,7 @@ export default function PosTerminalPage() {
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
-    showToast(`🖨️ Bill Printed for ${targetDestination} (with UPI QR for Table)`);
+    showToast(`Bill Printed for ${targetDestination} (UPI QR included)`);
     if (restaurantId) fetchActiveOrders(restaurantId);
 
     setTimeout(() => {
@@ -776,18 +790,18 @@ export default function PosTerminalPage() {
     }, 100);
   };
 
-  /* ─── 13. Actions: 1-Click Fast Settle (Cash / UPI Paid / Card) ───── */
+  /* ─── 13. Actions: 1-Click Fast Settlement ────────────────────────── */
   const handleQuickSettle = async (method: PaymentMethod) => {
     if (allCurrentItems.length === 0) {
-      showToast("No items to settle.");
+      showToast("Cannot settle empty check.");
       return;
     }
 
-    const targetDestination = orderMode === "DINE_IN" ? selectedTable : takeawayToken;
+    const targetDestination = terminalMode === "DINE_IN" ? selectedTable : currentTakeawayToken;
     setIsSubmitting(true);
 
     try {
-      if (orderMode === "DINE_IN" && currentTableSession && currentTableSession.orders.length > 0) {
+      if (terminalMode === "DINE_IN" && currentTableSession && currentTableSession.orders.length > 0) {
         const orderIds = currentTableSession.orders.map((o) => o.id);
 
         await supabase
@@ -801,7 +815,7 @@ export default function PosTerminalPage() {
           })
           .in("id", orderIds);
 
-        // Save any unsaved cart items directly as paid
+        // Also commit any unsaved staff cart items directly as settled
         if (cart.length > 0) {
           const unsavedPayload = cart.map((c) => ({
             item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
@@ -838,19 +852,18 @@ export default function PosTerminalPage() {
           status: "COMPLETED",
           payment_status: "PAID",
           payment_method: method,
-          customer_name: customerName.trim() || `${targetDestination}`,
+          customer_name: customerName.trim() || targetDestination,
           customer_phone: customerPhone.trim() || null,
           items_json: itemsPayload,
           note: `[POS Settled: ${method}]`,
         });
       }
 
-      showToast(`✅ Settled ₹${grandTotal} via ${method}!`);
+      showToast(`Settled ₹${grandTotal} via ${method}`);
 
-      // Print Final Tax Invoice
       setPrintChit({
         type: "BILL",
-        mode: orderMode,
+        mode: terminalMode,
         tableOrToken: targetDestination,
         customerName: customerName.trim(),
         paymentMethod: method,
@@ -869,10 +882,10 @@ export default function PosTerminalPage() {
       clearCurrentCart();
       setCustomerName("");
       setCustomerPhone("");
-      setShowTenderDrawer(false);
+      setIsPaymentDrawerOpen(false);
 
-      if (orderMode === "TAKEAWAY") {
-        setTakeawayTokenNumber((prev) => prev + 1);
+      if (terminalMode === "TAKEAWAY") {
+        setTakeawayCounter((prev) => prev + 1);
       }
 
       if (restaurantId) fetchActiveOrders(restaurantId);
@@ -887,7 +900,7 @@ export default function PosTerminalPage() {
     }
   };
 
-  // UPI Intent URL for Printed Bill QR
+  // UPI QR String for thermal print
   const upiIntentUrl = useMemo(() => {
     const vpa = upiId || "merchant@upi";
     const name = encodeURIComponent(restaurantName);
@@ -899,107 +912,100 @@ export default function PosTerminalPage() {
   const vacantTablesCount = Array.from(tableSessionMap.values()).filter((s) => s.status === "VACANT").length;
 
   return (
-    <div className="flex h-screen flex-col bg-[#F8F9FA] font-sans text-zinc-900 select-none overflow-hidden">
+    <div className="flex h-screen flex-col bg-[#F9FAFB] font-sans text-zinc-900 select-none overflow-hidden antialiased">
       
-      {/* ── Toast Notification ── */}
+      {/* ── Refined Toast ── */}
       {toastMessage && (
-        <div className="fixed top-3 right-4 z-[300] bg-zinc-900 text-white px-3.5 py-2 rounded-lg shadow-xl text-xs font-semibold flex items-center gap-2 animate-in fade-in duration-150">
-          <CheckCircle2 size={14} className="text-emerald-400" />
+        <div className="fixed top-3 right-4 z-[300] bg-zinc-900 text-white px-3.5 py-2 rounded-lg shadow-lg text-xs font-medium flex items-center gap-2 animate-in fade-in duration-150">
+          <Check size={14} className="text-emerald-400" />
           <span>{toastMessage}</span>
         </div>
       )}
 
       {/* ═════════════════════════════════════════════════════════════════════
-          CLEAN SLIM HEADER: Store Name + Mode Tabs + Keyboard Shortcuts
+          TOP BAR: Minimal, Crisp Header (Lucid POS aesthetic)
          ═════════════════════════════════════════════════════════════════════ */}
-      <header className="shrink-0 h-12 bg-white border-b border-zinc-200 px-4 flex items-center justify-between z-30">
+      <header className="shrink-0 h-13 bg-white border-b border-zinc-200/80 px-4 flex items-center justify-between z-30">
         <div className="flex items-center gap-4">
-          <h1 className="text-sm font-black text-zinc-900 tracking-tight">
+          <span className="text-sm font-semibold tracking-tight text-zinc-900">
             {restaurantName}
-          </h1>
+          </span>
 
-          {/* Mode Switcher Tabs */}
-          <div className="flex bg-zinc-100 p-0.5 rounded-lg border border-zinc-200">
+          {/* Minimal Mode Switcher */}
+          <div className="flex bg-zinc-100 p-0.5 rounded-lg border border-zinc-200/70">
             <button
               onClick={() => {
-                setOrderMode("DINE_IN");
+                setTerminalMode("DINE_IN");
                 if (!selectedTable && locations.length > 0) setSelectedTable(locations[0].name);
               }}
-              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                orderMode === "DINE_IN"
-                  ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/50"
+              className={`px-3 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                terminalMode === "DINE_IN"
+                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/50"
                   : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <UtensilsCrossed size={13} className={orderMode === "DINE_IN" ? "text-[#E46254]" : ""} />
-              <span>Dine-In (F1)</span>
+              <UtensilsCrossed size={13} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : "text-zinc-400"} />
+              <span>Dine-In</span>
             </button>
 
             <button
-              onClick={() => setOrderMode("TAKEAWAY")}
-              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                orderMode === "TAKEAWAY"
-                  ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/50"
+              onClick={() => setTerminalMode("TAKEAWAY")}
+              className={`px-3 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                terminalMode === "TAKEAWAY"
+                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/50"
                   : "text-zinc-500 hover:text-zinc-900"
               }`}
             >
-              <ShoppingBag size={13} className={orderMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
-              <span>Takeaway (F2)</span>
-            </button>
-
-            <button
-              onClick={() => setOrderMode("DELIVERY")}
-              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                orderMode === "DELIVERY"
-                  ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/50"
-                  : "text-zinc-500 hover:text-zinc-900"
-              }`}
-            >
-              <Bike size={13} className={orderMode === "DELIVERY" ? "text-[#E46254]" : ""} />
-              <span>Delivery</span>
+              <ShoppingBag size={13} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : "text-zinc-400"} />
+              <span>Takeaway</span>
+              {activeTakeaways.length > 0 && (
+                <span className="text-[10px] font-bold bg-amber-100 text-amber-800 px-1 rounded">
+                  {activeTakeaways.length}
+                </span>
+              )}
             </button>
           </div>
         </div>
 
-        {/* Keyboard Helper Pills */}
-        <div className="hidden md:flex items-center gap-2 text-[11px] font-semibold text-zinc-400">
-          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">/ Search</span>
-          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F4 KOT</span>
-          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F8 Settle</span>
-          <span className="px-1.5 py-0.5 bg-zinc-100 border border-zinc-200 rounded text-zinc-600">F9 Bill</span>
+        {/* Keyboard Quick Hints */}
+        <div className="hidden md:flex items-center gap-2 text-[11px] font-medium text-zinc-400">
+          <span className="px-1.5 py-0.5 bg-zinc-50 border border-zinc-200/80 rounded font-mono text-[10px] text-zinc-500">/ Search</span>
+          <span className="px-1.5 py-0.5 bg-zinc-50 border border-zinc-200/80 rounded font-mono text-[10px] text-zinc-500">F4 Send</span>
+          <span className="px-1.5 py-0.5 bg-zinc-50 border border-zinc-200/80 rounded font-mono text-[10px] text-zinc-500">F8 Settle</span>
+          <span className="px-1.5 py-0.5 bg-zinc-50 border border-zinc-200/80 rounded font-mono text-[10px] text-zinc-500">F9 Bill</span>
         </div>
       </header>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          DINE-IN TABLE STRIP / COUNTER BAR (Organized with Quick Status Filter)
+          SUB-BAR: Live Table Floor Matrix / Filter Bar
          ═════════════════════════════════════════════════════════════════════ */}
-      <div className="shrink-0 bg-white border-b border-zinc-200 px-4 py-2 flex items-center justify-between gap-3 overflow-x-auto no-scrollbar">
-        {orderMode === "DINE_IN" ? (
+      <div className="shrink-0 bg-white border-b border-zinc-200/70 px-4 py-2 flex items-center justify-between gap-3 overflow-x-auto no-scrollbar">
+        {terminalMode === "DINE_IN" ? (
           locations.length === 0 ? (
-            <div className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 px-3 py-1 rounded-lg border border-amber-200 w-full">
-              <AlertCircle size={14} className="shrink-0" />
-              <span>No tables created yet.</span>
-              <Link href="/dashboard/locations" className="font-bold underline text-amber-900 hover:text-black">
-                Add your restaurant tables in Table Orders / Locations
+            <div className="flex items-center gap-2 text-xs text-zinc-600 bg-zinc-50 px-3 py-1 rounded-lg border border-zinc-200 w-full">
+              <AlertCircle size={14} className="text-zinc-400 shrink-0" />
+              <span>No tables configured yet.</span>
+              <Link href="/dashboard/locations" className="font-semibold text-zinc-900 underline hover:text-black">
+                Add tables in Locations
               </Link>
             </div>
           ) : (
             <div className="flex items-center gap-3 w-full">
               
-              {/* Quick Status Filters for Cashier */}
-              <div className="flex items-center gap-1 shrink-0 bg-zinc-100 p-0.5 rounded-lg border border-zinc-200">
+              {/* Quick Status Segmented Filter */}
+              <div className="flex items-center gap-1 shrink-0 bg-zinc-100 p-0.5 rounded-lg border border-zinc-200/60">
                 <button
                   onClick={() => setTableFilter("ALL")}
-                  className={`px-2 py-0.5 rounded text-[11px] font-bold cursor-pointer ${
-                    tableFilter === "ALL" ? "bg-white text-zinc-900 shadow-2xs" : "text-zinc-500 hover:text-zinc-800"
+                  className={`px-2.5 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                    tableFilter === "ALL" ? "bg-white text-zinc-900 shadow-2xs" : "text-zinc-500 hover:text-zinc-900"
                   }`}
                 >
                   All ({locations.length})
                 </button>
                 <button
                   onClick={() => setTableFilter("ACTIVE")}
-                  className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
-                    tableFilter === "ACTIVE" ? "bg-amber-500 text-white shadow-2xs" : "text-amber-800 hover:bg-amber-50"
+                  className={`px-2.5 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    tableFilter === "ACTIVE" ? "bg-amber-500 text-white shadow-2xs" : "text-amber-800 hover:bg-amber-50/50"
                   }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
@@ -1007,8 +1013,8 @@ export default function PosTerminalPage() {
                 </button>
                 <button
                   onClick={() => setTableFilter("BILLED")}
-                  className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
-                    tableFilter === "BILLED" ? "bg-indigo-600 text-white shadow-2xs" : "text-indigo-800 hover:bg-indigo-50"
+                  className={`px-2.5 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    tableFilter === "BILLED" ? "bg-indigo-600 text-white shadow-2xs" : "text-indigo-800 hover:bg-indigo-50/50"
                   }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
@@ -1016,8 +1022,8 @@ export default function PosTerminalPage() {
                 </button>
                 <button
                   onClick={() => setTableFilter("VACANT")}
-                  className={`px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
-                    tableFilter === "VACANT" ? "bg-emerald-600 text-white shadow-2xs" : "text-emerald-800 hover:bg-emerald-50"
+                  className={`px-2.5 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    tableFilter === "VACANT" ? "bg-emerald-600 text-white shadow-2xs" : "text-emerald-800 hover:bg-emerald-50/50"
                   }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -1025,8 +1031,8 @@ export default function PosTerminalPage() {
                 </button>
               </div>
 
-              {/* Table Buttons */}
-              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5 flex-1">
+              {/* Table Badges Strip */}
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 flex-1">
                 {filteredTables.map((loc) => {
                   const session = tableSessionMap.get(loc.name);
                   const isSelected = selectedTable === loc.name;
@@ -1041,18 +1047,18 @@ export default function PosTerminalPage() {
                         setSelectedTable(loc.name);
                         clearCurrentCart();
                       }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer border shrink-0 ${
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer border shrink-0 ${
                         isSelected
-                          ? "bg-[#E46254] text-white border-[#E46254] shadow-xs ring-1 ring-[#E46254]/30"
+                          ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
                           : isVacant
-                          ? "bg-white text-zinc-700 border-zinc-200 hover:border-zinc-300"
+                          ? "bg-white text-zinc-700 border-zinc-200/80 hover:border-zinc-300"
                           : isCooking
-                          ? "bg-amber-50 text-amber-900 border-amber-300"
-                          : "bg-indigo-50 text-indigo-900 border-indigo-300"
+                          ? "bg-amber-50/80 text-amber-900 border-amber-300/80"
+                          : "bg-indigo-50/80 text-indigo-900 border-indigo-300/80"
                       }`}
                     >
                       <span
-                        className={`w-2 h-2 rounded-full shrink-0 ${
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                           isSelected
                             ? "bg-white"
                             : isVacant
@@ -1062,9 +1068,9 @@ export default function PosTerminalPage() {
                             : "bg-indigo-500"
                         }`}
                       />
-                      <span>{loc.name}</span>
+                      <span className="font-semibold">{loc.name}</span>
                       {!isVacant && session?.runningTotal ? (
-                        <span className={`text-[10px] font-bold ${isSelected ? "text-white" : "text-zinc-600"}`}>
+                        <span className={`text-[10px] tabular-nums font-mono ${isSelected ? "text-white/90" : "text-zinc-500"}`}>
                           ₹{session.runningTotal}
                         </span>
                       ) : null}
@@ -1077,28 +1083,29 @@ export default function PosTerminalPage() {
         ) : (
           <div className="flex items-center justify-between w-full">
             <div className="flex items-center gap-3">
-              <span className="text-xs font-bold text-zinc-900">
-                {takeawayToken}
+              <span className="text-xs font-semibold text-zinc-900">
+                {currentTakeawayToken}
               </span>
               <button
                 onClick={() => {
-                  setTakeawayTokenNumber((prev) => prev + 1);
+                  setTakeawayCounter((prev) => prev + 1);
                   clearCurrentCart();
-                  showToast(`Switched to Token #${takeawayTokenNumber + 1}`);
+                  showToast(`Switched to Token #${(takeawayCounter + 1).toString().padStart(2, "0")}`);
                 }}
-                className="px-2 py-0.5 bg-zinc-100 hover:bg-zinc-200 border border-zinc-300 rounded text-xs font-semibold text-zinc-700 cursor-pointer"
+                className="px-2 py-0.5 bg-zinc-100 hover:bg-zinc-200 border border-zinc-200 rounded text-xs font-medium text-zinc-700 cursor-pointer"
               >
                 + Next Token
               </button>
             </div>
 
-            {activeTakeawayOrders.length > 0 && (
+            {/* Waiting Takeaways */}
+            {activeTakeaways.length > 0 && (
               <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-                <span className="text-[11px] font-bold text-zinc-400">Waiting:</span>
-                {activeTakeawayOrders.map((ord) => (
+                <span className="text-[11px] font-medium text-zinc-400">Waiting:</span>
+                {activeTakeaways.map((ord) => (
                   <span
                     key={ord.id}
-                    className="px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-900 rounded text-[11px] font-bold"
+                    className="px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-900 rounded text-[11px] font-medium tabular-nums"
                   >
                     {ord.table_no} (₹{ord.total})
                   </span>
@@ -1110,24 +1117,24 @@ export default function PosTerminalPage() {
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          MAIN WORKSPACE: Split Layout (Left Menu 65% | Right Ticket 35%)
+          MAIN WORKSPACE: Split Layout (Left: Menu 65% | Right: Live Check 35%)
          ═════════════════════════════════════════════════════════════════════ */}
       <div className="flex flex-1 overflow-hidden">
         
-        {/* ── LEFT: High-Density Menu Catalog ── */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-[#FAFAFA] border-r border-zinc-200">
+        {/* ── LEFT: High-Density Clean Menu Catalog ── */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-[#FAFAFA] border-r border-zinc-200/80">
           
-          {/* Search Bar + Category Pills */}
-          <div className="shrink-0 p-3 bg-white border-b border-zinc-200 space-y-2">
+          {/* Search + Categories Bar */}
+          <div className="shrink-0 p-3 bg-white border-b border-zinc-200/80 space-y-2">
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={15} />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
               <input
                 ref={searchInputRef}
                 type="text"
-                placeholder="Search dish or category... ('/' to focus)"
+                placeholder="Search dishes or categories... (Press '/' to focus)"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-8 py-1.5 bg-zinc-50 border border-zinc-200 hover:border-zinc-300 focus:border-[#E46254] focus:bg-white rounded-lg text-xs font-medium outline-none"
+                className="w-full pl-8.5 pr-8 py-1.5 bg-zinc-50 border border-zinc-200/80 hover:border-zinc-300 focus:border-[#E46254] focus:bg-white rounded-lg text-xs font-medium outline-none transition-all"
               />
               {searchQuery && (
                 <button
@@ -1139,8 +1146,8 @@ export default function PosTerminalPage() {
               )}
             </div>
 
-            {/* Category Pills */}
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+            {/* Category Pills Strip */}
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
               {categories.map((cat) => {
                 const isSelected = selectedCategory.toLowerCase() === cat.toLowerCase();
                 const count =
@@ -1152,14 +1159,14 @@ export default function PosTerminalPage() {
                   <button
                     key={cat}
                     onClick={() => setSelectedCategory(cat)}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1 border shrink-0 ${
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium whitespace-nowrap transition-all cursor-pointer flex items-center gap-1 border shrink-0 ${
                       isSelected
                         ? "bg-[#E46254] text-white border-[#E46254]"
                         : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300 hover:text-zinc-900"
                     }`}
                   >
-                    <span>{cat === "ALL" ? "All" : cat}</span>
-                    <span className={`text-[10px] font-semibold ${isSelected ? "text-white/80" : "text-zinc-400"}`}>
+                    <span>{cat === "ALL" ? "All Items" : cat}</span>
+                    <span className={`text-[10px] tabular-nums ${isSelected ? "text-white/80" : "text-zinc-400"}`}>
                       {count}
                     </span>
                   </button>
@@ -1172,12 +1179,12 @@ export default function PosTerminalPage() {
           <div className="flex-1 overflow-y-auto p-3">
             {filteredItems.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-8 bg-white rounded-xl border border-zinc-200">
-                <Receipt size={28} className="text-zinc-300 mb-1" />
-                <h3 className="text-xs font-bold text-zinc-700">No dishes found</h3>
-                <p className="text-[11px] text-zinc-400">Try clearing your search</p>
+                <Receipt size={24} className="text-zinc-300 mb-1" />
+                <h3 className="text-xs font-semibold text-zinc-700">No dishes in this category</h3>
+                <p className="text-[11px] text-zinc-400">Try selecting All Items</p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2">
                 {filteredItems.map((dish) => {
                   const cartItem = cart.find((c) => c.id === dish.id);
                   const inCartQty = cartItem ? cartItem.quantity : 0;
@@ -1186,62 +1193,62 @@ export default function PosTerminalPage() {
                     <div
                       key={dish.id}
                       onClick={() => addToCart(dish)}
-                      className={`bg-white rounded-xl p-2.5 border transition-all cursor-pointer flex flex-col justify-between select-none hover:border-[#E46254]/50 hover:shadow-xs active:scale-[0.98] ${
-                        inCartQty > 0 ? "border-[#E46254] ring-1 ring-[#E46254]/20 bg-[#E46254]/2" : "border-zinc-200"
+                      className={`bg-white rounded-lg p-2.5 border transition-all cursor-pointer flex flex-col justify-between select-none hover:border-zinc-300 hover:shadow-2xs active:scale-[0.99] ${
+                        inCartQty > 0 ? "border-[#E46254] ring-1 ring-[#E46254]/20 bg-[#E46254]/2" : "border-zinc-200/80"
                       }`}
                     >
                       <div>
-                        {/* Dot + Category */}
+                        {/* Dot indicator */}
                         <div className="flex items-center justify-between mb-1">
                           <span
-                            className={`w-3 h-3 border flex items-center justify-center shrink-0 rounded-2xs ${
+                            className={`w-2.5 h-2.5 border flex items-center justify-center shrink-0 rounded-2xs ${
                               dish.is_veg ? "border-emerald-600" : "border-rose-600"
                             }`}
                           >
                             <span
-                              className={`w-1.5 h-1.5 rounded-full ${
+                              className={`w-1 h-1 rounded-full ${
                                 dish.is_veg ? "bg-emerald-600" : "bg-rose-600"
                               }`}
                             />
                           </span>
-                          <span className="text-[9px] font-semibold text-zinc-400 truncate max-w-[80px]">
+                          <span className="text-[9px] font-medium text-zinc-400 truncate max-w-[80px]">
                             {dish.category}
                           </span>
                         </div>
 
-                        {/* Name */}
-                        <h4 className="text-xs font-bold text-zinc-800 line-clamp-2 leading-snug min-h-[30px]">
+                        {/* Dish Name */}
+                        <h4 className="text-xs font-semibold text-zinc-800 line-clamp-2 leading-snug min-h-[30px]">
                           {dish.name}
                         </h4>
                       </div>
 
-                      {/* Price & Add */}
+                      {/* Price & Quantity Controls */}
                       <div className="flex items-center justify-between pt-2 mt-1 border-t border-zinc-100">
-                        <span className="text-xs font-extrabold text-zinc-900">
+                        <span className="text-xs font-bold text-zinc-900 tabular-nums font-mono">
                           ₹{dish.base_price}
                         </span>
 
                         {inCartQty > 0 ? (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className="flex items-center gap-1 bg-[#E46254] text-white px-1.5 py-0.5 rounded shadow-xs"
+                            className="flex items-center gap-1 bg-[#E46254] text-white px-1.5 py-0.5 rounded"
                           >
                             <button
                               onClick={() => updateCartQty(dish.id, -1)}
                               className="p-0.5 hover:bg-white/20 rounded cursor-pointer"
                             >
-                              <Minus size={10} />
+                              <Minus size={9} />
                             </button>
-                            <span className="text-[11px] font-black px-1">{inCartQty}</span>
+                            <span className="text-[11px] font-semibold px-1 tabular-nums">{inCartQty}</span>
                             <button
                               onClick={() => updateCartQty(dish.id, 1)}
                               className="p-0.5 hover:bg-white/20 rounded cursor-pointer"
                             >
-                              <Plus size={10} />
+                              <Plus size={9} />
                             </button>
                           </div>
                         ) : (
-                          <span className="text-[10px] font-bold text-[#E46254] bg-[#E46254]/10 hover:bg-[#E46254] hover:text-white px-1.5 py-0.5 rounded transition-colors">
+                          <span className="text-[10px] font-medium text-zinc-500 hover:text-zinc-900 px-1.5 py-0.5 bg-zinc-50 rounded border border-zinc-200/80 transition-colors">
                             + Add
                           </span>
                         )}
@@ -1254,41 +1261,41 @@ export default function PosTerminalPage() {
           </div>
         </div>
 
-        {/* ── RIGHT: Direct Order Ticket & Clean Payment Dock ── */}
-        <div className="w-[360px] xl:w-[400px] bg-white flex flex-col justify-between shrink-0 shadow-md border-l border-zinc-200 z-20">
+        {/* ── RIGHT: Direct Table Check (Lucid POS Live Ticket) ── */}
+        <div className="w-[360px] xl:w-[390px] bg-white flex flex-col justify-between shrink-0 shadow-xs border-l border-zinc-200/80 z-20">
           
-          {/* Ticket Header */}
-          <div className="shrink-0 p-3 border-b border-zinc-200 bg-zinc-50/70">
+          {/* Header of Active Table Ticket */}
+          <div className="shrink-0 p-3 border-b border-zinc-200/80 bg-zinc-50/50">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-black text-zinc-900">
-                  {orderMode === "DINE_IN" ? selectedTable || "No Table" : takeawayToken}
+                <span className="text-sm font-bold text-zinc-900 tracking-tight">
+                  {terminalMode === "DINE_IN" ? selectedTable || "No Table" : currentTakeawayToken}
                 </span>
 
                 {/* Move Table */}
-                {orderMode === "DINE_IN" && locations.length > 1 && (
+                {terminalMode === "DINE_IN" && locations.length > 1 && (
                   <div className="relative">
                     <button
                       onClick={() => {
-                        setShowMoveTablePicker((v) => !v);
-                        setShowMergeTablePicker(false);
+                        setShowMovePicker((v) => !v);
+                        setShowMergePicker(false);
                       }}
-                      className="px-2 py-0.5 text-[10px] font-bold text-zinc-600 bg-white border border-zinc-300 rounded hover:bg-zinc-100 flex items-center gap-1 cursor-pointer"
+                      className="px-2 py-0.5 text-[10px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded hover:bg-zinc-50 flex items-center gap-1 cursor-pointer"
                     >
-                      <ArrowRightLeft size={10} />
+                      <ArrowRightLeft size={9} />
                       <span>Move</span>
                     </button>
 
-                    {showMoveTablePicker && (
-                      <div className="absolute left-0 top-full mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-xl p-1 z-50 space-y-0.5">
-                        <p className="text-[10px] font-bold text-zinc-400 px-2 py-1">Transfer to:</p>
+                    {showMovePicker && (
+                      <div className="absolute left-0 top-full mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-lg p-1 z-50 space-y-0.5">
+                        <p className="text-[10px] font-semibold text-zinc-400 px-2 py-1">Transfer to:</p>
                         {locations
                           .filter((l) => l.name !== selectedTable)
                           .map((loc) => (
                             <button
                               key={loc.id}
                               onClick={() => handleTransferTable(loc.name)}
-                              className="w-full text-left px-2 py-1 rounded text-xs font-semibold hover:bg-zinc-100 cursor-pointer"
+                              className="w-full text-left px-2 py-1 rounded text-xs hover:bg-zinc-100 cursor-pointer"
                             >
                               {loc.name}
                             </button>
@@ -1298,30 +1305,30 @@ export default function PosTerminalPage() {
                   </div>
                 )}
 
-                {/* Merge Table (Big Party) */}
-                {orderMode === "DINE_IN" && locations.length > 1 && currentTableSession && currentTableSession.orders.length > 0 && (
+                {/* Merge Table */}
+                {terminalMode === "DINE_IN" && locations.length > 1 && currentTableSession && currentTableSession.orders.length > 0 && (
                   <div className="relative">
                     <button
                       onClick={() => {
-                        setShowMergeTablePicker((v) => !v);
-                        setShowMoveTablePicker(false);
+                        setShowMergePicker((v) => !v);
+                        setShowMovePicker(false);
                       }}
-                      className="px-2 py-0.5 text-[10px] font-bold text-zinc-600 bg-white border border-zinc-300 rounded hover:bg-zinc-100 flex items-center gap-1 cursor-pointer"
+                      className="px-2 py-0.5 text-[10px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded hover:bg-zinc-50 flex items-center gap-1 cursor-pointer"
                     >
-                      <Merge size={10} />
+                      <Merge size={9} />
                       <span>Merge</span>
                     </button>
 
-                    {showMergeTablePicker && (
-                      <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-zinc-200 rounded-lg shadow-xl p-1 z-50 space-y-0.5">
-                        <p className="text-[10px] font-bold text-zinc-400 px-2 py-1">Merge into Table:</p>
+                    {showMergePicker && (
+                      <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-zinc-200 rounded-lg shadow-lg p-1 z-50 space-y-0.5">
+                        <p className="text-[10px] font-semibold text-zinc-400 px-2 py-1">Merge into Table:</p>
                         {locations
                           .filter((l) => l.name !== selectedTable)
                           .map((loc) => (
                             <button
                               key={loc.id}
                               onClick={() => handleMergeTable(loc.name)}
-                              className="w-full text-left px-2 py-1 rounded text-xs font-semibold hover:bg-zinc-100 cursor-pointer"
+                              className="w-full text-left px-2 py-1 rounded text-xs hover:bg-zinc-100 cursor-pointer"
                             >
                               {loc.name}
                             </button>
@@ -1335,62 +1342,66 @@ export default function PosTerminalPage() {
               {cart.length > 0 && (
                 <button
                   onClick={clearCurrentCart}
-                  className="text-xs text-rose-600 hover:text-rose-700 font-semibold cursor-pointer"
+                  className="text-xs text-zinc-400 hover:text-rose-600 font-medium cursor-pointer"
                 >
                   Clear Cart
                 </button>
               )}
             </div>
 
-            {/* Optional Customer Inputs */}
+            {/* Guest Notes / Info */}
             <div className="grid grid-cols-2 gap-2 mt-2">
               <input
                 type="text"
                 placeholder="Guest Name (Optional)"
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
-                className="w-full px-2 py-1 bg-white border border-zinc-200 rounded text-xs outline-none focus:border-zinc-400"
+                className="w-full px-2 py-1 bg-white border border-zinc-200/80 rounded text-xs outline-none focus:border-zinc-400"
               />
               <input
                 type="tel"
                 placeholder="Phone (Optional)"
                 value={customerPhone}
                 onChange={(e) => setCustomerPhone(e.target.value)}
-                className="w-full px-2 py-1 bg-white border border-zinc-200 rounded text-xs outline-none focus:border-zinc-400"
+                className="w-full px-2 py-1 bg-white border border-zinc-200/80 rounded text-xs outline-none focus:border-zinc-400"
               />
             </div>
           </div>
 
-          {/* Ticket Scroll Items */}
+          {/* Ticket Items Stream */}
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
             
-            {/* Previously Fired Kitchen Items (With VOID / CANCEL Button) */}
-            {orderMode === "DINE_IN" && currentTableSession?.firedItems && currentTableSession.firedItems.length > 0 && (
+            {/* IN KITCHEN (Fired via QR or previous staff rounds) */}
+            {terminalMode === "DINE_IN" && currentTableSession?.firedRounds && currentTableSession.firedRounds.length > 0 && (
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs font-bold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-md border border-amber-200">
-                  <span className="flex items-center gap-1.5">
-                    <ChefHat size={13} className="text-amber-600" />
-                    <span>In Kitchen (Fired)</span>
-                  </span>
-                  <span className="text-[10px] text-amber-700">Tap ❌ to Void</span>
+                <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-600 bg-zinc-100/70 px-2.5 py-1 rounded border border-zinc-200/60">
+                  <span>In Kitchen (Fired)</span>
+                  <span className="text-[10px] text-zinc-400">Tap ✕ to Void</span>
                 </div>
 
-                <div className="divide-y divide-zinc-100 bg-zinc-50 rounded-lg p-2 border border-zinc-200">
-                  {currentTableSession.firedItems.map((fi, idx) => (
-                    <div key={`${fi.id}-${idx}`} className="py-1 flex items-center justify-between text-xs">
+                <div className="divide-y divide-zinc-100 bg-white rounded-lg p-2 border border-zinc-200/70">
+                  {currentTableSession.firedRounds.map((fi, idx) => (
+                    <div key={`${fi.id}-${idx}`} className="py-1.5 flex items-center justify-between text-xs">
                       <div className="flex items-center gap-2 flex-1 pr-2">
-                        <span className="text-[11px] font-bold text-zinc-500">{fi.quantity}×</span>
-                        <span className="font-semibold text-zinc-700 truncate">{fi.name}</span>
+                        <span className="text-[11px] font-mono text-zinc-500">{fi.quantity}×</span>
+                        <div>
+                          <p className="font-medium text-zinc-800">{fi.name}</p>
+                          <span className="text-[9px] font-mono text-zinc-400 uppercase">
+                            {fi.source === "QR" ? "Guest QR" : `Round ${fi.roundNumber}`}
+                          </span>
+                        </div>
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <span className="font-bold text-zinc-800">₹{fi.price * fi.quantity}</span>
+                        <span className="font-semibold text-zinc-900 font-mono tabular-nums">
+                          ₹{fi.price * fi.quantity}
+                        </span>
                         <button
-                          onClick={() => handleVoidFiredDish(fi.name, fi.price)}
-                          className="text-zinc-300 hover:text-rose-600 p-0.5 cursor-pointer"
-                          title="Void / Cancel Dish"
+                          onClick={() => handleVoidFiredDish(fi.name, fi.price, fi.orderId)}
+                          className="text-zinc-300 hover:text-rose-600 p-0.5 cursor-pointer transition-colors"
+                          title="Void Item"
                         >
-                          <Trash2 size={12} />
+                          <X size={12} />
                         </button>
                       </div>
                     </div>
@@ -1399,24 +1410,24 @@ export default function PosTerminalPage() {
               </div>
             )}
 
-            {/* Current Cart / Unfired Items */}
+            {/* NEW ADDITIONS (Staff cart pending to be sent to kitchen) */}
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-bold text-zinc-700 px-1">
-                <span>{orderMode === "DINE_IN" ? "New Items (Pending KOT)" : "Cart Items"}</span>
-                <span className="text-zinc-400">{cart.length} items</span>
+              <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-700 px-1">
+                <span>{terminalMode === "DINE_IN" ? "New Additions (Pending KOT)" : "Order Items"}</span>
+                <span className="text-zinc-400 font-mono">{cart.length} items</span>
               </div>
 
               {cart.length === 0 ? (
-                <div className="text-center py-6 border border-dashed border-zinc-200 rounded-lg">
-                  <p className="text-xs text-zinc-400">Cart is empty</p>
-                  <p className="text-[10px] text-zinc-400 mt-0.5">Click dishes on the left to add</p>
+                <div className="text-center py-6 border border-dashed border-zinc-200/80 rounded-lg">
+                  <p className="text-xs text-zinc-400">No new items in queue</p>
+                  <p className="text-[10px] text-zinc-400 mt-0.5">Tap menu dishes on the left to add</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
                   {cart.map((item) => (
                     <div
                       key={item.id}
-                      className="bg-white border border-zinc-200 rounded-lg p-2 flex items-center justify-between"
+                      className="bg-white border border-zinc-200/80 rounded-lg p-2 flex items-center justify-between"
                     >
                       <div className="flex items-center gap-2 flex-1 pr-2">
                         <span
@@ -1424,7 +1435,7 @@ export default function PosTerminalPage() {
                             item.isVeg ? "bg-emerald-500" : "bg-rose-500"
                           }`}
                         />
-                        <span className="text-xs font-bold text-zinc-800 truncate">{item.name}</span>
+                        <span className="text-xs font-medium text-zinc-800 truncate">{item.name}</span>
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
@@ -1435,7 +1446,7 @@ export default function PosTerminalPage() {
                           >
                             <Minus size={10} />
                           </button>
-                          <span className="text-xs font-bold px-1 tabular-nums">{item.quantity}</span>
+                          <span className="text-xs font-semibold px-1.5 font-mono tabular-nums">{item.quantity}</span>
                           <button
                             onClick={() => updateCartQty(item.id, 1)}
                             className="p-0.5 text-zinc-600 hover:text-black cursor-pointer"
@@ -1444,7 +1455,7 @@ export default function PosTerminalPage() {
                           </button>
                         </div>
 
-                        <span className="text-xs font-bold text-zinc-900 w-12 text-right">
+                        <span className="text-xs font-bold text-zinc-900 w-12 text-right font-mono tabular-nums">
                           ₹{item.price * item.quantity}
                         </span>
 
@@ -1463,48 +1474,48 @@ export default function PosTerminalPage() {
           </div>
 
           {/* ═════════════════════════════════════════════════════════════════
-              CLEAN PAYMENT DOCK (ONE PRIMARY BUTTON · NO MODAL CONFUSION)
+              CLEAN FINANCIAL DOCK: Settle / Send Actions (Zero Gimmicks)
              ═════════════════════════════════════════════════════════════════ */}
-          <div className="shrink-0 p-3 bg-zinc-50 border-t border-zinc-200 space-y-2.5">
+          <div className="shrink-0 p-3 bg-zinc-50 border-t border-zinc-200/80 space-y-2.5">
             
-            {/* Price Row */}
+            {/* Calculation Lines */}
             <div className="space-y-1 text-xs">
               <div className="flex justify-between text-zinc-500">
                 <span>Subtotal</span>
-                <span className="font-semibold text-zinc-800">₹{subtotal}</span>
+                <span className="font-semibold text-zinc-800 font-mono tabular-nums">₹{subtotal}</span>
               </div>
 
               {effectiveDiscount > 0 && (
-                <div className="flex justify-between text-emerald-600 font-semibold">
+                <div className="flex justify-between text-emerald-600 font-medium">
                   <span>Discount ({discountPercent}%)</span>
-                  <span>-₹{effectiveDiscount.toFixed(1)}</span>
+                  <span className="font-mono tabular-nums">-₹{effectiveDiscount.toFixed(1)}</span>
                 </div>
               )}
 
               <div className="flex justify-between text-zinc-500">
                 <span className="flex items-center gap-1">
-                  <span>GST (5%)</span>
+                  <span>Taxes (5% GST)</span>
                   <button
-                    onClick={() => setShowDiscountInput((v) => !v)}
-                    className="text-[10px] text-[#E46254] underline cursor-pointer"
+                    onClick={() => setShowDiscountSelector((v) => !v)}
+                    className="text-[10px] text-zinc-500 underline cursor-pointer hover:text-zinc-900"
                   >
-                    {discountPercent > 0 ? "Edit Disc" : "+ Discount"}
+                    {discountPercent > 0 ? "Edit Disc" : "+ Disc"}
                   </button>
                 </span>
-                <span className="font-semibold text-zinc-800">₹{taxTotal.toFixed(1)}</span>
+                <span className="font-semibold text-zinc-800 font-mono tabular-nums">₹{taxTotal.toFixed(1)}</span>
               </div>
 
               {/* Discount Selector Strip */}
-              {showDiscountInput && (
+              {showDiscountSelector && (
                 <div className="flex items-center gap-1 pt-1">
                   {[0, 5, 10, 15, 20].map((pct) => (
                     <button
                       key={pct}
                       onClick={() => {
                         setDiscountPercent(pct);
-                        setShowDiscountInput(false);
+                        setShowDiscountSelector(false);
                       }}
-                      className={`flex-1 py-0.5 rounded text-[10px] font-bold border cursor-pointer ${
+                      className={`flex-1 py-0.5 rounded text-[10px] font-medium border cursor-pointer ${
                         discountPercent === pct
                           ? "bg-zinc-900 text-white border-zinc-900"
                           : "bg-white text-zinc-600 border-zinc-200"
@@ -1518,50 +1529,50 @@ export default function PosTerminalPage() {
 
               {/* Grand Total */}
               <div className="flex items-center justify-between pt-1.5 border-t border-zinc-200">
-                <span className="text-xs font-bold text-zinc-600">Grand Total:</span>
-                <span className="text-base font-black text-zinc-900">₹{grandTotal}</span>
+                <span className="text-xs font-semibold text-zinc-600">Total Due:</span>
+                <span className="text-base font-bold text-zinc-900 font-mono tabular-nums">₹{grandTotal}</span>
               </div>
             </div>
 
-            {/* ACTION ROW 1: FIRE KOT & PRINT BILL */}
+            {/* ACTION ROW 1: SEND TO KITCHEN & PRINT GUEST BILL */}
             <div className="grid grid-cols-2 gap-2">
               <button
                 disabled={cart.length === 0 || isSubmitting}
-                onClick={handleFireKOT}
-                className="py-2 px-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
+                onClick={handleSendToKitchen}
+                className="py-2 px-2 rounded-lg bg-zinc-900 hover:bg-black disabled:opacity-40 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
               >
-                <Flame size={13} />
-                <span>Fire KOT (F4)</span>
+                <Send size={13} />
+                <span>Send to Kitchen (F4)</span>
               </button>
 
               <button
                 disabled={allCurrentItems.length === 0 || isSubmitting}
                 onClick={handlePrintGuestBill}
-                className="py-2 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                className="py-2 px-2 rounded-lg border border-zinc-300 bg-white hover:bg-zinc-100 disabled:opacity-40 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
               >
                 <Printer size={13} />
                 <span>Print Bill (F9)</span>
               </button>
             </div>
 
-            {/* ACTION ROW 2: SINGLE CLEAN COLLECT PAYMENT BUTTON OR 1-TOUCH DRAWER */}
-            {!showTenderDrawer ? (
+            {/* ACTION ROW 2: SINGLE CLEAN SETTLE BUTTON OR QUICK DRAWER */}
+            {!isPaymentDrawerOpen ? (
               <button
                 disabled={allCurrentItems.length === 0 || isSubmitting}
-                onClick={() => setShowTenderDrawer(true)}
-                className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-black text-xs flex items-center justify-center gap-2 shadow-xs cursor-pointer transition-all"
+                onClick={() => setIsPaymentDrawerOpen(true)}
+                className="w-full py-2.5 px-3 rounded-lg bg-[#E46254] hover:bg-[#D55345] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-2xs cursor-pointer transition-all"
               >
-                <CreditCard size={15} />
-                <span>Collect Payment / Settle (₹{grandTotal}) · F8</span>
+                <CreditCard size={14} />
+                <span>Settle Table (₹{grandTotal}) · F8</span>
               </button>
             ) : (
-              <div className="bg-white border border-zinc-300 rounded-xl p-2.5 shadow-md space-y-2 animate-in fade-in zoom-in-95 duration-100">
+              <div className="bg-white border border-zinc-300 rounded-lg p-2.5 shadow-md space-y-2 animate-in fade-in zoom-in-95 duration-100">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-black text-zinc-900">
+                  <span className="text-[11px] font-semibold text-zinc-900">
                     Settle ₹{grandTotal} · Select Payment:
                   </span>
                   <button
-                    onClick={() => setShowTenderDrawer(false)}
+                    onClick={() => setIsPaymentDrawerOpen(false)}
                     className="p-1 text-zinc-400 hover:text-zinc-600 cursor-pointer"
                   >
                     <X size={13} />
@@ -1572,42 +1583,42 @@ export default function PosTerminalPage() {
                   <button
                     disabled={isSubmitting}
                     onClick={() => handleQuickSettle("CASH")}
-                    className="py-2 px-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-900 rounded-lg font-black text-xs flex flex-col items-center gap-1 cursor-pointer"
+                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded font-medium text-xs flex flex-col items-center gap-1 cursor-pointer"
                   >
-                    <Banknote size={15} className="text-emerald-700" />
-                    <span>💵 Cash</span>
+                    <Banknote size={15} className="text-zinc-700" />
+                    <span>Cash</span>
                   </button>
 
                   <button
                     disabled={isSubmitting}
                     onClick={() => handleQuickSettle("UPI")}
-                    className="py-2 px-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-300 text-indigo-900 rounded-lg font-black text-xs flex flex-col items-center gap-1 cursor-pointer"
+                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded font-medium text-xs flex flex-col items-center gap-1 cursor-pointer"
                   >
-                    <QrCode size={15} className="text-indigo-700" />
-                    <span>📱 UPI Paid</span>
+                    <QrCode size={15} className="text-zinc-700" />
+                    <span>UPI Received</span>
                   </button>
 
                   <button
                     disabled={isSubmitting}
                     onClick={() => handleQuickSettle("CARD")}
-                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-300 text-zinc-800 rounded-lg font-black text-xs flex flex-col items-center gap-1 cursor-pointer"
+                    className="py-2 px-1 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded font-medium text-xs flex flex-col items-center gap-1 cursor-pointer"
                   >
                     <CreditCard size={15} className="text-zinc-700" />
-                    <span>💳 Card</span>
+                    <span>Card / EDC</span>
                   </button>
                 </div>
 
-                {/* Optional Quick Cash Calculator */}
+                {/* Cash Tendered Input for return change calculation */}
                 <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-100 text-xs">
                   <input
                     type="number"
-                    placeholder="Cash Given..."
+                    placeholder="Cash given..."
                     value={cashTendered}
                     onChange={(e) => setCashTendered(e.target.value)}
-                    className="w-24 px-2 py-0.5 bg-zinc-50 border border-zinc-300 rounded text-xs font-bold outline-none"
+                    className="w-24 px-2 py-0.5 bg-zinc-50 border border-zinc-300 rounded text-xs font-mono outline-none"
                   />
                   {parseFloat(cashTendered) > grandTotal && (
-                    <span className="text-[11px] font-black text-emerald-600 ml-auto">
+                    <span className="text-[11px] font-semibold text-emerald-600 ml-auto font-mono">
                       Change: ₹{changeDue}
                     </span>
                   )}
@@ -1619,8 +1630,8 @@ export default function PosTerminalPage() {
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════════
-          THERMAL PRINT RECEIPT (80mm / 58mm Standard ESC/POS)
-          Includes Dynamic UPI QR on the Guest Bill for Tabletop Scanning!
+          THERMAL RECEIPT (80mm / 58mm Standard ESC/POS)
+          Includes Tabletop Dynamic UPI QR on Guest Bill
          ═════════════════════════════════════════════════════════════════════ */}
       <div id="thermal-chit" className="hidden print:block text-black bg-white font-mono text-[11px] leading-tight p-2">
         {printChit && (
@@ -1726,7 +1737,7 @@ export default function PosTerminalPage() {
                   </div>
                 )}
                 
-                {/* DYNAMIC UPI QR ON PRINTED BILL (Guest scans right from table!) */}
+                {/* Dynamic UPI QR on Printed Bill */}
                 {upiId && (
                   <div className="text-center pt-2 pb-1 border-t my-1">
                     <div className="flex justify-center py-1">
