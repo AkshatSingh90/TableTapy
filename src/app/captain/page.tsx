@@ -623,7 +623,32 @@ export default function CaptainAppPage() {
           .maybeSingle();
         foundRest = byCode;
 
-        // 2. Try matching slug exactly
+        // 2. Try matching by deterministic hash code across all restaurants if bg_pattern didn't have CODE:
+        if (!foundRest && code.length === 5) {
+          const { data: allRests } = await supabase
+            .from('restaurants')
+            .select('id, name, slug, bg_pattern');
+          if (allRests) {
+            const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+            for (const r of allRests) {
+              let hash = 0;
+              for (let i = 0; i < r.id.length; i++) {
+                hash = (hash * 31 + r.id.charCodeAt(i)) >>> 0;
+              }
+              let comp = '';
+              for (let i = 0; i < 5; i++) {
+                comp += chars[hash % chars.length];
+                hash = Math.floor(hash / chars.length) ^ (i * 7);
+              }
+              if (comp === codeUpper) {
+                foundRest = r;
+                break;
+              }
+            }
+          }
+        }
+
+        // 3. Try matching slug exactly
         if (!foundRest) {
           const { data: bySlug } = await supabase
             .from('restaurants')
@@ -633,7 +658,7 @@ export default function CaptainAppPage() {
           foundRest = bySlug;
         }
 
-        // 3. Try matching name exact
+        // 4. Try matching name exact
         if (!foundRest) {
           const { data: byName } = await supabase
             .from('restaurants')
@@ -643,7 +668,7 @@ export default function CaptainAppPage() {
           foundRest = byName;
         }
 
-        // 4. Try matching name substring
+        // 5. Try matching name substring
         if (!foundRest) {
           const { data: bySub } = await supabase
             .from('restaurants')
