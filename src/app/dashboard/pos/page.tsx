@@ -116,40 +116,52 @@ export default function PosTerminalPage() {
       setRestaurantId(restId || null);
 
       if (restId) {
-        const { data: menuData } = await supabase
+        let menuRows: any[] | null = null;
+        const { data: scopedMenu, error: scopeErr } = await supabase
           .from("menu_items_v2")
           .select("*")
+          .eq("restaurant_id", restId)
           .order("category", { ascending: true })
           .order("name", { ascending: true });
 
-        if (menuData && menuData.length > 0) {
+        if (!scopeErr && scopedMenu) {
+          menuRows = scopedMenu;
+        } else {
+          const { data: allMenu } = await supabase
+            .from("menu_items_v2")
+            .select("*")
+            .order("category", { ascending: true })
+            .order("name", { ascending: true });
+          if (allMenu) {
+            menuRows = allMenu.filter((row: any) => {
+              if (row.restaurant_id) return row.restaurant_id === restId;
+              const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restId}`);
+              if (savedCustomMenuIds) {
+                try {
+                  const ids: string[] = JSON.parse(savedCustomMenuIds);
+                  if (ids.includes(row.id)) return true;
+                } catch {}
+              }
+              return row.description && row.description.includes(`[REST:${restId}]`);
+            });
+          }
+        }
+
+        if (menuRows && menuRows.length > 0) {
           setMenuItems(
-            menuData.map((row: any) => ({
+            menuRows.map((row: any) => ({
               id: row.id,
               name: row.name,
               category: row.category || "General",
               subcategory: row.subcategory || "",
               base_price: Number(row.base_price || 0),
-              description: row.description || "",
+              description: (row.description || "").replace(/\[REST:[^\]]+\]\s*/, ""),
               is_veg: row.is_veg !== false,
               is_available: row.is_available !== false,
             }))
           );
         } else {
-          setMenuItems([
-            { id: "1", name: "Butter Chicken", category: "Main Course", base_price: 360, is_veg: false, is_available: true },
-            { id: "2", name: "Paneer Butter Masala", category: "Main Course", base_price: 290, is_veg: true, is_available: true },
-            { id: "3", name: "Dal Makhani", category: "Main Course", base_price: 240, is_veg: true, is_available: true },
-            { id: "4", name: "Garlic Naan", category: "Breads", base_price: 65, is_veg: true, is_available: true },
-            { id: "5", name: "Butter Roti", category: "Breads", base_price: 35, is_veg: true, is_available: true },
-            { id: "6", name: "Jeera Rice", category: "Rice & Biryani", base_price: 180, is_veg: true, is_available: true },
-            { id: "7", name: "Chicken Dum Biryani", category: "Rice & Biryani", base_price: 320, is_veg: false, is_available: true },
-            { id: "8", name: "Paneer Tikka", category: "Starters", base_price: 260, is_veg: true, is_available: true },
-            { id: "9", name: "Chicken 65", category: "Starters", base_price: 290, is_veg: false, is_available: true },
-            { id: "10", name: "Cold Coffee", category: "Beverages", base_price: 120, is_veg: true, is_available: true },
-            { id: "11", name: "Fresh Lime Soda", category: "Beverages", base_price: 80, is_veg: true, is_available: true },
-            { id: "12", name: "Gulab Jamun (2 pcs)", category: "Desserts", base_price: 90, is_veg: true, is_available: true },
-          ]);
+          setMenuItems([]);
         }
 
         const { data: locData } = await supabase

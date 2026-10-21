@@ -907,8 +907,38 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
           console.warn("Realtime channel notice:", channelErr);
         }
 
-        // 5. Fetch Menu Items
-        const { data: menuData } = await supabase.from('menu_items_v2').select('*').eq('is_available', true).order('created_at', { ascending: true });
+        // 5. Fetch Menu Items (supports native column and metadata isolation per restaurant)
+        let menuRows: any[] | null = null;
+        const { data: scopedMenu, error: menuScopeErr } = await supabase
+          .from('menu_items_v2')
+          .select('*')
+          .eq('restaurant_id', rest.id)
+          .eq('is_available', true)
+          .order('created_at', { ascending: true });
+
+        if (!menuScopeErr && scopedMenu) {
+          menuRows = scopedMenu;
+        } else {
+          const { data: allMenu } = await supabase
+            .from('menu_items_v2')
+            .select('*')
+            .eq('is_available', true)
+            .order('created_at', { ascending: true });
+          if (allMenu) {
+            menuRows = allMenu.filter((row: any) => {
+              if (row.restaurant_id) return row.restaurant_id === rest.id;
+              const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${rest.id}`);
+              if (savedCustomMenuIds) {
+                try {
+                  const ids: string[] = JSON.parse(savedCustomMenuIds);
+                  if (ids.includes(row.id)) return true;
+                } catch {}
+              }
+              return row.description && row.description.includes(`[REST:${rest.id}]`);
+            });
+          }
+        }
+        const menuData = menuRows || [];
 
         if (bType === 'HOTEL') {
           const mapped = (menuData || []).map((d: any) => ({

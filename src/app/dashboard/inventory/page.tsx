@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react";
 import { Search, Plus, ChevronDown, ChevronRight, Activity, ChefHat, ArrowLeft, Calendar, Download, ArrowUpRight, ArrowDownRight, RefreshCw, FileText, TrendingUp, TrendingDown, Clock, ArrowRight, ShoppingCart, Loader2, AlertCircle, CheckCircle2, Layers, ShieldCheck, PackagePlus, Trash2, Sliders, X, Check } from 'lucide-react';
 import { Sparkles, Box } from 'lucide-react';
 import IntelligenceDashboard from './IntelligenceDashboard';
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@/utils/supabase/client";
 
 // --- DATA MODEL ---
 interface StockLog {

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Trash2, ChefHat } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@/utils/supabase/client";
 
 interface InventoryItem {
   id: string;

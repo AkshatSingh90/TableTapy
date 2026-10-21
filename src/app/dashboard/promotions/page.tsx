@@ -155,14 +155,40 @@ export default function PromotionsPage() {
           } catch {}
         }
 
-        // Load Menu Items
-        const { data: menuData } = await supabase
+        // Load Menu Items (supports native column & metadata isolation)
+        let menuRows: any[] | null = null;
+        const { data: scopedMenu, error: scopeErr } = await supabase
           .from("menu_items_v2")
-          .select("id, name, category, base_price, is_veg, is_available")
+          .select("id, name, category, base_price, is_veg, is_available, description, restaurant_id")
+          .eq("restaurant_id", restId)
           .order("name", { ascending: true });
 
-        if (menuData) {
-          setMenuItems(menuData as MenuItem[]);
+        if (!scopeErr && scopedMenu) {
+          menuRows = scopedMenu;
+        } else {
+          const { data: allMenu } = await supabase
+            .from("menu_items_v2")
+            .select("id, name, category, base_price, is_veg, is_available, description, restaurant_id")
+            .order("name", { ascending: true });
+          if (allMenu) {
+            menuRows = allMenu.filter((row: any) => {
+              if (row.restaurant_id) return row.restaurant_id === restId;
+              const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restId}`);
+              if (savedCustomMenuIds) {
+                try {
+                  const ids: string[] = JSON.parse(savedCustomMenuIds);
+                  if (ids.includes(row.id)) return true;
+                } catch {}
+              }
+              return row.description && row.description.includes(`[REST:${restId}]`);
+            });
+          }
+        }
+
+        if (menuRows) {
+          setMenuItems(menuRows as MenuItem[]);
+        } else {
+          setMenuItems([]);
         }
       }
     } catch (err) {

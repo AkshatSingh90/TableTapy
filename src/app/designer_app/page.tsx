@@ -71,7 +71,35 @@ export default function StudioDesignerPage() {
         if (restData.menu_layout) setMenuLayout(restData.menu_layout);
 
         // 2. Fetch Menu Items
-        const { data: menuData } = await supabase.from('menu_items_v2').select('*').eq('is_available', true);
+        let menuRows: any[] | null = null;
+        const { data: scopedMenu, error: scopeErr } = await supabase
+          .from('menu_items_v2')
+          .select('*')
+          .eq('restaurant_id', restId)
+          .eq('is_available', true);
+
+        if (!scopeErr && scopedMenu) {
+          menuRows = scopedMenu;
+        } else {
+          const { data: allMenu } = await supabase
+            .from('menu_items_v2')
+            .select('*')
+            .eq('is_available', true);
+          if (allMenu) {
+            menuRows = allMenu.filter((row: any) => {
+              if (row.restaurant_id) return row.restaurant_id === restId;
+              const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restId}`);
+              if (savedCustomMenuIds) {
+                try {
+                  const ids: string[] = JSON.parse(savedCustomMenuIds);
+                  if (ids.includes(row.id)) return true;
+                } catch {}
+              }
+              return row.description && row.description.includes(`[REST:${restId}]`);
+            });
+          }
+        }
+        const menuData = menuRows || [];
         if (menuData && menuData.length > 0) {
           const mappedItems = menuData.map((d: any) => ({
             id: d.id,
