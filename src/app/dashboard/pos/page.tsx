@@ -1769,7 +1769,7 @@ export default function PosPage() {
     <div className="flex flex-col h-screen bg-[#FAF8F7] text-zinc-900 select-none overflow-hidden font-sans">
       
       {/* ── TOP DECK / NAVIGATION BAR ── */}
-      <header className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0 z-40 relative">
+      <header className="h-14 bg-white px-4 sm:px-6 flex items-center justify-between shrink-0 z-40 relative">
         <Link
           href="/dashboard"
           className="flex items-center gap-2 text-zinc-700 hover:text-black font-semibold text-xs tracking-tight transition-colors shrink-0"
@@ -2037,14 +2037,44 @@ export default function PosPage() {
       </div>
       {/* ── TAKEAWAY / QUICK-BILL COMMAND STATION (FULL-SCREEN SMOOTH ANIMATED OVERLAY) ── */}
       <div
-        className={`fixed top-14 inset-x-0 bottom-0 z-30 bg-[#FAF8F7] flex flex-col transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`fixed inset-0 z-50 bg-[#FAF8F7] flex flex-col transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
           terminalMode === "TAKEAWAY"
             ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
             : "opacity-0 translate-y-4 scale-[0.99] pointer-events-none"
         }`}
       >
-        {/* Pinned Live Pickups Calling Strip (Slim, never obscures active cart) */}
-        <div className="h-12 bg-white/95 backdrop-blur-xs border-b border-zinc-200/80 px-4 flex items-center gap-2.5 overflow-x-auto shrink-0 slim-scrollbar">
+        {/* Top Toggle Strip: ONLY the Inventory Toggle, NO logo, NO back button, NO partition lines */}
+        <div className="pt-3 pb-2 w-full flex items-center justify-center shrink-0">
+          <div className="bg-gray-100/90 p-1 rounded-xl flex items-center gap-1 w-full max-w-xs shadow-inner border border-gray-200/50">
+            <button 
+              type="button"
+              onClick={() => setTerminalMode("DINE_IN")}
+              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
+                terminalMode === "DINE_IN" 
+                  ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              <UtensilsCrossed size={14} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : ""} />
+              Dine-In
+            </button>
+            <button 
+              type="button"
+              onClick={() => setTerminalMode("TAKEAWAY")}
+              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
+                terminalMode === "TAKEAWAY" 
+                  ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              <ShoppingBag size={14} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
+              Takeaway
+            </button>
+          </div>
+        </div>
+
+        {/* Pinned Live Pickups Calling Strip (Clean, seamless, NO partition border-b) */}
+        <div className="h-11 px-4 flex items-center gap-2.5 overflow-x-auto shrink-0 slim-scrollbar">
           <div className="flex items-center gap-1.5 pr-2.5 border-r border-zinc-200 shrink-0">
             <Clock size={13} className="text-[#E46254]" />
             <span className="text-[11px] font-extrabold uppercase tracking-wider text-zinc-700">
