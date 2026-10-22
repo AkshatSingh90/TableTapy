@@ -241,7 +241,7 @@ export default function PosPage() {
   const [takeawayDiscountPercent, setTakeawayDiscountPercent] = useState<number>(0);
   const [takeawayDiscountRupees, setTakeawayDiscountRupees] = useState<string>("");
   const [takeawayBatchNote, setTakeawayBatchNote] = useState("");
-  const [showRecentTakeawayModal, setShowRecentTakeawayModal] = useState(false);
+  const [takeawayTab, setTakeawayTab] = useState<"CURRENT_ORDER" | "READY_ORDERS">("CURRENT_ORDER");
   const takeawaySearchInputRef = useRef<HTMLInputElement>(null);
 
   /* ─── 1. Load Floor, Catalog & Realtime Orders ─────────────────────── */
@@ -2063,24 +2063,11 @@ export default function PosPage() {
             </span>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            <span className="font-mono text-xs font-bold text-zinc-600 bg-zinc-100 px-2.5 py-1.5 rounded-xl">
-              Token #{String(currentToken).padStart(2, "0")}
+          <div className="flex items-center gap-2 text-xs text-zinc-400 font-medium">
+            <span className="hidden sm:inline">Punched Today:</span>
+            <span className="font-mono font-bold text-zinc-700 bg-zinc-100 px-2 py-0.5 rounded-md">
+              {todayTakeawayOrders.length}
             </span>
-
-            <button
-              type="button"
-              onClick={() => setShowRecentTakeawayModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 hover:text-black font-semibold text-xs transition-colors cursor-pointer"
-            >
-              <Clock size={14} className="text-zinc-500" />
-              <span>Recent Orders</span>
-              {todayTakeawayOrders.length > 0 && (
-                <span className="font-mono text-[11px] font-bold text-zinc-500">
-                  ({todayTakeawayOrders.length})
-                </span>
-              )}
-            </button>
           </div>
         </header>
 
@@ -2235,457 +2222,458 @@ export default function PosPage() {
           {/* ── RIGHT PANEL (38%): Takeaway Counter Ticket & Billing ── */}
           <div className="w-full lg:w-[38%] flex flex-col bg-white overflow-hidden shadow-sm">
             
-            {/* Ticket Header */}
-            <div className="p-3.5 bg-white border-b border-zinc-200/80 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-[#E46254]/10 text-[#C2410C] flex items-center justify-center font-bold">
-                  <ShoppingBag size={15} />
-                </div>
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-extrabold text-sm text-zinc-900">
-                      Token #{String(currentToken).padStart(2, "0")}
-                    </span>
-                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
-                      Takeaway Ticket
-                    </span>
-                  </div>
-                  <span className="text-[10.5px] text-zinc-400">
-                    {takeawayCart.reduce((sum, item) => sum + item.quantity, 0)} items in ticket
+            {/* Right Panel Header: 2-Tab Segmented Control (Current Order vs Ready Orders) */}
+            <div className="p-2.5 bg-white border-b border-zinc-200/80 flex items-center justify-between gap-2 shrink-0">
+              <div className="bg-zinc-100 p-1 rounded-xl flex items-center gap-1 flex-1">
+                <button
+                  type="button"
+                  onClick={() => setTakeawayTab("CURRENT_ORDER")}
+                  className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    takeawayTab === "CURRENT_ORDER"
+                      ? "bg-white text-zinc-900 shadow-2xs font-bold"
+                      : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  <span>Current Order</span>
+                  <span className="font-mono text-[11px] text-[#E46254] font-bold">
+                    #{String(currentToken).padStart(2, "0")}
                   </span>
-                </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setTakeawayTab("READY_ORDERS")}
+                  className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    takeawayTab === "READY_ORDERS"
+                      ? "bg-white text-zinc-900 shadow-2xs font-bold"
+                      : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  <span>Ready Orders</span>
+                  {activeTakeawayOrders.length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-[#E46254] text-white text-[10px] font-bold font-mono">
+                      {activeTakeawayOrders.length}
+                    </span>
+                  )}
+                </button>
               </div>
 
-              {takeawayCart.length > 0 && (
+              {takeawayTab === "CURRENT_ORDER" && takeawayCart.length > 0 && (
                 <button
                   type="button"
                   onClick={handleClearTakeawayCart}
-                  className="px-2.5 py-1 text-xs text-zinc-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors cursor-pointer flex items-center gap-1"
-                  title="Clear current cart"
+                  className="p-1.5 text-zinc-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors cursor-pointer shrink-0"
+                  title="Clear Current Cart"
                 >
-                  <Trash2 size={12} />
-                  <span>Clear</span>
+                  <Trash2 size={13} />
                 </button>
               )}
             </div>
 
-            {/* Streamlined Customer Information Trigger (Collapsible) */}
-            <div className="px-4 py-2 bg-[#FAF8F7] border-b border-zinc-200/80 shrink-0">
-              {!showGuestDetails && !takeawayCustomerName && !takeawayCustomerPhone ? (
-                <button
-                  type="button"
-                  onClick={() => setShowGuestDetails(true)}
-                  className="text-xs text-zinc-500 hover:text-zinc-900 flex items-center gap-1.5 font-medium py-0.5 transition-colors cursor-pointer"
-                >
-                  <User size={12} className="text-zinc-400" />
-                  <span>+ Add Customer Details (Optional)</span>
-                </button>
-              ) : (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
-                      Guest Details
-                    </span>
+            {takeawayTab === "CURRENT_ORDER" ? (
+              <div className="flex-1 flex flex-col overflow-hidden">
+                {/* Streamlined Customer Information Trigger (Collapsible) */}
+                <div className="px-4 py-2 bg-[#FAF8F7] border-b border-zinc-200/80 shrink-0">
+                  {!showGuestDetails && !takeawayCustomerName && !takeawayCustomerPhone ? (
                     <button
                       type="button"
-                      onClick={() => setShowGuestDetails(false)}
-                      className="text-[10.5px] font-semibold text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                      onClick={() => setShowGuestDetails(true)}
+                      className="text-xs text-zinc-500 hover:text-zinc-900 flex items-center gap-1.5 font-medium py-0.5 transition-colors cursor-pointer"
                     >
-                      Hide
+                      <User size={12} className="text-zinc-400" />
+                      <span>+ Add Customer Details (Optional)</span>
                     </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <User className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
-                      <input
-                        type="text"
-                        placeholder="Customer name"
-                        value={takeawayCustomerName}
-                        onChange={(e) => setTakeawayCustomerName(e.target.value)}
-                        className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
-                      />
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                          Guest Details
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowGuestDetails(false)}
+                          className="text-[10.5px] font-semibold text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                        >
+                          Hide
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <User className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+                          <input
+                            type="text"
+                            placeholder="Customer name"
+                            value={takeawayCustomerName}
+                            onChange={(e) => setTakeawayCustomerName(e.target.value)}
+                            className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                          />
+                        </div>
+                        <div className="relative w-36">
+                          <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+                          <input
+                            type="tel"
+                            placeholder="Phone"
+                            value={takeawayCustomerPhone}
+                            onChange={(e) => setTakeawayCustomerPhone(e.target.value)}
+                            className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                          />
+                        </div>
+                      </div>
                     </div>
-                    <div className="relative w-36">
-                      <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
-                      <input
-                        type="tel"
-                        placeholder="Phone"
-                        value={takeawayCustomerPhone}
-                        onChange={(e) => setTakeawayCustomerPhone(e.target.value)}
-                        className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
-                      />
-                    </div>
-                  </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Ticket Cart Items List */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-2 slim-scrollbar">
-              {takeawayCart.length === 0 ? (
-                <div className="h-full min-h-[160px] flex flex-col items-center justify-center text-center text-zinc-400 p-6">
-                  <div className="w-12 h-12 rounded-2xl bg-[#FAF8F7] border border-zinc-200/80 flex items-center justify-center text-[#E46254] mb-3">
-                    <ShoppingBag size={20} />
-                  </div>
-                  <h4 className="font-bold text-xs text-zinc-700">Ticket is empty</h4>
-                  <p className="text-[11px] text-zinc-400 mt-1 max-w-[200px]">
-                    Tap any dish from the catalog on the left to start billing Token #{String(currentToken).padStart(2, "0")}.
-                  </p>
+                {/* Ticket Cart Items List */}
+                <div className="flex-1 overflow-y-auto p-4 space-y-2 slim-scrollbar">
+                  {takeawayCart.length === 0 ? (
+                    <div className="h-full min-h-[160px] flex flex-col items-center justify-center text-center text-zinc-400 p-6">
+                      <div className="w-12 h-12 rounded-2xl bg-[#FAF8F7] border border-zinc-200/80 flex items-center justify-center text-[#E46254] mb-3">
+                        <ShoppingBag size={20} />
+                      </div>
+                      <h4 className="font-bold text-xs text-zinc-700">Ticket is empty</h4>
+                      <p className="text-[11px] text-zinc-400 mt-1 max-w-[200px]">
+                        Tap any dish from the catalog on the left to start billing Token #{String(currentToken).padStart(2, "0")}.
+                      </p>
+                    </div>
+                  ) : (
+                    takeawayCart.map((item) => (
+                      <div
+                        key={item.id}
+                        className="p-3 bg-[#FAF8F7] rounded-xl border border-zinc-200/80 hover:border-zinc-300 transition-all flex items-start justify-between gap-3 group"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <span className="font-bold text-xs text-zinc-900 block truncate">
+                            {item.name}
+                          </span>
+                          {item.notes && (
+                            <span className="text-[10px] text-zinc-500 italic block mt-0.5 line-clamp-1">
+                              {item.notes}
+                            </span>
+                          )}
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="font-mono text-xs font-bold text-zinc-700">
+                              ₹{item.price * item.quantity}
+                            </span>
+                            <span className="text-[10.5px] text-zinc-400 font-mono">
+                              (₹{item.price} each)
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Quantity Stepper & Remove */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <div className="flex items-center bg-white border border-zinc-200/80 rounded-lg p-0.5 shadow-2xs">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateTakeawayQty(item.id, -1)}
+                              className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded cursor-pointer"
+                            >
+                              <Minus size={11} />
+                            </button>
+                            <span className="w-6 text-center font-mono font-bold text-xs text-zinc-900">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateTakeawayQty(item.id, 1)}
+                              className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded cursor-pointer"
+                            >
+                              <Plus size={11} />
+                            </button>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveTakeawayItem(item.id)}
+                            className="w-6 h-6 flex items-center justify-center text-zinc-400 hover:text-red-500 rounded hover:bg-red-50 transition-colors cursor-pointer"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
-              ) : (
-                takeawayCart.map((item) => (
-                  <div
-                    key={item.id}
-                    className="p-3 bg-[#FAF8F7] rounded-xl border border-zinc-200/80 hover:border-zinc-300 transition-all flex items-start justify-between gap-3 group"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <span className="font-bold text-xs text-zinc-900 block truncate">
-                        {item.name}
+
+                {/* Bill Footer & Quick Checkout */}
+                <div className="p-4 bg-white border-t border-zinc-200/80 space-y-3 shrink-0">
+                  
+                  {/* Packaging Selector (3 Tiers) */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
+                        Packaging Option
                       </span>
-                      {item.notes && (
-                        <span className="text-[10px] text-zinc-500 italic block mt-0.5 line-clamp-1">
-                          {item.notes}
+                      {takeawayPackagingAmount > 0 && (
+                        <span className="text-[11px] font-mono font-bold text-[#C2410C]">
+                          +₹{takeawayPackagingAmount}
                         </span>
                       )}
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className="font-mono text-xs font-bold text-zinc-700">
-                          ₹{item.price * item.quantity}
-                        </span>
-                        <span className="text-[10.5px] text-zinc-400 font-mono">
-                          (₹{item.price} each)
-                        </span>
-                      </div>
                     </div>
-
-                    {/* Quantity Stepper & Remove */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <div className="flex items-center bg-white border border-zinc-200/80 rounded-lg p-0.5 shadow-2xs">
-                        <button
-                          type="button"
-                          onClick={() => handleUpdateTakeawayQty(item.id, -1)}
-                          className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded cursor-pointer"
-                        >
-                          <Minus size={11} />
-                        </button>
-                        <span className="w-6 text-center font-mono font-bold text-xs text-zinc-900">
-                          {item.quantity}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleUpdateTakeawayQty(item.id, 1)}
-                          className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded cursor-pointer"
-                        >
-                          <Plus size={11} />
-                        </button>
-                      </div>
-
+                    <div className="grid grid-cols-3 gap-1.5">
                       <button
                         type="button"
-                        onClick={() => handleRemoveTakeawayItem(item.id)}
-                        className="w-6 h-6 flex items-center justify-center text-zinc-400 hover:text-red-500 rounded hover:bg-red-50 transition-colors cursor-pointer"
+                        onClick={() => setTakeawayPackagingTier("NONE")}
+                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          takeawayPackagingTier === "NONE"
+                            ? "bg-white text-zinc-900 border-zinc-400 shadow-2xs"
+                            : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
+                        }`}
                       >
-                        <X size={13} />
+                        No Bag (₹0)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTakeawayPackagingTier("BAG_5")}
+                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          takeawayPackagingTier === "BAG_5"
+                            ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
+                            : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
+                        }`}
+                      >
+                        Paper Bag (+₹5)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTakeawayPackagingTier("BOX_15")}
+                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          takeawayPackagingTier === "BOX_15"
+                            ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
+                            : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
+                        }`}
+                      >
+                        Box/Carrier (+₹15)
                       </button>
                     </div>
                   </div>
-                ))
-              )}
-            </div>
 
-            {/* Bill Footer & Quick Checkout */}
-            <div className="p-4 bg-white border-t border-zinc-200/80 space-y-3 shrink-0">
-              
-              {/* Packaging Selector (3 Tiers) */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
-                    Packaging Option
-                  </span>
-                  {takeawayPackagingAmount > 0 && (
-                    <span className="text-[11px] font-mono font-bold text-[#C2410C]">
-                      +₹{takeawayPackagingAmount}
-                    </span>
+                  {/* Suppressed Discount Toggle */}
+                  {!takeawayShowDiscount ? (
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setTakeawayShowDiscount(true)}
+                        className="text-[11px] font-bold text-[#E46254] hover:underline flex items-center gap-1 cursor-pointer"
+                      >
+                        <Tag size={11} />
+                        <span>+ Add discount</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
+                          Discount
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTakeawayShowDiscount(false);
+                            setTakeawayDiscountPercent(0);
+                            setTakeawayDiscountRupees("");
+                          }}
+                          className="text-[10px] text-zinc-400 hover:text-zinc-600 font-bold cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {[5, 10, 15].map((pct) => (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => {
+                              setTakeawayDiscountPercent(takeawayDiscountPercent === pct ? 0 : pct);
+                              setTakeawayDiscountRupees("");
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                              takeawayDiscountPercent === pct
+                                ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40"
+                                : "bg-white text-zinc-700 border-zinc-200/80 hover:bg-zinc-50"
+                            }`}
+                          >
+                            {pct}%
+                          </button>
+                        ))}
+                        <div className="relative flex-1">
+                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 text-xs">₹</span>
+                          <input
+                            type="number"
+                            placeholder="Custom"
+                            value={takeawayDiscountRupees}
+                            onChange={(e) => {
+                              setTakeawayDiscountRupees(e.target.value);
+                              setTakeawayDiscountPercent(0);
+                            }}
+                            className="w-full pl-5 pr-2 py-1 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   )}
-                </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setTakeawayPackagingTier("NONE")}
-                    className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                      takeawayPackagingTier === "NONE"
-                        ? "bg-white text-zinc-900 border-zinc-400 shadow-2xs"
-                        : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
-                    }`}
-                  >
-                    No Bag (₹0)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTakeawayPackagingTier("BAG_5")}
-                    className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                      takeawayPackagingTier === "BAG_5"
-                        ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
-                        : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
-                    }`}
-                  >
-                    Paper Bag (+₹5)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTakeawayPackagingTier("BOX_15")}
-                    className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                      takeawayPackagingTier === "BOX_15"
-                        ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
-                        : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
-                    }`}
-                  >
-                    Box/Carrier (+₹15)
-                  </button>
-                </div>
-              </div>
 
-              {/* Suppressed Discount Toggle */}
-              {!takeawayShowDiscount ? (
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => setTakeawayShowDiscount(true)}
-                    className="text-[11px] font-bold text-[#E46254] hover:underline flex items-center gap-1 cursor-pointer"
-                  >
-                    <Tag size={11} />
-                    <span>+ Add discount</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="p-2.5 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
-                      Discount
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTakeawayShowDiscount(false);
-                        setTakeawayDiscountPercent(0);
-                        setTakeawayDiscountRupees("");
-                      }}
-                      className="text-[10px] text-zinc-400 hover:text-zinc-600 font-bold cursor-pointer"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {[5, 10, 15].map((pct) => (
-                      <button
-                        key={pct}
-                        type="button"
-                        onClick={() => {
-                          setTakeawayDiscountPercent(takeawayDiscountPercent === pct ? 0 : pct);
-                          setTakeawayDiscountRupees("");
-                        }}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                          takeawayDiscountPercent === pct
-                            ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40"
-                            : "bg-white text-zinc-700 border-zinc-200/80 hover:bg-zinc-50"
-                        }`}
-                      >
-                        {pct}%
-                      </button>
-                    ))}
-                    <div className="relative flex-1">
-                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 text-xs">₹</span>
-                      <input
-                        type="number"
-                        placeholder="Custom"
-                        value={takeawayDiscountRupees}
-                        onChange={(e) => {
-                          setTakeawayDiscountRupees(e.target.value);
-                          setTakeawayDiscountPercent(0);
-                        }}
-                        className="w-full pl-5 pr-2 py-1 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
-                      />
+                  {/* Bill Calculations */}
+                  <div className="space-y-1 text-xs pt-1 border-t border-zinc-100">
+                    <div className="flex justify-between text-zinc-500 font-medium">
+                      <span>Items Subtotal:</span>
+                      <span className="font-mono text-zinc-800">₹{takeawaySubtotal}</span>
                     </div>
-                  </div>
-                </div>
-              )}
 
-              {/* Bill Calculations */}
-              <div className="space-y-1 text-xs pt-1 border-t border-zinc-100">
-                <div className="flex justify-between text-zinc-500 font-medium">
-                  <span>Items Subtotal:</span>
-                  <span className="font-mono text-zinc-800">₹{takeawaySubtotal}</span>
-                </div>
+                    {takeawayPackagingAmount > 0 && (
+                      <div className="flex justify-between text-zinc-500 font-medium">
+                        <span>Packaging:</span>
+                        <span className="font-mono text-zinc-800">+₹{takeawayPackagingAmount}</span>
+                      </div>
+                    )}
 
-                {takeawayPackagingAmount > 0 && (
-                  <div className="flex justify-between text-zinc-500 font-medium">
-                    <span>Packaging:</span>
-                    <span className="font-mono text-zinc-800">+₹{takeawayPackagingAmount}</span>
-                  </div>
-                )}
+                    {takeawayDiscountAmount > 0 && (
+                      <div className="flex justify-between text-emerald-600 font-medium">
+                        <span>Discount:</span>
+                        <span className="font-mono">-₹{takeawayDiscountAmount.toFixed(0)}</span>
+                      </div>
+                    )}
 
-                {takeawayDiscountAmount > 0 && (
-                  <div className="flex justify-between text-emerald-600 font-medium">
-                    <span>Discount:</span>
-                    <span className="font-mono">-₹{takeawayDiscountAmount.toFixed(0)}</span>
-                  </div>
-                )}
-
-                <div className="flex justify-between items-baseline pt-1.5 border-t border-zinc-200">
-                  <span className="font-bold text-sm text-zinc-900">Total Payable:</span>
-                  <span className="font-mono font-black text-xl text-zinc-900">
-                    ₹{takeawayTotal}
-                  </span>
-                </div>
-              </div>
-
-              {/* Payment Method Selector */}
-              <div className="space-y-1.5">
-                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
-                  Payment Mode
-                </span>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { id: "UPI", label: "📱 UPI / QR" },
-                    { id: "CASH", label: "💵 Cash" },
-                    { id: "CARD", label: "💳 Card" },
-                  ].map((pm) => (
-                    <button
-                      key={pm.id}
-                      type="button"
-                      onClick={() => setTakeawayPaymentMethod(pm.id as any)}
-                      className={`py-2 px-1 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
-                        takeawayPaymentMethod === pm.id
-                          ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
-                          : "bg-[#FAF8F7] text-zinc-600 border-zinc-200/80 hover:bg-zinc-100"
-                      }`}
-                    >
-                      {pm.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Quick Cash Tender Presets & Change Due Calculator */}
-              {takeawayPaymentMethod === "CASH" && (
-                <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl space-y-2.5 animate-in fade-in duration-150">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
-                      Cash Tender
-                    </span>
-                    <span className="text-[10.5px] text-zinc-400 font-mono">
-                      Payable: ₹{takeawayTotal}
-                    </span>
-                  </div>
-
-                  {/* Preset chips */}
-                  <div className="flex flex-wrap gap-1.5">
-                    {cashTenderPresets.map((amount) => (
-                      <button
-                        key={amount}
-                        type="button"
-                        onClick={() => setCashTenderAmount(String(amount))}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border transition-all cursor-pointer ${
-                          cashTenderAmount === String(amount)
-                            ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
-                            : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100"
-                        }`}
-                      >
-                        {amount === takeawayTotal ? `Exact (₹${amount})` : `₹${amount}`}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Manual Tender Input */}
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 text-xs font-mono">₹</span>
-                    <input
-                      type="number"
-                      placeholder="Enter tendered cash..."
-                      value={cashTenderAmount}
-                      onChange={(e) => setCashTenderAmount(e.target.value)}
-                      className="w-full pl-7 pr-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-mono font-semibold outline-none focus:border-[#E46254]"
-                    />
-                  </div>
-
-                  {/* Change Due Indicator */}
-                  {cashChangeDue !== null && (
-                    <div
-                      className={`p-2 rounded-lg text-xs font-bold flex items-center justify-between border ${
-                        cashChangeDue >= 0
-                          ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-                          : "bg-red-50 text-red-700 border-red-200"
-                      }`}
-                    >
-                      <span>{cashChangeDue >= 0 ? "Change to return:" : "Short amount:"}</span>
-                      <span className="font-mono text-sm font-black">
-                        ₹{Math.abs(cashChangeDue)}
+                    <div className="flex justify-between items-baseline pt-1.5 border-t border-zinc-200">
+                      <span className="font-bold text-sm text-zinc-900">Total Payable:</span>
+                      <span className="font-mono font-black text-xl text-zinc-900">
+                        ₹{takeawayTotal}
                       </span>
                     </div>
+                  </div>
+
+                  {/* Payment Method Selector */}
+                  <div className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
+                      Payment Mode
+                    </span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: "UPI", label: "📱 UPI / QR" },
+                        { id: "CASH", label: "💵 Cash" },
+                        { id: "CARD", label: "💳 Card" },
+                      ].map((pm) => (
+                        <button
+                          key={pm.id}
+                          type="button"
+                          onClick={() => setTakeawayPaymentMethod(pm.id as any)}
+                          className={`py-2 px-1 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                            takeawayPaymentMethod === pm.id
+                              ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
+                              : "bg-[#FAF8F7] text-zinc-600 border-zinc-200/80 hover:bg-zinc-100"
+                          }`}
+                        >
+                          {pm.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Quick Cash Tender Presets & Change Due Calculator */}
+                  {takeawayPaymentMethod === "CASH" && (
+                    <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl space-y-2.5 animate-in fade-in duration-150">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
+                          Cash Tender
+                        </span>
+                        <span className="text-[10.5px] text-zinc-400 font-mono">
+                          Payable: ₹{takeawayTotal}
+                        </span>
+                      </div>
+
+                      {/* Preset chips */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {cashTenderPresets.map((amount) => (
+                          <button
+                            key={amount}
+                            type="button"
+                            onClick={() => setCashTenderAmount(String(amount))}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border transition-all cursor-pointer ${
+                              cashTenderAmount === String(amount)
+                                ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                                : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100"
+                            }`}
+                          >
+                            {amount === takeawayTotal ? `Exact (₹${amount})` : `₹${amount}`}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Manual Tender Input */}
+                      <div className="relative">
+                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 text-xs font-mono">₹</span>
+                        <input
+                          type="number"
+                          placeholder="Enter tendered cash..."
+                          value={cashTenderAmount}
+                          onChange={(e) => setCashTenderAmount(e.target.value)}
+                          className="w-full pl-7 pr-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-mono font-semibold outline-none focus:border-[#E46254]"
+                        />
+                      </div>
+
+                      {/* Change Due Indicator */}
+                      {cashChangeDue !== null && (
+                        <div
+                          className={`p-2 rounded-lg text-xs font-bold flex items-center justify-between border ${
+                            cashChangeDue >= 0
+                              ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                              : "bg-red-50 text-red-700 border-red-200"
+                          }`}
+                        >
+                          <span>{cashChangeDue >= 0 ? "Change to return:" : "Short amount:"}</span>
+                          <span className="font-mono text-sm font-black">
+                            ₹{Math.abs(cashChangeDue)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
 
-              {/* Big Action Button */}
-              <button
-                type="button"
-                disabled={takeawayCart.length === 0 || isSubmitting}
-                onClick={handleCollectAndFireTakeaway}
-                className={`w-full py-3 rounded-2xl font-black text-sm tracking-wide shadow-sm flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                  takeawayCart.length === 0 || isSubmitting
-                    ? "bg-zinc-200 text-zinc-400 cursor-not-allowed"
-                    : "bg-[#E46254] hover:bg-[#d55345] text-white active:scale-[0.99]"
-                }`}
-              >
-                {isSubmitting ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Punching Token...</span>
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle2 size={16} />
-                    <span>COLLECT & FIRE TOKEN (₹{takeawayTotal})</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Recent Takeaway Orders Slide-Over Drawer */}
-        {showRecentTakeawayModal && (
-          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex justify-end animate-in fade-in duration-150">
-            <div className="w-full max-w-md bg-white h-full shadow-2xl flex flex-col animate-in slide-in-from-right duration-200">
-              {/* Drawer Header */}
-              <div className="p-4 border-b border-zinc-200 flex items-center justify-between">
-                <div>
-                  <h3 className="font-bold text-sm text-zinc-900">Recent Takeaway Orders</h3>
-                  <span className="text-xs text-zinc-400">Today&apos;s punched tokens</span>
+                  {/* Big Action Button */}
+                  <button
+                    type="button"
+                    disabled={takeawayCart.length === 0 || isSubmitting}
+                    onClick={handleCollectAndFireTakeaway}
+                    className={`w-full py-3 rounded-2xl font-black text-sm tracking-wide shadow-sm flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                      takeawayCart.length === 0 || isSubmitting
+                        ? "bg-zinc-200 text-zinc-400 cursor-not-allowed"
+                        : "bg-[#E46254] hover:bg-[#d55345] text-white active:scale-[0.99]"
+                    }`}
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        <span>Punching Token...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 size={16} />
+                        <span>COLLECT & FIRE TOKEN (₹{takeawayTotal})</span>
+                      </>
+                    )}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowRecentTakeawayModal(false)}
-                  className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer transition-colors"
-                >
-                  <X size={16} />
-                </button>
               </div>
-
-              {/* Drawer Content */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-2.5 slim-scrollbar">
-                {todayTakeawayOrders.length === 0 ? (
-                  <div className="h-60 flex flex-col items-center justify-center text-center text-zinc-400">
-                    <Clock size={24} className="opacity-40 mb-2" />
-                    <p className="text-xs font-medium">No takeaway orders punched today</p>
+            ) : (
+              /* TAB 2: READY ORDERS & ACTIVE QUEUE */
+              <div className="flex-1 overflow-y-auto p-3.5 space-y-2.5 slim-scrollbar bg-[#FAF8F7]">
+                {activeTakeawayOrders.length === 0 ? (
+                  <div className="h-full min-h-[240px] flex flex-col items-center justify-center text-center text-zinc-400 p-6">
+                    <div className="w-12 h-12 rounded-2xl bg-white border border-zinc-200/80 flex items-center justify-center text-zinc-400 mb-3 shadow-2xs">
+                      <Clock size={20} />
+                    </div>
+                    <h4 className="font-bold text-xs text-zinc-700">No active orders in queue</h4>
+                    <p className="text-[11px] text-zinc-400 mt-1 max-w-[220px]">
+                      When orders are fired to kitchen, they appear here. Ready orders can be handed over to guests.
+                    </p>
                   </div>
                 ) : (
-                  todayTakeawayOrders.map((order) => {
+                  activeTakeawayOrders.map((order) => {
                     const elapsed = Math.max(
                       0,
                       Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000)
                     );
-                    const isServed = order.status === "SERVED" || order.status === "COMPLETED";
                     const isReady = (order.status as string) === "READY";
+                    const tokenNum = order.table_no.replace("Takeaway", "Token #");
                     const itemsSummary = Array.isArray(order.items_json)
                       ? order.items_json.map((it: any) => `${it.quantity}x ${it.item?.name || it.name}`).join(", ")
                       : "";
@@ -2693,67 +2681,68 @@ export default function PosPage() {
                     return (
                       <div
                         key={order.id}
-                        className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl space-y-2 hover:bg-zinc-100/60 transition-colors"
+                        className={`p-3.5 rounded-2xl border transition-all space-y-2.5 ${
+                          isReady
+                            ? "bg-emerald-50/80 border-emerald-300 ring-1 ring-emerald-300/40"
+                            : "bg-white border-zinc-200 shadow-2xs"
+                        }`}
                       >
                         <div className="flex items-start justify-between">
                           <div>
                             <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-xs text-zinc-900">
-                                {order.table_no.replace("Takeaway", "Token #")}
+                              <span className="font-mono font-black text-sm text-zinc-900">
+                                {tokenNum}
                               </span>
                               <span
-                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                  isServed
-                                    ? "bg-zinc-200 text-zinc-700"
-                                    : isReady
+                                className={`px-2 py-0.5 rounded text-[10.5px] font-bold ${
+                                  isReady
                                     ? "bg-emerald-100 text-emerald-800"
                                     : "bg-amber-100 text-amber-800"
                                 }`}
                               >
-                                {isServed ? "Completed" : isReady ? "Ready" : "Preparing"}
+                                {isReady ? "Ready for Pickup" : "Kitchen Preparing"}
                               </span>
                             </div>
-                            <div className="text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1.5">
+                            <div className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1.5">
                               <span>{elapsed}m ago</span>
                               {order.customer_name && <span>· {order.customer_name}</span>}
+                              {order.customer_phone && <span className="font-mono text-zinc-400">({order.customer_phone})</span>}
                             </div>
                           </div>
 
                           <div className="text-right">
-                            <span className="font-mono font-bold text-xs text-zinc-900 block">
+                            <span className="font-mono font-bold text-sm text-zinc-900 block">
                               ₹{order.total}
                             </span>
-                            <span className="text-[10px] text-zinc-500">
+                            <span className="text-[10px] font-semibold text-zinc-500">
                               {order.payment_method || "Paid"}
                             </span>
                           </div>
                         </div>
 
                         {itemsSummary && (
-                          <p className="text-[11px] text-zinc-600 line-clamp-1">
+                          <p className="text-[11px] text-zinc-600 line-clamp-2 bg-white/70 p-2 rounded-lg border border-zinc-200/60 font-medium">
                             {itemsSummary}
                           </p>
                         )}
 
                         <div className="flex items-center gap-2 pt-1 border-t border-zinc-200/60">
-                          {isReady && !isServed && (
-                            <button
-                              type="button"
-                              onClick={() => handleMarkTakeawayHandedOver(order.id, order.table_no)}
-                              className="flex-1 py-1 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                            >
-                              <CheckCircle2 size={12} />
-                              <span>Hand Over</span>
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleMarkTakeawayHandedOver(order.id, order.table_no)}
+                            className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <CheckCircle2 size={13} />
+                            <span>Hand Over to Customer</span>
+                          </button>
 
                           <button
                             type="button"
                             onClick={() => handleReprintTakeawayOrder(order)}
-                            className="flex-1 py-1 px-2 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                            className="px-3 py-2 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
+                            title="Reprint Receipt"
                           >
-                            <Printer size={12} />
-                            <span>Reprint Bill</span>
+                            <Printer size={13} />
                           </button>
                         </div>
                       </div>
@@ -2761,9 +2750,9 @@ export default function PosPage() {
                   })
                 )}
               </div>
-            </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════ */}
