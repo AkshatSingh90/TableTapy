@@ -526,24 +526,82 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
         setTableSessionPin(expectedPin);
         console.log(`[Table Security] Table: "${loc.name}" (${normLoc}) -> Active PIN: ${expectedPin} (Seed: ${sessionSeed})`);
 
-        // Check if customer has already entered the PIN on this device during this session
         const cleanTable = (loc.name || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
-        try {
-          const storedUnlock = sessionStorage.getItem(`tabletapy_unlock_${rest.id}_${cleanTable}`);
-          if (storedUnlock) {
-            const parsed = JSON.parse(storedUnlock);
-            if (parsed.pin === expectedPin && parsed.name && parsed.phone) {
-              setCustomerName(parsed.name);
-              setCustomerPhone(parsed.phone);
-              setIsTableUnlocked(true);
+
+        if (validActive.length > 0) {
+          // ─── CASE A: TABLE IS ACTIVELY RUNNING ───
+          // Clear any old settlement receipt view
+          setSettlementSnapshot(null);
+          try {
+            sessionStorage.removeItem(`tabletapy_settlement_${rest.id}_${cleanTable}`);
+          } catch {}
+
+          // Check if customer on this device has already unlocked this running table
+          try {
+            const storedUnlock = sessionStorage.getItem(`tabletapy_unlock_${rest.id}_${cleanTable}`);
+            if (storedUnlock) {
+              const parsed = JSON.parse(storedUnlock);
+              // When table is actively running, keep customer unlocked with zero PIN prompts!
+              if (parsed.name && parsed.phone) {
+                setCustomerName(parsed.name);
+                setCustomerPhone(parsed.phone);
+                setIsTableUnlocked(true);
+              } else {
+                setIsTableUnlocked(true);
+              }
             } else {
+              // Device never entered details on this table: ask for PIN
               setIsTableUnlocked(false);
             }
-          } else {
+          } catch {
             setIsTableUnlocked(false);
           }
-        } catch {
-          setIsTableUnlocked(false);
+        } else {
+          // ─── CASE B: TABLE IS SETTLED / VACANT ───
+          // Check if user was viewing the Thank You celebration page before refreshing
+          let wasViewingSettlement = false;
+          try {
+            const savedSettlementRaw = sessionStorage.getItem(`tabletapy_settlement_${rest.id}_${cleanTable}`);
+            if (savedSettlementRaw) {
+              const saved = JSON.parse(savedSettlementRaw);
+              // CHECK IF THE PIN CHANGED:
+              if (saved.sessionPin && expectedPin !== saved.sessionPin) {
+                // YES: The PIN changed! Session has reset for incoming guests.
+                // Ask them to enter the new PIN!
+                sessionStorage.removeItem(`tabletapy_settlement_${rest.id}_${cleanTable}`);
+                sessionStorage.removeItem(`tabletapy_unlock_${rest.id}_${cleanTable}`);
+                setSettlementSnapshot(null);
+                setIsTableUnlocked(false);
+                wasViewingSettlement = true;
+              } else if (saved.snapshot) {
+                // PIN has not changed: preserve Thank You receipt view
+                setSettlementSnapshot(saved.snapshot);
+                wasViewingSettlement = true;
+              }
+            }
+          } catch {}
+
+          if (!wasViewingSettlement) {
+            // Check stored unlock against expectedPin
+            try {
+              const storedUnlock = sessionStorage.getItem(`tabletapy_unlock_${rest.id}_${cleanTable}`);
+              if (storedUnlock) {
+                const parsed = JSON.parse(storedUnlock);
+                if (parsed.pin === expectedPin && parsed.name && parsed.phone) {
+                  setCustomerName(parsed.name);
+                  setCustomerPhone(parsed.phone);
+                  setIsTableUnlocked(true);
+                } else {
+                  // PIN changed: ask to enter the PIN!
+                  setIsTableUnlocked(false);
+                }
+              } else {
+                setIsTableUnlocked(false);
+              }
+            } catch {
+              setIsTableUnlocked(false);
+            }
+          }
         }
 
         // 4. Setup SHARED Realtime Channel for this Table (Collaborative Cart + Orders + Presence)
@@ -746,6 +804,17 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
                 }
 
                 setSettlementSnapshot(snapshot);
+                try {
+                  const cleanTable = (loc.name || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+                  sessionStorage.setItem(
+                    `tabletapy_settlement_${rest.id}_${cleanTable}`,
+                    JSON.stringify({
+                      snapshot,
+                      sessionPin: tableSessionPin || expectedPin,
+                      settledAt: Date.now()
+                    })
+                  );
+                } catch {}
               }
               setActivePaymentLock(null);
               activePaymentLockRef.current = null;
@@ -807,6 +876,17 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
                 }
 
                 setSettlementSnapshot(snapshot);
+                try {
+                  const cleanTable = (loc.name || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+                  sessionStorage.setItem(
+                    `tabletapy_settlement_${rest.id}_${cleanTable}`,
+                    JSON.stringify({
+                      snapshot,
+                      sessionPin: tableSessionPin || expectedPin,
+                      settledAt: Date.now()
+                    })
+                  );
+                } catch {}
               }
               setActivePaymentLock(null);
               activePaymentLockRef.current = null;
@@ -1383,12 +1463,16 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
       }
 
       const noteWithSession = attachSessionToNote(checkoutData.note, currentSessionId);
+      const finalNoteWithPin = tableSessionPin 
+        ? `${noteWithSession} [PIN:${tableSessionPin}]`.trim() 
+        : noteWithSession;
+
       const roundTotal = Number((cartTotal * 1.05).toFixed(2));
       const payload = {
         restaurant_id: theme.id,
         total: roundTotal,
         status: 'PREPARING', // Instant Kitchen Auto-Fire verified by 4-digit physical Table PIN
-        note: noteWithSession,
+        note: finalNoteWithPin,
         items_json: cart,
         table_no: locationName,
         customer_name: checkoutData.name || customerName || '',
@@ -1544,6 +1628,7 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
           try {
             const cleanTable = (locationName || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
             sessionStorage.setItem(`tabletapy_unlock_${restData?.id || theme.id}_${cleanTable}`, JSON.stringify(details));
+            sessionStorage.removeItem(`tabletapy_settlement_${restData?.id || theme.id}_${cleanTable}`);
           } catch {}
 
           if ((restData?.id || theme.id) && details.phone) {

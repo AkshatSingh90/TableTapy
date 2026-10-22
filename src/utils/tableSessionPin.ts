@@ -62,19 +62,11 @@ export function resolveTablePinAndSeed(
         };
       }
     }
-
-    // Anchor seed to the very first order of this active dining session
-    const firstActive = activeTableOrders[0];
-    const sessionMatch = (firstActive.note || '').match(/\[SESSION:([a-zA-Z0-9_-]+)\]/i);
-    const sessionTag = sessionMatch?.[1] || firstActive.id || 'active_first';
-    const activeSeed = `active_${sessionTag}`;
-    return {
-      pin: generateTablePin(normTable, activeSeed),
-      seed: activeSeed
-    };
   }
 
   // 2. If table is vacant or just settled, derive seed from the last completed/settled (PAID) order
+  // While a dining session is running, lastSettled remains constant across all rounds.
+  // When this dining session is settled/paid, lastSettled becomes the newly settled order, instantly cycling the PIN.
   const settledOrders = (historicalTableOrders || []).filter((o: any) => o.payment_status === 'PAID');
   if (settledOrders.length > 0) {
     const lastSettled = settledOrders[0];

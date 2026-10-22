@@ -355,11 +355,20 @@ export function ThankYouCelebrationView({
             <button
               type="button"
               onClick={handlePrintOrSave}
-              className="w-full py-3 px-4 rounded-2xl bg-zinc-900 hover:bg-black active:bg-zinc-800 text-white font-bold text-[13px] flex items-center justify-center gap-2 transition-all cursor-pointer shadow-sm active:scale-[0.99]"
+              className="flex-1 py-3 px-4 rounded-2xl bg-zinc-900 hover:bg-black active:bg-zinc-800 text-white font-bold text-[13px] flex items-center justify-center gap-2 transition-all cursor-pointer shadow-sm active:scale-[0.99]"
             >
               <Download size={15} />
-              <span>Download / Print Invoice</span>
+              <span>Save Invoice</span>
             </button>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="py-3 px-4 rounded-2xl bg-zinc-100 hover:bg-zinc-200 active:bg-zinc-300 text-zinc-700 font-bold text-[13px] transition-all cursor-pointer"
+              >
+                Done
+              </button>
+            )}
           </div>
         </div>
 
