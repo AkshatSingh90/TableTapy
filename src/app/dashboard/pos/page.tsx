@@ -2043,8 +2043,8 @@ export default function PosPage() {
             : "opacity-0 translate-y-4 scale-[0.99] pointer-events-none"
         }`}
       >
-        {/* Top Toggle Strip: ONLY the Inventory Toggle, NO logo, NO back button, NO partition lines */}
-        <div className="pt-3 pb-2 w-full flex items-center justify-center shrink-0">
+        {/* Top Toggle Strip: Clean White Background, ONLY the Inventory Toggle */}
+        <div className="py-2.5 w-full flex items-center justify-center shrink-0 bg-white">
           <div className="bg-gray-100/90 p-1 rounded-xl flex items-center gap-1 w-full max-w-xs shadow-inner border border-gray-200/50">
             <button 
               type="button"
