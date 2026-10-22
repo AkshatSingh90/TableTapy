@@ -232,9 +232,10 @@ export default function PosPage() {
   const [takeawayCart, setTakeawayCart] = useState<NewStaffItem[]>([]);
   const [takeawayCustomerName, setTakeawayCustomerName] = useState("");
   const [takeawayCustomerPhone, setTakeawayCustomerPhone] = useState("");
-  const [takeawayPackagingFee, setTakeawayPackagingFee] = useState(false);
+  const [showGuestDetails, setShowGuestDetails] = useState(false);
+  const [takeawayPackagingTier, setTakeawayPackagingTier] = useState<"NONE" | "BAG_5" | "BOX_15">("NONE");
   const [takeawayPaymentMethod, setTakeawayPaymentMethod] = useState<"CASH" | "UPI" | "CARD">("UPI");
-  const [takeawayActiveTab, setTakeawayActiveTab] = useState<"NEW_TOKEN" | "LIVE_PICKUPS">("NEW_TOKEN");
+  const [cashTenderAmount, setCashTenderAmount] = useState<string>("");
   const [tokenOverride, setTokenOverride] = useState<number | null>(null);
   const [takeawayShowDiscount, setTakeawayShowDiscount] = useState(false);
   const [takeawayDiscountPercent, setTakeawayDiscountPercent] = useState<number>(0);
@@ -1552,11 +1553,39 @@ export default function PosPage() {
     return 0;
   }, [takeawaySubtotal, takeawayDiscountPercent, takeawayDiscountRupees]);
 
-  const takeawayPackagingAmount = takeawayPackagingFee ? 15 : 0;
+  const takeawayPackagingAmount = useMemo(() => {
+    if (takeawayPackagingTier === "BAG_5") return 5;
+    if (takeawayPackagingTier === "BOX_15") return 15;
+    return 0;
+  }, [takeawayPackagingTier]);
 
   const takeawayTotal = useMemo(() => {
     return Math.max(0, Math.round(takeawaySubtotal + takeawayPackagingAmount - takeawayDiscountAmount));
   }, [takeawaySubtotal, takeawayPackagingAmount, takeawayDiscountAmount]);
+
+  const cashTenderPresets = useMemo(() => {
+    if (takeawayTotal <= 0) return [];
+    const presets = new Set<number>();
+    presets.add(takeawayTotal);
+
+    const next50 = Math.ceil(takeawayTotal / 50) * 50;
+    if (next50 > takeawayTotal) presets.add(next50);
+
+    const next100 = Math.ceil(takeawayTotal / 100) * 100;
+    if (next100 > takeawayTotal) presets.add(next100);
+
+    if (takeawayTotal < 500) presets.add(500);
+    if (takeawayTotal >= 300 && takeawayTotal < 1000) presets.add(1000);
+
+    return Array.from(presets).sort((a, b) => a - b);
+  }, [takeawayTotal]);
+
+  const cashChangeDue = useMemo(() => {
+    if (takeawayPaymentMethod !== "CASH") return null;
+    const tendered = parseFloat(cashTenderAmount);
+    if (isNaN(tendered) || tendered <= 0) return null;
+    return Math.round(tendered - takeawayTotal);
+  }, [takeawayPaymentMethod, cashTenderAmount, takeawayTotal]);
 
   const handleUpdateTakeawayQty = (id: string, delta: number) => {
     setTakeawayCart((prev) => {
@@ -1582,6 +1611,9 @@ export default function PosPage() {
     setTakeawayDiscountPercent(0);
     setTakeawayDiscountRupees("");
     setTakeawayShowDiscount(false);
+    setTakeawayPackagingTier("NONE");
+    setCashTenderAmount("");
+    setShowGuestDetails(false);
   };
 
   const handleCollectAndFireTakeaway = async () => {
@@ -1610,8 +1642,10 @@ export default function PosPage() {
       }));
 
       const noteParts: string[] = [`[${tokenFormatted}]`];
-      if (takeawayPackagingFee) noteParts.push("[Packaging: ₹15]");
+      if (takeawayPackagingTier === "BAG_5") noteParts.push("[Paper Bag: ₹5]");
+      if (takeawayPackagingTier === "BOX_15") noteParts.push("[Carrier/Box: ₹15]");
       if (takeawayDiscountAmount > 0) noteParts.push(`[Discount: ₹${takeawayDiscountAmount.toFixed(0)}]`);
+      if (cashChangeDue !== null && cashChangeDue >= 0) noteParts.push(`[Tender: ₹${cashTenderAmount}, Change: ₹${cashChangeDue}]`);
       if (takeawayBatchNote.trim()) noteParts.push(takeawayBatchNote.trim());
 
       const { error } = await supabase.from("orders").insert({
@@ -1656,7 +1690,9 @@ export default function PosPage() {
       setTakeawayCustomerName("");
       setTakeawayCustomerPhone("");
       setTakeawayBatchNote("");
-      setTakeawayPackagingFee(false);
+      setTakeawayPackagingTier("NONE");
+      setCashTenderAmount("");
+      setShowGuestDetails(false);
       setTakeawayDiscountPercent(0);
       setTakeawayDiscountRupees("");
       setTakeawayShowDiscount(false);
@@ -1836,10 +1872,7 @@ export default function PosPage() {
         )}
       </header>
 
-      {/* ── CONDITIONAL TERMINAL VIEW: DINE-IN FLOOR VS TAKEAWAY STATION ── */}
-      {terminalMode === "DINE_IN" ? (
-        <>
-          {/* ── FLOOR FILTER TOOLBAR ── */}
+      {/* ── FLOOR FILTER TOOLBAR ── */}
       <div className="px-6 py-3 bg-white border-b border-zinc-200/80 flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2 flex-1 max-w-md">
           <div className="relative w-full">
@@ -2059,231 +2092,371 @@ export default function PosPage() {
           </div>
         )}
       </div>
-    </>
-  ) : (
-    /* ── TAKEAWAY / QUICK-BILL COMMAND STATION (63% CATALOG + 37% COUNTER TICKET) ── */
-    <div className="flex-1 flex flex-col lg:flex-row overflow-hidden bg-white">
-      
-      {/* ── LEFT PANEL (63%): High-Speed Menu Catalog ── */}
-      <div className="w-full lg:w-[63%] flex flex-col border-r border-zinc-200/80 bg-[#FAF8F7] overflow-hidden">
-        
-        {/* Top Search Bar & Category Tabs */}
-        <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
-            <input
-              ref={takeawaySearchInputRef}
-              type="text"
-              placeholder="Search dishes or categories (Press '/' to search)..."
-              value={dishSearchQuery}
-              onChange={(e) => setDishSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all placeholder:text-zinc-400"
-            />
-            {dishSearchQuery && (
-              <button
-                type="button"
-                onClick={() => setDishSearchQuery("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 cursor-pointer"
-              >
-                <X size={12} />
-              </button>
-            )}
+      {/* ── TAKEAWAY / QUICK-BILL COMMAND STATION (FULL-SCREEN SMOOTH ANIMATED OVERLAY) ── */}
+      <div
+        className={`fixed inset-0 z-40 bg-[#FAF8F7] flex flex-col transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+          terminalMode === "TAKEAWAY"
+            ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
+            : "opacity-0 translate-y-4 scale-[0.99] pointer-events-none"
+        }`}
+      >
+        {/* 1. Takeaway Top Deck / Header */}
+        <header className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0 shadow-2xs z-10">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setTerminalMode("DINE_IN")}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#FAF8F7] hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 border border-zinc-200/80 font-bold text-xs shadow-2xs transition-all cursor-pointer"
+            >
+              <ChevronLeft size={16} />
+              <span>← Dine-In Floor</span>
+            </button>
+
+            <div className="h-4 w-px bg-zinc-200 hidden sm:block" />
+
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#E46254]" />
+              <span className="font-extrabold text-sm text-zinc-900 tracking-tight">
+                Takeaway Command Station
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-[#E46254]/10 text-[#C2410C] font-mono font-bold text-[11px] border border-[#E46254]/20">
+                Token #{String(currentToken).padStart(2, "0")}
+              </span>
+            </div>
           </div>
 
-          {/* Horizontal Category Pill Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 slim-scrollbar">
-            {drawerCategories.map((cat) => (
-              <button
-                key={cat}
-                type="button"
-                onClick={() => setSelectedDrawerCat(cat)}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                  selectedDrawerCat === cat
-                    ? "bg-[#E46254]/10 text-[#C2410C] border border-[#E46254]/30 shadow-2xs"
-                    : "bg-[#FAF8F7] hover:bg-[#E46254]/5 text-zinc-600 border border-zinc-200/60"
-                }`}
-              >
-                {cat === "ALL" ? "All Categories" : cat}
-              </button>
-            ))}
-          </div>
-        </div>
+          {/* Quick Metrics Bar */}
+          <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
+            <div className="hidden md:flex items-center gap-3 pr-2 border-r border-zinc-200">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                <span className="text-zinc-500">Waiting Pickup:</span>
+                <span className="font-bold text-zinc-800 font-mono">{activeTakeawayOrders.length}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span className="text-zinc-500">Tokens Today:</span>
+                <span className="font-bold text-zinc-800 font-mono">{todayTakeawayOrders.length}</span>
+              </div>
+            </div>
 
-        {/* High-Speed Food Catalog Grid */}
-        <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
-          {filteredCatalog.length === 0 ? (
-            <div className="h-48 flex flex-col items-center justify-center text-zinc-400 text-center">
-              <UtensilsCrossed size={20} className="mb-2 opacity-50 text-zinc-400" />
-              <p className="text-xs font-medium">No dishes found matching search</p>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
+                Takeaway Sales
+              </span>
+              <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
+                ₹{todayTakeawayRevenue.toLocaleString("en-IN")}
+              </span>
+            </div>
+          </div>
+        </header>
+
+        {/* 2. Pinned Live Pickups Calling Strip (Slim, never obscures active cart) */}
+        <div className="h-12 bg-white/95 backdrop-blur-xs border-b border-zinc-200/80 px-4 flex items-center gap-2.5 overflow-x-auto shrink-0 slim-scrollbar">
+          <div className="flex items-center gap-1.5 pr-2.5 border-r border-zinc-200 shrink-0">
+            <Clock size={13} className="text-[#E46254]" />
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-zinc-700">
+              Pickups ({activeTakeawayOrders.length})
+            </span>
+          </div>
+
+          {activeTakeawayOrders.length === 0 ? (
+            <div className="text-[11px] text-zinc-400 font-medium flex items-center gap-1.5">
+              <span>All takeaway orders collected. Ready tokens will appear here for 1-tap handover.</span>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-              {filteredCatalog.map((dish) => {
-                const hasPortions = Boolean(
-                  dish.variantsConfig?.hasPortions &&
-                  dish.variantsConfig.portions &&
-                  dish.variantsConfig.portions.length > 0
-                );
-                const portions = hasPortions ? dish.variantsConfig!.portions : [];
-                const hasAddons = Boolean(dish.variantsConfig?.hasAddons);
+            activeTakeawayOrders.map((order) => {
+              const elapsed = Math.max(
+                0,
+                Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000)
+              );
+              const isReady = (order.status as string) === "READY" || order.status === "SERVED";
+              const tokenNum = order.table_no.replace("Takeaway", "Token #");
 
-                return (
-                  <div
-                    key={dish.id}
-                    className="bg-white rounded-2xl p-3.5 border border-zinc-200/80 hover:border-zinc-300 shadow-2xs hover:shadow-md transition-all flex flex-col justify-between group"
+              return (
+                <div
+                  key={order.id}
+                  className={`flex items-center gap-2 px-2.5 py-1 rounded-xl border text-xs shrink-0 transition-all ${
+                    isReady
+                      ? "bg-emerald-50 border-emerald-300 ring-1 ring-emerald-300/40"
+                      : "bg-[#FAF8F7] border-zinc-200 text-zinc-700"
+                  }`}
+                >
+                  <span className="font-mono font-black text-xs text-zinc-900">
+                    {tokenNum}
+                  </span>
+                  {order.customer_name && (
+                    <span className="text-[11px] font-semibold text-zinc-600 max-w-[90px] truncate">
+                      {order.customer_name}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-zinc-400 font-mono">
+                    {elapsed}m
+                  </span>
+
+                  {isReady ? (
+                    <button
+                      type="button"
+                      onClick={() => handleMarkTakeawayHandedOver(order.id, order.table_no)}
+                      className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10.5px] flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
+                      title="Mark as handed over to guest"
+                    >
+                      <CheckCircle2 size={11} />
+                      <span>Hand Over</span>
+                    </button>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold">
+                      Prep
+                    </span>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => handleReprintTakeawayOrder(order)}
+                    className="p-1 rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200/60 transition-colors cursor-pointer"
+                    title="Reprint Receipt"
                   >
-                    <div>
-                      <div className="flex items-start justify-between gap-1 mb-1.5">
-                        <span className="font-bold text-xs text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2">
-                          {dish.name}
-                        </span>
-                      </div>
-
-                      <span className="text-[10.5px] text-zinc-400 font-medium block">
-                        {dish.category}
-                      </span>
-                    </div>
-
-                    <div className="mt-3 pt-2.5 border-t border-zinc-100">
-                      {/* Inline Portions Buttons */}
-                      {hasPortions ? (
-                        <div className="space-y-1.5">
-                          <div className="grid grid-cols-2 gap-1">
-                            {portions.map((portion, pIdx) => (
-                              <button
-                                key={portion.name || pIdx}
-                                type="button"
-                                onClick={() => handleQuickAddPortion(dish, portion)}
-                                className="py-1 px-1.5 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10.5px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer"
-                              >
-                                <span className="truncate">{portion.name}</span>
-                                <span className="font-mono text-[10px] ml-1">₹{portion.price}</span>
-                              </button>
-                            ))}
-                          </div>
-
-                          {hasAddons && (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenCustomizer(dish)}
-                              className="w-full text-[10px] font-bold text-[#E46254] hover:underline text-center py-0.5 cursor-pointer block"
-                            >
-                              + Addons / Instructions
-                            </button>
-                          )}
-                        </div>
-                      ) : (
-                        /* Standard Dish with Single Price */
-                        <div className="flex items-center justify-between">
-                          <span className="font-mono font-bold text-xs text-zinc-900">
-                            ₹{dish.base_price}
-                          </span>
-
-                          <div className="flex items-center gap-1">
-                            {hasAddons && (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenCustomizer(dish)}
-                                className="p-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-600 text-[10.5px] font-bold cursor-pointer"
-                                title="Customise addons"
-                              >
-                                Custom
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => handleQuickAddBase(dish)}
-                              className="w-7 h-7 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 border border-zinc-200/80 flex items-center justify-center transition-colors cursor-pointer"
-                              title="Add to Ticket"
-                            >
-                              <Plus size={13} strokeWidth={2.5} />
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                    <Printer size={11} />
+                  </button>
+                </div>
+              );
+            })
           )}
         </div>
-      </div>
 
-      {/* ── RIGHT PANEL (37%): Takeaway Counter Ticket & Pickups ── */}
-      <div className="w-full lg:w-[37%] flex flex-col bg-white overflow-hidden shadow-sm">
-        
-        {/* Ticket Navigation Deck */}
-        <div className="p-3.5 bg-white border-b border-zinc-200/80 flex items-center justify-between shrink-0">
-          <div className="flex items-center bg-[#FAF8F7] p-1 rounded-xl border border-zinc-200/80 w-full">
-            <button
-              type="button"
-              onClick={() => setTakeawayActiveTab("NEW_TOKEN")}
-              className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                takeawayActiveTab === "NEW_TOKEN"
-                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
-                  : "text-zinc-500 hover:text-zinc-800"
-              }`}
-            >
-              <ShoppingBag size={13} className={takeawayActiveTab === "NEW_TOKEN" ? "text-[#E46254]" : "text-zinc-400"} />
-              <span>Token #{String(currentToken).padStart(2, "0")}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setTakeawayActiveTab("LIVE_PICKUPS")}
-              className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                takeawayActiveTab === "LIVE_PICKUPS"
-                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
-                  : "text-zinc-500 hover:text-zinc-800"
-              }`}
-            >
-              <Clock size={13} className={takeawayActiveTab === "LIVE_PICKUPS" ? "text-[#E46254]" : "text-zinc-400"} />
-              <span>Active Pickups</span>
-              {activeTakeawayOrders.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-[#E46254] text-white text-[10px] font-bold">
-                  {activeTakeawayOrders.length}
-                </span>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* TAB 1: NEW TOKEN COUNTER BILLING */}
-        {takeawayActiveTab === "NEW_TOKEN" ? (
-          <div className="flex-1 flex flex-col overflow-hidden">
-            {/* Customer Information Strip (Optional, fast, non-blocking) */}
-            <div className="px-4 py-2.5 bg-[#FAF8F7] border-b border-zinc-200/80 flex items-center gap-2 shrink-0">
-              <div className="relative flex-1">
-                <User className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+        {/* 3. Main Workspace: Catalog (62%) + Active Counter Ticket (38%) */}
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden bg-white">
+          
+          {/* ── LEFT PANEL (62%): High-Speed Menu Catalog ── */}
+          <div className="w-full lg:w-[62%] flex flex-col border-r border-zinc-200/80 bg-[#FAF8F7] overflow-hidden">
+            
+            {/* Top Search Bar & Category Tabs */}
+            <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
                 <input
+                  ref={takeawaySearchInputRef}
                   type="text"
-                  placeholder="Customer name (optional)"
-                  value={takeawayCustomerName}
-                  onChange={(e) => setTakeawayCustomerName(e.target.value)}
-                  className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                  placeholder="Search dishes or categories (Press '/' to search)..."
+                  value={dishSearchQuery}
+                  onChange={(e) => setDishSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all placeholder:text-zinc-400"
                 />
+                {dishSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setDishSearchQuery("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
               </div>
-              <div className="relative w-36">
-                <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
-                <input
-                  type="tel"
-                  placeholder="Phone (optional)"
-                  value={takeawayCustomerPhone}
-                  onChange={(e) => setTakeawayCustomerPhone(e.target.value)}
-                  className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
-                />
+
+              {/* Horizontal Category Pill Tabs */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 slim-scrollbar">
+                {drawerCategories.map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setSelectedDrawerCat(cat)}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      selectedDrawerCat === cat
+                        ? "bg-[#E46254]/10 text-[#C2410C] border border-[#E46254]/30 shadow-2xs"
+                        : "bg-[#FAF8F7] hover:bg-[#E46254]/5 text-zinc-600 border border-zinc-200/60"
+                    }`}
+                  >
+                    {cat === "ALL" ? "All Categories" : cat}
+                  </button>
+                ))}
               </div>
+            </div>
+
+            {/* High-Speed Food Catalog Grid */}
+            <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
+              {filteredCatalog.length === 0 ? (
+                <div className="h-48 flex flex-col items-center justify-center text-zinc-400 text-center">
+                  <UtensilsCrossed size={20} className="mb-2 opacity-50 text-zinc-400" />
+                  <p className="text-xs font-medium">No dishes found matching search</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
+                  {filteredCatalog.map((dish) => {
+                    const hasPortions = Boolean(
+                      dish.variantsConfig?.hasPortions &&
+                      dish.variantsConfig.portions &&
+                      dish.variantsConfig.portions.length > 0
+                    );
+                    const portions = hasPortions ? dish.variantsConfig!.portions : [];
+                    const hasAddons = Boolean(dish.variantsConfig?.hasAddons);
+
+                    return (
+                      <div
+                        key={dish.id}
+                        className="bg-white rounded-2xl p-3.5 border border-zinc-200/80 hover:border-zinc-300 shadow-2xs hover:shadow-md transition-all flex flex-col justify-between group"
+                      >
+                        <div>
+                          <div className="flex items-start justify-between gap-1 mb-1.5">
+                            <span className="font-bold text-xs text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2">
+                              {dish.name}
+                            </span>
+                          </div>
+
+                          <span className="text-[10.5px] text-zinc-400 font-medium block">
+                            {dish.category}
+                          </span>
+                        </div>
+
+                        <div className="mt-3 pt-2.5 border-t border-zinc-100">
+                          {hasPortions ? (
+                            <div className="space-y-1.5">
+                              <div className="grid grid-cols-2 gap-1">
+                                {portions.map((portion, pIdx) => (
+                                  <button
+                                    key={portion.name || pIdx}
+                                    type="button"
+                                    onClick={() => handleQuickAddPortion(dish, portion)}
+                                    className="py-1 px-1.5 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10.5px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer"
+                                  >
+                                    <span className="truncate">{portion.name}</span>
+                                    <span className="font-mono text-[10px] ml-1">₹{portion.price}</span>
+                                  </button>
+                                ))}
+                              </div>
+
+                              {hasAddons && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenCustomizer(dish)}
+                                  className="w-full text-[10px] font-bold text-[#E46254] hover:underline text-center py-0.5 cursor-pointer block"
+                                >
+                                  + Addons / Instructions
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-between">
+                              <span className="font-mono font-bold text-xs text-zinc-900">
+                                ₹{dish.base_price}
+                              </span>
+
+                              <div className="flex items-center gap-1">
+                                {hasAddons && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenCustomizer(dish)}
+                                    className="p-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-600 text-[10.5px] font-bold cursor-pointer"
+                                    title="Customise addons"
+                                  >
+                                    Custom
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleQuickAddBase(dish)}
+                                  className="w-7 h-7 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 border border-zinc-200/80 flex items-center justify-center transition-colors cursor-pointer"
+                                  title="Add to Ticket"
+                                >
+                                  <Plus size={13} strokeWidth={2.5} />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ── RIGHT PANEL (38%): Takeaway Counter Ticket & Billing ── */}
+          <div className="w-full lg:w-[38%] flex flex-col bg-white overflow-hidden shadow-sm">
+            
+            {/* Ticket Header */}
+            <div className="p-3.5 bg-white border-b border-zinc-200/80 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-[#E46254]/10 text-[#C2410C] flex items-center justify-center font-bold">
+                  <ShoppingBag size={15} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-extrabold text-sm text-zinc-900">
+                      Token #{String(currentToken).padStart(2, "0")}
+                    </span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
+                      Takeaway Ticket
+                    </span>
+                  </div>
+                  <span className="text-[10.5px] text-zinc-400">
+                    {takeawayCart.reduce((sum, item) => sum + item.quantity, 0)} items in ticket
+                  </span>
+                </div>
+              </div>
+
               {takeawayCart.length > 0 && (
                 <button
                   type="button"
                   onClick={handleClearTakeawayCart}
-                  className="p-1.5 text-zinc-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors cursor-pointer"
+                  className="px-2.5 py-1 text-xs text-zinc-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors cursor-pointer flex items-center gap-1"
                   title="Clear current cart"
                 >
-                  <Trash2 size={13} />
+                  <Trash2 size={12} />
+                  <span>Clear</span>
                 </button>
+              )}
+            </div>
+
+            {/* Streamlined Customer Information Trigger (Collapsible) */}
+            <div className="px-4 py-2 bg-[#FAF8F7] border-b border-zinc-200/80 shrink-0">
+              {!showGuestDetails && !takeawayCustomerName && !takeawayCustomerPhone ? (
+                <button
+                  type="button"
+                  onClick={() => setShowGuestDetails(true)}
+                  className="text-xs text-zinc-500 hover:text-zinc-900 flex items-center gap-1.5 font-medium py-0.5 transition-colors cursor-pointer"
+                >
+                  <User size={12} className="text-zinc-400" />
+                  <span>+ Add Customer Details (Optional)</span>
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                      Guest Details
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowGuestDetails(false)}
+                      className="text-[10.5px] font-semibold text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                    >
+                      Hide
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <User className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+                      <input
+                        type="text"
+                        placeholder="Customer name"
+                        value={takeawayCustomerName}
+                        onChange={(e) => setTakeawayCustomerName(e.target.value)}
+                        className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                      />
+                    </div>
+                    <div className="relative w-36">
+                      <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+                      <input
+                        type="tel"
+                        placeholder="Phone"
+                        value={takeawayCustomerPhone}
+                        onChange={(e) => setTakeawayCustomerPhone(e.target.value)}
+                        className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                      />
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
 
@@ -2361,28 +2534,54 @@ export default function PosPage() {
 
             {/* Bill Footer & Quick Checkout */}
             <div className="p-4 bg-white border-t border-zinc-200/80 space-y-3 shrink-0">
-              {/* Packaging Fee Toggle */}
-              <div
-                onClick={() => setTakeawayPackagingFee(!takeawayPackagingFee)}
-                className={`flex items-center justify-between p-2 rounded-xl border text-xs font-medium cursor-pointer transition-all ${
-                  takeawayPackagingFee
-                    ? "bg-[#E46254]/5 border-[#E46254]/30 text-[#C2410C]"
-                    : "bg-[#FAF8F7] border-zinc-200/80 text-zinc-600 hover:bg-zinc-100"
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <div
-                    className={`w-4 h-4 rounded-md border flex items-center justify-center transition-colors ${
-                      takeawayPackagingFee
-                        ? "bg-[#E46254] border-[#E46254] text-white"
-                        : "bg-white border-zinc-300"
+              
+              {/* Packaging Selector (3 Tiers) */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
+                    Packaging Option
+                  </span>
+                  {takeawayPackagingAmount > 0 && (
+                    <span className="text-[11px] font-mono font-bold text-[#C2410C]">
+                      +₹{takeawayPackagingAmount}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setTakeawayPackagingTier("NONE")}
+                    className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                      takeawayPackagingTier === "NONE"
+                        ? "bg-white text-zinc-900 border-zinc-400 shadow-2xs"
+                        : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
                     }`}
                   >
-                    {takeawayPackagingFee && <Check size={10} strokeWidth={3} />}
-                  </div>
-                  <span>Carry Bag / Container Packaging</span>
+                    No Bag (₹0)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTakeawayPackagingTier("BAG_5")}
+                    className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                      takeawayPackagingTier === "BAG_5"
+                        ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
+                        : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
+                    }`}
+                  >
+                    Paper Bag (+₹5)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTakeawayPackagingTier("BOX_15")}
+                    className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                      takeawayPackagingTier === "BOX_15"
+                        ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
+                        : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
+                    }`}
+                  >
+                    Box/Carrier (+₹15)
+                  </button>
                 </div>
-                <span className="font-mono font-bold">+₹15</span>
               </div>
 
               {/* Suppressed Discount Toggle */}
@@ -2457,10 +2656,10 @@ export default function PosPage() {
                   <span className="font-mono text-zinc-800">₹{takeawaySubtotal}</span>
                 </div>
 
-                {takeawayPackagingFee && (
+                {takeawayPackagingAmount > 0 && (
                   <div className="flex justify-between text-zinc-500 font-medium">
                     <span>Packaging:</span>
-                    <span className="font-mono text-zinc-800">+₹15</span>
+                    <span className="font-mono text-zinc-800">+₹{takeawayPackagingAmount}</span>
                   </div>
                 )}
 
@@ -2506,6 +2705,66 @@ export default function PosPage() {
                 </div>
               </div>
 
+              {/* Quick Cash Tender Presets & Change Due Calculator */}
+              {takeawayPaymentMethod === "CASH" && (
+                <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl space-y-2.5 animate-in fade-in duration-150">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
+                      Cash Tender
+                    </span>
+                    <span className="text-[10.5px] text-zinc-400 font-mono">
+                      Payable: ₹{takeawayTotal}
+                    </span>
+                  </div>
+
+                  {/* Preset chips */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {cashTenderPresets.map((amount) => (
+                      <button
+                        key={amount}
+                        type="button"
+                        onClick={() => setCashTenderAmount(String(amount))}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border transition-all cursor-pointer ${
+                          cashTenderAmount === String(amount)
+                            ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                            : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100"
+                        }`}
+                      >
+                        {amount === takeawayTotal ? `Exact (₹${amount})` : `₹${amount}`}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Manual Tender Input */}
+                  <div className="relative">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 text-xs font-mono">₹</span>
+                    <input
+                      type="number"
+                      placeholder="Enter tendered cash..."
+                      value={cashTenderAmount}
+                      onChange={(e) => setCashTenderAmount(e.target.value)}
+                      className="w-full pl-7 pr-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-mono font-semibold outline-none focus:border-[#E46254]"
+                    />
+                  </div>
+
+                  {/* Change Due Indicator */}
+                  {cashChangeDue !== null && (
+                    <div
+                      className={`p-2 rounded-lg text-xs font-bold flex items-center justify-between border ${
+                        cashChangeDue >= 0
+                          ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                          : "bg-red-50 text-red-700 border-red-200"
+                      }`}
+                    >
+                      <span>{cashChangeDue >= 0 ? "Change to return:" : "Short amount:"}</span>
+                      <span className="font-mono text-sm font-black">
+                        ₹{Math.abs(cashChangeDue)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Big Action Button */}
               <button
                 type="button"
@@ -2531,112 +2790,8 @@ export default function PosPage() {
               </button>
             </div>
           </div>
-        ) : (
-          /* TAB 2: ACTIVE PICKUPS QUEUE */
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 slim-scrollbar">
-            {activeTakeawayOrders.length === 0 ? (
-              <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-center text-zinc-400 p-6">
-                <div className="w-12 h-12 rounded-2xl bg-[#FAF8F7] border border-zinc-200/80 flex items-center justify-center text-zinc-400 mb-3">
-                  <CheckCircle2 size={20} />
-                </div>
-                <h4 className="font-bold text-xs text-zinc-700">No pending pickups</h4>
-                <p className="text-[11px] text-zinc-400 mt-1 max-w-[200px]">
-                  All takeaway orders have been collected by guests.
-                </p>
-              </div>
-            ) : (
-              activeTakeawayOrders.map((order) => {
-                const elapsed = Math.max(
-                  0,
-                  Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000)
-                );
-                const isReady = (order.status as string) === "READY" || order.status === "SERVED";
-                const itemsSummary = Array.isArray(order.items_json)
-                  ? order.items_json.map((it: any) => `${it.quantity}x ${it.item?.name || it.name}`).join(", ")
-                  : "";
-
-                return (
-                  <div
-                    key={order.id}
-                    className={`p-3.5 rounded-2xl border transition-all space-y-2.5 ${
-                      isReady
-                        ? "bg-emerald-50/60 border-emerald-300 ring-1 ring-emerald-300/40"
-                        : "bg-white border-zinc-200/80 shadow-2xs"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono font-black text-sm text-zinc-900">
-                            {order.table_no.replace("Takeaway", "Token")}
-                          </span>
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                              isReady
-                                ? "bg-emerald-100 text-emerald-800 border-emerald-200"
-                                : "bg-amber-100 text-amber-800 border-amber-200"
-                            }`}
-                          >
-                            {isReady ? "Ready for Pickup" : "Kitchen Cooking"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 text-[11px] text-zinc-500 mt-0.5">
-                          <span className="flex items-center gap-1">
-                            <Clock size={11} /> {elapsed}m ago
-                          </span>
-                          {order.customer_name && (
-                            <span>• {order.customer_name}</span>
-                          )}
-                          {order.customer_phone && (
-                            <span className="font-mono text-zinc-400">({order.customer_phone})</span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <span className="font-mono font-bold text-sm text-zinc-900 block">
-                          ₹{order.total}
-                        </span>
-                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200/60">
-                          Paid ({order.payment_method || "Counter"})
-                        </span>
-                      </div>
-                    </div>
-
-                    {itemsSummary && (
-                      <p className="text-[11px] text-zinc-600 line-clamp-2 bg-[#FAF8F7] p-2 rounded-lg border border-zinc-100">
-                        {itemsSummary}
-                      </p>
-                    )}
-
-                    <div className="flex items-center gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => handleMarkTakeawayHandedOver(order.id, order.table_no)}
-                        className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <CheckCircle2 size={13} />
-                        <span>Hand Over to Guest</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleReprintTakeawayOrder(order)}
-                        className="px-3 py-2 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200/80 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
-                        title="Reprint Receipt"
-                      >
-                        <Printer size={13} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        )}
+        </div>
       </div>
-    </div>
-  )}
 
       {/* ═════════════════════════════════════════════════════════════════ */}
       {/* ── FULL-SCREEN TABLE COMMAND STATION MODAL ── */}
