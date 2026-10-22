@@ -241,6 +241,7 @@ export default function PosPage() {
   const [takeawayDiscountPercent, setTakeawayDiscountPercent] = useState<number>(0);
   const [takeawayDiscountRupees, setTakeawayDiscountRupees] = useState<string>("");
   const [takeawayBatchNote, setTakeawayBatchNote] = useState("");
+  const [showRecentTakeawayModal, setShowRecentTakeawayModal] = useState(false);
   const takeawaySearchInputRef = useRef<HTMLInputElement>(null);
 
   /* ─── 1. Load Floor, Catalog & Realtime Orders ─────────────────────── */
@@ -2043,35 +2044,45 @@ export default function PosPage() {
             : "opacity-0 translate-y-4 scale-[0.99] pointer-events-none"
         }`}
       >
-        {/* Top Toggle Strip: Clean White Background, ONLY the Inventory Toggle */}
-        <div className="py-2.5 w-full flex items-center justify-center shrink-0 bg-white">
-          <div className="bg-gray-100/90 p-1 rounded-xl flex items-center gap-1 w-full max-w-xs shadow-inner border border-gray-200/50">
-            <button 
+        {/* Top Header Bar: Clean, Minimal, No Emojis */}
+        <header className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <button
               type="button"
               onClick={() => setTerminalMode("DINE_IN")}
-              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
-                terminalMode === "DINE_IN" 
-                  ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 hover:text-black font-semibold text-xs transition-colors cursor-pointer"
             >
-              <UtensilsCrossed size={14} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : ""} />
-              Dine-In
+              <ChevronLeft size={16} />
+              <span>Dine-In Floor</span>
             </button>
-            <button 
+
+            <span className="text-zinc-300">|</span>
+
+            <span className="font-bold text-sm text-zinc-900 tracking-tight">
+              Takeaway Terminal
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            <span className="font-mono text-xs font-bold text-zinc-600 bg-zinc-100 px-2.5 py-1.5 rounded-xl">
+              Token #{String(currentToken).padStart(2, "0")}
+            </span>
+
+            <button
               type="button"
-              onClick={() => setTerminalMode("TAKEAWAY")}
-              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
-                terminalMode === "TAKEAWAY" 
-                  ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
+              onClick={() => setShowRecentTakeawayModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 hover:text-black font-semibold text-xs transition-colors cursor-pointer"
             >
-              <ShoppingBag size={14} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
-              Takeaway
+              <Clock size={14} className="text-zinc-500" />
+              <span>Recent Orders</span>
+              {todayTakeawayOrders.length > 0 && (
+                <span className="font-mono text-[11px] font-bold text-zinc-500">
+                  ({todayTakeawayOrders.length})
+                </span>
+              )}
             </button>
           </div>
-        </div>
+        </header>
 
         {/* Main Workspace: Catalog (62%) + Active Counter Ticket (38%) */}
         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden bg-white">
@@ -2640,6 +2651,119 @@ export default function PosPage() {
             </div>
           </div>
         </div>
+
+        {/* Recent Takeaway Orders Slide-Over Drawer */}
+        {showRecentTakeawayModal && (
+          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex justify-end animate-in fade-in duration-150">
+            <div className="w-full max-w-md bg-white h-full shadow-2xl flex flex-col animate-in slide-in-from-right duration-200">
+              {/* Drawer Header */}
+              <div className="p-4 border-b border-zinc-200 flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-sm text-zinc-900">Recent Takeaway Orders</h3>
+                  <span className="text-xs text-zinc-400">Today&apos;s punched tokens</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowRecentTakeawayModal(false)}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* Drawer Content */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-2.5 slim-scrollbar">
+                {todayTakeawayOrders.length === 0 ? (
+                  <div className="h-60 flex flex-col items-center justify-center text-center text-zinc-400">
+                    <Clock size={24} className="opacity-40 mb-2" />
+                    <p className="text-xs font-medium">No takeaway orders punched today</p>
+                  </div>
+                ) : (
+                  todayTakeawayOrders.map((order) => {
+                    const elapsed = Math.max(
+                      0,
+                      Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000)
+                    );
+                    const isServed = order.status === "SERVED" || order.status === "COMPLETED";
+                    const isReady = (order.status as string) === "READY";
+                    const itemsSummary = Array.isArray(order.items_json)
+                      ? order.items_json.map((it: any) => `${it.quantity}x ${it.item?.name || it.name}`).join(", ")
+                      : "";
+
+                    return (
+                      <div
+                        key={order.id}
+                        className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl space-y-2 hover:bg-zinc-100/60 transition-colors"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-bold text-xs text-zinc-900">
+                                {order.table_no.replace("Takeaway", "Token #")}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  isServed
+                                    ? "bg-zinc-200 text-zinc-700"
+                                    : isReady
+                                    ? "bg-emerald-100 text-emerald-800"
+                                    : "bg-amber-100 text-amber-800"
+                                }`}
+                              >
+                                {isServed ? "Completed" : isReady ? "Ready" : "Preparing"}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1.5">
+                              <span>{elapsed}m ago</span>
+                              {order.customer_name && <span>· {order.customer_name}</span>}
+                            </div>
+                          </div>
+
+                          <div className="text-right">
+                            <span className="font-mono font-bold text-xs text-zinc-900 block">
+                              ₹{order.total}
+                            </span>
+                            <span className="text-[10px] text-zinc-500">
+                              {order.payment_method || "Paid"}
+                            </span>
+                          </div>
+                        </div>
+
+                        {itemsSummary && (
+                          <p className="text-[11px] text-zinc-600 line-clamp-1">
+                            {itemsSummary}
+                          </p>
+                        )}
+
+                        <div className="flex items-center gap-2 pt-1 border-t border-zinc-200/60">
+                          {isReady && !isServed && (
+                            <button
+                              type="button"
+                              onClick={() => handleMarkTakeawayHandedOver(order.id, order.table_no)}
+                              className="flex-1 py-1 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                            >
+                              <CheckCircle2 size={12} />
+                              <span>Hand Over</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleReprintTakeawayOrder(order)}
+                            className="flex-1 py-1 px-2 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <Printer size={12} />
+                            <span>Reprint Bill</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════ */}
