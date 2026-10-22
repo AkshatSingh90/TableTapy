@@ -234,7 +234,7 @@ export default function PosPage() {
         data: { user },
       } = await supabase.auth.getUser();
 
-      let restId = user?.id;
+      let restId = user?.user_metadata?.restaurant_id || user?.id;
       if (!restId) {
         const { data: firstRest } = await supabase
           .from("restaurants")
@@ -264,17 +264,31 @@ export default function PosPage() {
       }
       setRestaurantId(restId);
 
-      // Locations (Tables)
+      // Locations (Tables): check resolved restId, user_metadata, or user.id fallback
+      let loadedLocations: Location[] = [];
       const { data: locData } = await supabase
         .from("locations")
         .select("id, name, type, capacity")
         .eq("restaurant_id", restId)
         .order("name", { ascending: true });
 
-      if (locData) {
-        const sorted = (locData as Location[]).sort((a, b) => {
-          const numA = parseInt(a.name.replace(/D/g, ""), 10);
-          const numB = parseInt(b.name.replace(/D/g, ""), 10);
+      if (locData && locData.length > 0) {
+        loadedLocations = locData as Location[];
+      } else if (user?.id && user.id !== restId) {
+        const { data: userLocs } = await supabase
+          .from("locations")
+          .select("id, name, type, capacity")
+          .eq("restaurant_id", user.id)
+          .order("name", { ascending: true });
+        if (userLocs && userLocs.length > 0) {
+          loadedLocations = userLocs as Location[];
+        }
+      }
+
+      if (loadedLocations.length > 0) {
+        const sorted = loadedLocations.sort((a, b) => {
+          const numA = parseInt(a.name.replace(/\D/g, ""), 10);
+          const numB = parseInt(b.name.replace(/\D/g, ""), 10);
           if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
           return a.name.localeCompare(b.name);
         });
