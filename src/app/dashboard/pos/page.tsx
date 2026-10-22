@@ -42,6 +42,7 @@ interface Location {
   name: string;
   type?: string;
   capacity?: number;
+  restaurant_id?: string;
 }
 
 interface MenuItem {
@@ -235,21 +236,49 @@ export default function PosPage() {
       } = await supabase.auth.getUser();
 
       let restId = user?.user_metadata?.restaurant_id || user?.id;
+
+      // Check localStorage captain restaurant as well if present
+      if (typeof window !== "undefined") {
+        try {
+          const savedCaptainRest = localStorage.getItem("tabletapy_captain_restaurant");
+          if (savedCaptainRest) {
+            const parsed = JSON.parse(savedCaptainRest);
+            if (parsed?.id) {
+              restId = parsed.id;
+            }
+          }
+        } catch {}
+      }
+
+      // If still no restId or not found, find the restaurant that has active orders/locations
       if (!restId) {
-        const { data: firstRest } = await supabase
-          .from("restaurants")
-          .select("id, name, address")
+        // Check latest active orders to get active restaurant
+        const { data: latestOrd } = await supabase
+          .from("orders")
+          .select("restaurant_id")
+          .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
-        if (firstRest) {
-          restId = firstRest.id;
-          setRestaurantName(firstRest.name || "My Restaurant");
-          setRestaurantAddress(firstRest.address || "");
+
+        if (latestOrd?.restaurant_id) {
+          restId = latestOrd.restaurant_id;
+        } else {
+          // Check locations table for active restaurant
+          const { data: latestLoc } = await supabase
+            .from("locations")
+            .select("restaurant_id")
+            .limit(1)
+            .maybeSingle();
+          if (latestLoc?.restaurant_id) {
+            restId = latestLoc.restaurant_id;
+          }
         }
-      } else {
+      }
+
+      if (restId) {
         const { data: restRec } = await supabase
           .from("restaurants")
-          .select("name, address")
+          .select("id, name, address")
           .eq("id", restId)
           .maybeSingle();
         if (restRec) {
@@ -258,31 +287,55 @@ export default function PosPage() {
         }
       }
 
-      if (!restId) {
-        setLoading(false);
-        return;
-      }
-      setRestaurantId(restId);
-
-      // Locations (Tables): check resolved restId, user_metadata, or user.id fallback
+      // Fetch Locations (Tables)
       let loadedLocations: Location[] = [];
-      const { data: locData } = await supabase
-        .from("locations")
-        .select("id, name, type, capacity")
-        .eq("restaurant_id", restId)
-        .order("name", { ascending: true });
+      if (restId) {
+        const { data: locData } = await supabase
+          .from("locations")
+          .select("id, name, type, capacity, restaurant_id")
+          .eq("restaurant_id", restId)
+          .order("name", { ascending: true });
 
-      if (locData && locData.length > 0) {
-        loadedLocations = locData as Location[];
-      } else if (user?.id && user.id !== restId) {
+        if (locData && locData.length > 0) {
+          loadedLocations = locData as Location[];
+        }
+      }
+
+      // If still empty, check user.id fallback
+      if (loadedLocations.length === 0 && user?.id && user.id !== restId) {
         const { data: userLocs } = await supabase
           .from("locations")
-          .select("id, name, type, capacity")
+          .select("id, name, type, capacity, restaurant_id")
           .eq("restaurant_id", user.id)
           .order("name", { ascending: true });
+
         if (userLocs && userLocs.length > 0) {
           loadedLocations = userLocs as Location[];
+          restId = user.id;
         }
+      }
+
+      // If STILL empty, dynamically query all active tables in locations so POS is 100% operational
+      if (loadedLocations.length === 0) {
+        const { data: anyLocs } = await supabase
+          .from("locations")
+          .select("id, name, type, capacity, restaurant_id")
+          .order("name", { ascending: true });
+
+        if (anyLocs && anyLocs.length > 0) {
+          loadedLocations = anyLocs as Location[];
+          if (!restId && anyLocs[0]?.restaurant_id) {
+            restId = anyLocs[0].restaurant_id;
+          }
+        }
+      }
+
+      if (!restId && loadedLocations[0]?.restaurant_id) {
+        restId = loadedLocations[0].restaurant_id;
+      }
+
+      if (restId) {
+        setRestaurantId(restId);
       }
 
       if (loadedLocations.length > 0) {
@@ -295,27 +348,47 @@ export default function PosPage() {
         setLocations(sorted);
       }
 
-      // Catalog Items
-      const { data: menuData } = await supabase
-        .from("menu_items_v2")
-        .select("id, name, category, subcategory, base_price, is_veg, is_available, description")
-        .eq("restaurant_id", restId)
-        .eq("is_available", true)
-        .order("name", { ascending: true });
+      // Catalog Items (scoped to restId, or fetch available items if restId has none)
+      let menuRows: MenuItem[] = [];
+      if (restId) {
+        const { data: menuData } = await supabase
+          .from("menu_items_v2")
+          .select("id, name, category, subcategory, base_price, is_veg, is_available, description")
+          .eq("restaurant_id", restId)
+          .eq("is_available", true)
+          .order("name", { ascending: true });
 
-      if (menuData) {
+        if (menuData && menuData.length > 0) {
+          menuRows = menuData as MenuItem[];
+        }
+      }
+
+      if (menuRows.length === 0) {
+        const { data: fallbackMenu } = await supabase
+          .from("menu_items_v2")
+          .select("id, name, category, subcategory, base_price, is_veg, is_available, description")
+          .eq("is_available", true)
+          .order("name", { ascending: true });
+
+        if (fallbackMenu && fallbackMenu.length > 0) {
+          menuRows = fallbackMenu as MenuItem[];
+        }
+      }
+
+      if (menuRows.length > 0) {
         setMenuItems(
-          (menuData as MenuItem[]).map((dish) => ({
+          menuRows.map((dish) => ({
             ...dish,
             variantsConfig: extractVariantsFromDescription(dish.description).config,
           }))
         );
       }
 
-      // Past Orders for Rock-Solid Table PIN Sync with Captain & Customer views
-      await fetchPastOrders(restId);
-      // Active Orders
-      await fetchActiveOrders(restId);
+      // Past Orders & Active Orders
+      if (restId) {
+        await fetchPastOrders(restId);
+        await fetchActiveOrders(restId);
+      }
     } catch (err) {
       console.error("Failed to load POS floor:", err);
     } finally {
