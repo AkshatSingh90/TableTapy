@@ -1,8 +1,15 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Trash2, ChefHat } from "lucide-react";
+import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Trash2, ChefHat, Check, Layers } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import {
+  ItemVariantsConfig,
+  getDefaultVariantsConfig,
+  extractVariantsFromDescription,
+  buildTaggedDescription,
+  COMMON_PREP_TAGS,
+} from "@/utils/menuItemVariants";
 
 interface InventoryItem {
   id: string;
@@ -25,6 +32,7 @@ interface MenuItem {
   is_veg: boolean;
   is_available: boolean;
   recipeUsages?: any[];
+  variantsConfig?: ItemVariantsConfig;
 }
 
 export default function MenuManagerPage() {
@@ -36,12 +44,31 @@ export default function MenuManagerPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddingMode, setIsAddingMode] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Form State
   const defaultForm = { name: '', category: 'Main Course', subcategory: '', base_price: '', description: '', is_veg: true };
   const [form, setForm] = useState(defaultForm);
+  const [variantsConfig, setVariantsConfig] = useState<ItemVariantsConfig>(getDefaultVariantsConfig(0));
   const [recipeIngredients, setRecipeIngredients] = useState<{ inventory_item_id: string; amount: string; name?: string; cost?: number }[]>([]);
+
+  // Keep the 'Full' portion in sync with base_price
+  useEffect(() => {
+    const num = Number(form.base_price) || 0;
+    setVariantsConfig(prev => ({
+      ...prev,
+      portions: prev.portions.map(p => p.name.toLowerCase() === 'full' ? { ...p, price: num } : p)
+    }));
+  }, [form.base_price]);
+
+  const handleOpenCreateModal = () => {
+    setEditingItemId(null);
+    setForm(defaultForm);
+    setVariantsConfig(getDefaultVariantsConfig(0));
+    setRecipeIngredients([]);
+    setIsAddingMode(true);
+  };
 
   // Quick Add Material State
   const [isQuickAddMaterial, setIsQuickAddMaterial] = useState(false);
@@ -133,7 +160,7 @@ export default function MenuManagerPage() {
        const { data: usages } = await supabase.from('inventory_recipe_usage').select('*');
        
        setMenuItems(menuRows.map((row: any) => {
-         const cleanDesc = (row.description || '').replace(/\[REST:[^\]]+\]\s*/, '');
+         const { cleanDescription, config } = extractVariantsFromDescription(row.description, Number(row.base_price || 0));
          const itemUsages = usages?.filter(u => u.name === row.name) || [];
          const enrichedUsages = itemUsages.map(u => {
            const invMatch = invRows?.find(inv => inv.id === u.inventory_item_id);
@@ -146,10 +173,11 @@ export default function MenuManagerPage() {
            category: row.category,
            subcategory: row.subcategory || '',
            base_price: Number(row.base_price),
-           description: cleanDesc,
+           description: cleanDescription,
            is_veg: row.is_veg,
            is_available: row.is_available !== false,
-           recipeUsages: enrichedUsages
+           recipeUsages: enrichedUsages,
+           variantsConfig: config,
          };
        }));
     } else {
@@ -277,22 +305,40 @@ export default function MenuManagerPage() {
     e.preventDefault();
     setIsSubmitting(true);
     
-    const taggedDesc = restaurantId ? `${form.description} [REST:${restaurantId}]`.trim() : form.description;
-    const { data: insertedMenu, error: menuErr } = await supabase.from('menu_items_v2').insert([{
-      name: form.name,
-      category: form.category,
-      base_price: Number(form.base_price),
-      description: taggedDesc,
-      is_veg: form.is_veg,
-      restaurant_id: restaurantId || null
-    }]).select().single();
+    const taggedDesc = buildTaggedDescription(form.description, variantsConfig, restaurantId);
+    let menuErr: any = null;
+    let savedMenuId: string | null = editingItemId;
 
-    if (insertedMenu?.id && restaurantId) {
+    if (editingItemId) {
+      const { error } = await supabase.from('menu_items_v2').update({
+        name: form.name,
+        category: form.category,
+        subcategory: form.subcategory || '',
+        base_price: Number(form.base_price),
+        description: taggedDesc,
+        is_veg: form.is_veg,
+      }).eq('id', editingItemId);
+      menuErr = error;
+    } else {
+      const { data: insertedMenu, error } = await supabase.from('menu_items_v2').insert([{
+        name: form.name,
+        category: form.category,
+        subcategory: form.subcategory || '',
+        base_price: Number(form.base_price),
+        description: taggedDesc,
+        is_veg: form.is_veg,
+        restaurant_id: restaurantId || null
+      }]).select().single();
+      menuErr = error;
+      savedMenuId = insertedMenu?.id || null;
+    }
+
+    if (savedMenuId && restaurantId) {
       try {
         const savedIds = localStorage.getItem(`tabletapy_menu_${restaurantId}`);
         const list: string[] = savedIds ? JSON.parse(savedIds) : [];
-        if (!list.includes(insertedMenu.id)) {
-          list.push(insertedMenu.id);
+        if (!list.includes(savedMenuId)) {
+          list.push(savedMenuId);
           localStorage.setItem(`tabletapy_menu_${restaurantId}`, JSON.stringify(list));
         }
       } catch {}
@@ -305,6 +351,11 @@ export default function MenuManagerPage() {
     }
 
     if (recipeIngredients.length > 0) {
+      // Clear old usages if editing
+      if (editingItemId) {
+        await supabase.from('inventory_recipe_usage').delete().eq('name', form.name);
+      }
+
       const usageInserts = recipeIngredients.map(ing => {
         const inv = inventory.find(i => i.id === ing.inventory_item_id);
         const conversion = inv && inv.vendorToStorage > 0 ? inv.vendorToStorage : 1;
@@ -332,6 +383,8 @@ export default function MenuManagerPage() {
 
     await loadData();
     setForm(defaultForm);
+    setVariantsConfig(getDefaultVariantsConfig(0));
+    setEditingItemId(null);
     setRecipeIngredients([]);
     setIsAddingMode(false);
     setIsSubmitting(false);
@@ -383,13 +436,13 @@ export default function MenuManagerPage() {
                  </button>
                  <div>
                    <h2 className="text-[17px] font-bold text-gray-900 tracking-tight leading-tight">Back to Menu</h2>
-                   <p className="text-[12px] text-gray-500 font-medium">Create a new offering</p>
+                   <p className="text-[12px] text-gray-500 font-medium">{editingItemId ? `Editing "${form.name || 'Dish'}"` : "Create a new offering"}</p>
                  </div>
                </div>
                
                <div className="flex items-center gap-2">
-                  <button type="submit" form="menu-form" disabled={isSubmitting} className="px-5 py-2.5 bg-[#E46254] text-white text-[13px] font-medium rounded-xl hover:bg-[#D35546] disabled:opacity-50 transition-colors flex items-center gap-2 shadow-sm">
-                     {isSubmitting && <Loader2 size={14} className="animate-spin"/>} Publish to Menu
+                  <button type="submit" form="menu-form" disabled={isSubmitting} className="px-5 py-2.5 bg-[#E46254] text-white text-[13px] font-medium rounded-xl hover:bg-[#D35546] disabled:opacity-50 transition-colors flex items-center gap-2 shadow-sm cursor-pointer">
+                     {isSubmitting && <Loader2 size={14} className="animate-spin"/>} {editingItemId ? "Save Changes" : "Publish to Menu"}
                   </button>
                </div>
              </div>
@@ -426,13 +479,304 @@ export default function MenuManagerPage() {
                       </div>
                    </div>
 
-                   {/* Pricing */}
-                   <div className="flex flex-col gap-4">
-                      <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest border-b border-gray-100 pb-2">Pricing Structure</h3>
+                   {/* Pricing, Portions & Quick Modifiers */}
+                   <div className="flex flex-col gap-5">
+                      <div className="flex items-center justify-between border-b border-gray-100 pb-2">
+                         <div>
+                            <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Pricing & Portions</h3>
+                            <p className="text-[11.5px] text-gray-500 mt-0.5">Base price acts as the default Full portion.</p>
+                         </div>
+                      </div>
                       
-                      <div className="w-1/2">
-                        <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Retail Price (₹)</label>
-                        <input required type="number" value={form.base_price} onChange={e=>setForm({...form, base_price: e.target.value})} placeholder="0.00" className="w-full px-4 py-2.5 border border-gray-200 bg-gray-50/50 rounded-xl text-[13px] font-medium focus:border-[#E46254] focus:bg-white outline-none transition-colors" />
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
+                        <div>
+                          <label className="block text-[13px] font-medium text-gray-700 mb-1.5">
+                            Retail Price / Full (₹) <span className="text-[#E46254]">*</span>
+                          </label>
+                          <input
+                            required
+                            type="number"
+                            value={form.base_price}
+                            onChange={(e) => setForm({ ...form, base_price: e.target.value })}
+                            placeholder="e.g. 320"
+                            className="w-full px-4 py-2.5 border border-gray-200 bg-gray-50/50 rounded-xl text-[13px] font-medium focus:border-[#E46254] focus:bg-white outline-none transition-colors font-mono"
+                          />
+                        </div>
+
+                        {/* Veg / Non-Veg Selector */}
+                        <div>
+                          <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Dietary Type</label>
+                          <div className="flex items-center gap-2 p-1 bg-gray-100/70 rounded-xl">
+                            <button
+                              type="button"
+                              onClick={() => setForm({ ...form, is_veg: true })}
+                              className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                                form.is_veg
+                                  ? "bg-white text-emerald-700 shadow-2xs"
+                                  : "text-gray-500 hover:text-gray-900"
+                              }`}
+                            >
+                              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                              <span>Vegetarian</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setForm({ ...form, is_veg: false })}
+                              className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                                !form.is_veg
+                                  ? "bg-white text-[#C2410C] shadow-2xs"
+                                  : "text-gray-500 hover:text-gray-900"
+                              }`}
+                            >
+                              <span className="w-2 h-2 rounded-full bg-[#E46254]" />
+                              <span>Non-Veg</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* TOGGLE 1: PORTIONS / SIZES (HALF / FULL) */}
+                      <div className="bg-gray-50/70 border border-gray-200/80 rounded-2xl p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="text-[13px] font-semibold text-gray-800 block">
+                              Portion Sizes (e.g. Half / Full)
+                            </span>
+                            <span className="text-[11.5px] text-gray-500">
+                              Offer portion sizes like Half, Full, Quarter, or Large.
+                            </span>
+                          </div>
+                          <IOSToggle
+                            active={variantsConfig.hasPortions}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              setVariantsConfig((prev) => ({
+                                ...prev,
+                                hasPortions: !prev.hasPortions,
+                              }));
+                            }}
+                          />
+                        </div>
+
+                        {variantsConfig.hasPortions && (
+                          <div className="space-y-2 pt-2 border-t border-gray-200/60 animate-in fade-in duration-200">
+                            <div className="grid grid-cols-12 gap-2 text-[11px] font-bold text-gray-400 uppercase tracking-wider px-1">
+                              <div className="col-span-6">Portion Name</div>
+                              <div className="col-span-5">Price (₹)</div>
+                              <div className="col-span-1"></div>
+                            </div>
+
+                            {variantsConfig.portions.map((portion, idx) => {
+                              const isFull = portion.name.toLowerCase() === "full";
+                              return (
+                                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                                  <div className="col-span-6 relative">
+                                    <input
+                                      type="text"
+                                      value={portion.name}
+                                      disabled={isFull}
+                                      onChange={(e) => {
+                                        const next = [...variantsConfig.portions];
+                                        next[idx].name = e.target.value;
+                                        setVariantsConfig({ ...variantsConfig, portions: next });
+                                      }}
+                                      className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-800 outline-none focus:border-[#E46254] disabled:bg-gray-100 disabled:text-gray-500"
+                                      placeholder="e.g. Half"
+                                    />
+                                    {isFull && (
+                                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9.5px] font-bold text-gray-400 uppercase bg-gray-200/60 px-1.5 py-0.5 rounded">
+                                        Base
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="col-span-5">
+                                    <input
+                                      type="number"
+                                      value={isFull ? form.base_price : portion.price}
+                                      disabled={isFull}
+                                      onChange={(e) => {
+                                        const next = [...variantsConfig.portions];
+                                        next[idx].price = Number(e.target.value) || 0;
+                                        setVariantsConfig({ ...variantsConfig, portions: next });
+                                      }}
+                                      className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-mono font-semibold text-gray-800 outline-none focus:border-[#E46254] disabled:bg-gray-100 disabled:text-gray-500"
+                                      placeholder="0"
+                                    />
+                                  </div>
+
+                                  <div className="col-span-1 flex justify-center">
+                                    {!isFull && variantsConfig.portions.length > 1 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setVariantsConfig({
+                                            ...variantsConfig,
+                                            portions: variantsConfig.portions.filter((_, i) => i !== idx),
+                                          });
+                                        }}
+                                        className="p-1 text-gray-400 hover:text-red-500 rounded transition-colors cursor-pointer"
+                                      >
+                                        <Trash2 size={13} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setVariantsConfig({
+                                  ...variantsConfig,
+                                  portions: [
+                                    ...variantsConfig.portions,
+                                    { name: "Quarter", price: Math.round(Number(form.base_price || 0) * 0.4), isDefault: false },
+                                  ],
+                                });
+                              }}
+                              className="text-[11.5px] font-semibold text-[#E46254] hover:text-[#C2410C] flex items-center gap-1 pt-1 cursor-pointer transition-colors"
+                            >
+                              <Plus size={13} /> + Add Another Size (e.g. Quarter, Large)
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* TOGGLE 2: ADD-ONS & EXTRAS */}
+                      <div className="bg-gray-50/70 border border-gray-200/80 rounded-2xl p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="text-[13px] font-semibold text-gray-800 block">
+                              Add-ons & Extras
+                            </span>
+                            <span className="text-[11.5px] text-gray-500">
+                              Optional paid upgrades like Extra Butter, Extra Cheese, or Dip.
+                            </span>
+                          </div>
+                          <IOSToggle
+                            active={variantsConfig.hasAddons}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              setVariantsConfig((prev) => ({
+                                ...prev,
+                                hasAddons: !prev.hasAddons,
+                              }));
+                            }}
+                          />
+                        </div>
+
+                        {variantsConfig.hasAddons && (
+                          <div className="space-y-2 pt-2 border-t border-gray-200/60 animate-in fade-in duration-200">
+                            <div className="grid grid-cols-12 gap-2 text-[11px] font-bold text-gray-400 uppercase tracking-wider px-1">
+                              <div className="col-span-7">Add-on Name</div>
+                              <div className="col-span-4">Extra Price (₹)</div>
+                              <div className="col-span-1"></div>
+                            </div>
+
+                            {variantsConfig.addons.map((addon, idx) => (
+                              <div key={addon.id || idx} className="grid grid-cols-12 gap-2 items-center">
+                                <div className="col-span-7">
+                                  <input
+                                    type="text"
+                                    value={addon.name}
+                                    onChange={(e) => {
+                                      const next = [...variantsConfig.addons];
+                                      next[idx].name = e.target.value;
+                                      setVariantsConfig({ ...variantsConfig, addons: next });
+                                    }}
+                                    className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-800 outline-none focus:border-[#E46254]"
+                                    placeholder="e.g. Extra Butter"
+                                  />
+                                </div>
+                                <div className="col-span-4">
+                                  <input
+                                    type="number"
+                                    value={addon.price || ""}
+                                    onChange={(e) => {
+                                      const next = [...variantsConfig.addons];
+                                      next[idx].price = Number(e.target.value) || 0;
+                                      setVariantsConfig({ ...variantsConfig, addons: next });
+                                    }}
+                                    className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-mono font-semibold text-gray-800 outline-none focus:border-[#E46254]"
+                                    placeholder="0"
+                                  />
+                                </div>
+                                <div className="col-span-1 flex justify-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setVariantsConfig({
+                                        ...variantsConfig,
+                                        addons: variantsConfig.addons.filter((_, i) => i !== idx),
+                                      });
+                                    }}
+                                    className="p-1 text-gray-400 hover:text-red-500 rounded transition-colors cursor-pointer"
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setVariantsConfig({
+                                  ...variantsConfig,
+                                  addons: [
+                                    ...variantsConfig.addons,
+                                    { id: `addon_${Date.now()}`, name: "", price: 20 },
+                                  ],
+                                });
+                              }}
+                              className="text-[11.5px] font-semibold text-[#E46254] hover:text-[#C2410C] flex items-center gap-1 pt-1 cursor-pointer transition-colors"
+                            >
+                              <Plus size={13} /> + Add Another Add-on
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* TOGGLE 3: QUICK KITCHEN PREP TAGS */}
+                      <div className="bg-gray-50/70 border border-gray-200/80 rounded-2xl p-4 space-y-3">
+                        <div>
+                          <span className="text-[13px] font-semibold text-gray-800 block">
+                            Quick Prep Tags (1-Tap Chef Notes)
+                          </span>
+                          <span className="text-[11.5px] text-gray-500">
+                            Pre-configured tags available to staff so they don't have to type.
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {COMMON_PREP_TAGS.map((tag) => {
+                            const isSelected = variantsConfig.prepTags.includes(tag);
+                            return (
+                              <button
+                                key={tag}
+                                type="button"
+                                onClick={() => {
+                                  setVariantsConfig((prev) => ({
+                                    ...prev,
+                                    prepTags: isSelected
+                                      ? prev.prepTags.filter((t) => t !== tag)
+                                      : [...prev.prepTags, tag],
+                                  }));
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
+                                  isSelected
+                                    ? "bg-zinc-900 text-white border-zinc-900 shadow-2xs"
+                                    : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
+                                }`}
+                              >
+                                {isSelected && <span className="mr-1">✓</span>}
+                                {tag}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                    </div>
 
@@ -513,7 +857,7 @@ export default function MenuManagerPage() {
                 className="w-full bg-white border border-gray-200 rounded-xl pl-9 pr-3 py-2 text-[13px] font-medium text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#E46254] transition-all shadow-sm"
               />
             </div>
-            <button onClick={() => setIsAddingMode(true)} className="shrink-0 bg-[#E46254] hover:bg-[#D35546] text-white px-4 py-2 rounded-xl transition-all font-medium text-[13px] tracking-tight flex items-center justify-center gap-2 shadow-sm">
+            <button onClick={handleOpenCreateModal} className="shrink-0 bg-[#E46254] hover:bg-[#D35546] text-white px-4 py-2 rounded-xl transition-all font-medium text-[13px] tracking-tight flex items-center justify-center gap-2 shadow-sm cursor-pointer">
               <Plus size={16} /> New Offering
             </button>
           </div>
@@ -527,7 +871,7 @@ export default function MenuManagerPage() {
             </div>
             <h3 className="text-[18px] font-bold text-gray-900 mb-2">No menu offerings found</h3>
             <p className="text-[14px] text-gray-500 max-w-sm mb-6">Your menu is currently empty or no dishes match your search query.</p>
-            <button onClick={() => setIsAddingMode(true)} className="bg-[#E46254] text-white px-5 py-2.5 rounded-xl font-medium text-[13px] shadow-sm hover:bg-[#D35546] transition-colors">
+            <button onClick={handleOpenCreateModal} className="bg-[#E46254] text-white px-5 py-2.5 rounded-xl font-medium text-[13px] shadow-sm hover:bg-[#D35546] transition-colors cursor-pointer">
               Create your first offering
             </button>
           </div>
@@ -617,10 +961,36 @@ export default function MenuManagerPage() {
                <div className="relative h-32 bg-gradient-to-b from-gray-50 to-white flex items-center justify-center border-b border-gray-100">
                   <span className="text-[72px] drop-shadow-md animate-in zoom-in duration-500 delay-100">🍽️</span>
                   <div className="absolute top-4 right-4 flex items-center gap-2">
-                    <button className="p-2 bg-white/80 hover:bg-white text-gray-500 hover:text-[#E46254] rounded-full shadow-sm transition-all">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingItemId(selectedItem.id);
+                        setForm({
+                          name: selectedItem.name,
+                          category: selectedItem.category,
+                          subcategory: selectedItem.subcategory || '',
+                          base_price: selectedItem.base_price.toString(),
+                          description: selectedItem.description || '',
+                          is_veg: selectedItem.is_veg,
+                        });
+                        setVariantsConfig(selectedItem.variantsConfig || getDefaultVariantsConfig(selectedItem.base_price));
+                        setRecipeIngredients(
+                          selectedItem.recipeUsages?.map((u) => ({
+                            inventory_item_id: u.inventory_item_id,
+                            amount: u.amount_per_order.toString(),
+                            name: u.inventory_name,
+                            cost: u.ingredient_cost_per_order / (u.amount_per_order || 1),
+                          })) || []
+                        );
+                        setIsAddingMode(true);
+                        setSelectedItem(null);
+                      }}
+                      className="p-2 bg-white/80 hover:bg-white text-gray-500 hover:text-[#E46254] rounded-full shadow-sm transition-all cursor-pointer"
+                      title="Edit Dish"
+                    >
                       <Edit2 size={16}/>
                     </button>
-                    <button onClick={() => setSelectedItem(null)} className="p-2 bg-white/80 hover:bg-white text-gray-500 hover:text-gray-900 rounded-full shadow-sm transition-all">
+                    <button onClick={() => setSelectedItem(null)} className="p-2 bg-white/80 hover:bg-white text-gray-500 hover:text-gray-900 rounded-full shadow-sm transition-all cursor-pointer">
                       <X size={16}/>
                     </button>
                   </div>
@@ -641,7 +1011,61 @@ export default function MenuManagerPage() {
                      <div className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold ${selectedItem.is_available ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
                         {selectedItem.is_available ? 'Active on Menu' : '86\'d (Unavailable)'}
                      </div>
+                     <div className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 ${selectedItem.is_veg ? 'bg-emerald-50 text-emerald-700' : 'bg-[#E46254]/10 text-[#C2410C]'}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${selectedItem.is_veg ? 'bg-emerald-500' : 'bg-[#E46254]'}`} />
+                        <span>{selectedItem.is_veg ? 'Veg' : 'Non-Veg'}</span>
+                     </div>
                   </div>
+
+                  {/* Portions breakdown if present */}
+                  {selectedItem.variantsConfig?.hasPortions && (
+                    <div className="mb-5 bg-gray-50 rounded-2xl border border-gray-100 p-4">
+                      <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest block mb-2.5">
+                        Available Portions
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedItem.variantsConfig.portions.map((p, idx) => (
+                          <div key={idx} className="px-3 py-1.5 rounded-xl bg-white border border-gray-200 text-xs font-semibold text-gray-800 flex items-center gap-2 shadow-2xs">
+                            <span>{p.name}</span>
+                            <span className="font-mono text-[#E46254]">₹{p.price}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Add-ons breakdown if present */}
+                  {selectedItem.variantsConfig?.hasAddons && selectedItem.variantsConfig.addons.length > 0 && (
+                    <div className="mb-5 bg-gray-50 rounded-2xl border border-gray-100 p-4">
+                      <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest block mb-2.5">
+                        Add-ons & Extras
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedItem.variantsConfig.addons.map((a, idx) => (
+                          <div key={idx} className="px-3 py-1.5 rounded-xl bg-white border border-gray-200 text-xs font-medium text-gray-800 flex items-center gap-2 shadow-2xs">
+                            <span>{a.name}</span>
+                            <span className="font-mono text-emerald-600 font-semibold">+₹{a.price}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Prep tags if present */}
+                  {selectedItem.variantsConfig?.prepTags && selectedItem.variantsConfig.prepTags.length > 0 && (
+                    <div className="mb-5">
+                      <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest block mb-2">
+                        Quick Kitchen Prep Notes
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedItem.variantsConfig.prepTags.map((tag, idx) => (
+                          <span key={idx} className="px-2.5 py-1 rounded-lg bg-zinc-100 text-zinc-700 text-xs font-medium">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   
                   <div>
                      <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-3">Recipe & Economics</h3>
@@ -670,7 +1094,20 @@ export default function MenuManagerPage() {
                   </div>
 
                   <div className="mt-8 pt-4 border-t border-gray-100 flex justify-center">
-                     <button className="text-[13px] font-semibold text-red-500 hover:text-red-600 flex items-center gap-1.5 transition-colors">
+                     <button
+                       type="button"
+                       onClick={async () => {
+                         if (!confirm(`Are you sure you want to delete "${selectedItem.name}" from the menu?`)) return;
+                         try {
+                           await supabase.from('menu_items_v2').delete().eq('id', selectedItem.id);
+                           setSelectedItem(null);
+                           await loadData();
+                         } catch (err: any) {
+                           alert("Failed to delete dish: " + err.message);
+                         }
+                       }}
+                       className="text-[13px] font-semibold text-red-500 hover:text-red-600 flex items-center gap-1.5 transition-colors cursor-pointer"
+                     >
                        <Trash2 size={14}/> Delete Dish from Menu
                      </button>
                   </div>

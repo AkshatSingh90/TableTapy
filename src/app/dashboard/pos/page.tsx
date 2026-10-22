@@ -31,6 +31,13 @@ import {
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
+import {
+  ItemVariantsConfig,
+  extractVariantsFromDescription,
+  PortionOption,
+  AddonOption,
+  COMMON_PREP_TAGS,
+} from "@/utils/menuItemVariants";
 
 /* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
@@ -48,6 +55,8 @@ interface MenuItem {
   base_price: number;
   is_veg: boolean;
   is_available: boolean;
+  description?: string;
+  variantsConfig?: ItemVariantsConfig;
 }
 
 interface OrderRecord {
@@ -106,12 +115,16 @@ interface TableSessionData {
 
 interface NewStaffItem {
   id: string;
+  dishId?: string;
   name: string;
+  portionName?: string;
   price: number;
   quantity: number;
   isVeg: boolean;
   category?: string;
   notes?: string;
+  addons?: { name: string; price: number }[];
+  prepTags?: string[];
 }
 
 type TerminalMode = "DINE_IN" | "TAKEAWAY";
@@ -145,6 +158,13 @@ export default function PosPage() {
   const [manualCart, setManualCart] = useState<NewStaffItem[]>([]);
   const [manualCustomerName, setManualCustomerName] = useState("");
   const [manualCustomerPhone, setManualCustomerPhone] = useState("");
+
+  // Dish Customizer State (Portions, Add-ons, Quick Prep Tags)
+  const [customizingDish, setCustomizingDish] = useState<MenuItem | null>(null);
+  const [selectedPortion, setSelectedPortion] = useState<PortionOption | null>(null);
+  const [selectedAddons, setSelectedAddons] = useState<AddonOption[]>([]);
+  const [selectedPrepTags, setSelectedPrepTags] = useState<string[]>([]);
+  const [customDishNote, setCustomDishNote] = useState<string>("");
 
   // Settlement & Discount State
   const [discountPercent, setDiscountPercent] = useState<number>(0);
@@ -245,15 +265,20 @@ export default function PosPage() {
 
       if (menuData) {
         setMenuItems(
-          menuData.map((row: any) => ({
-            id: row.id,
-            name: row.name,
-            category: row.category || "General",
-            subcategory: row.subcategory || "",
-            base_price: Number(row.base_price || 0),
-            is_veg: row.is_veg !== false,
-            is_available: row.is_available !== false,
-          }))
+          menuData.map((row: any) => {
+            const { cleanDescription, config } = extractVariantsFromDescription(row.description, Number(row.base_price || 0));
+            return {
+              id: row.id,
+              name: row.name,
+              category: row.category || "General",
+              subcategory: row.subcategory || "",
+              base_price: Number(row.base_price || 0),
+              is_veg: row.is_veg !== false,
+              is_available: row.is_available !== false,
+              description: cleanDescription,
+              variantsConfig: config,
+            };
+          })
         );
       }
 
@@ -537,9 +562,42 @@ export default function PosPage() {
     });
   }, [menuItems, selectedDrawerCat, dishSearchQuery]);
 
-  const addToManualCart = (dish: MenuItem) => {
+  const handleDishClick = (dish: MenuItem) => {
+    const hasVariants = Boolean(
+      dish.variantsConfig?.hasPortions ||
+      dish.variantsConfig?.hasAddons ||
+      (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
+    );
+
+    if (hasVariants) {
+      const defaultPortion =
+        dish.variantsConfig?.portions?.find(
+          (p) => p.isDefault || p.name.toLowerCase() === "full"
+        ) ||
+        dish.variantsConfig?.portions?.[0] || {
+          name: "Full",
+          price: dish.base_price,
+          isDefault: true,
+        };
+
+      setCustomizingDish(dish);
+      setSelectedPortion(defaultPortion);
+      setSelectedAddons([]);
+      setSelectedPrepTags([]);
+      setCustomDishNote("");
+    } else {
+      addToManualCartDirect(dish);
+    }
+  };
+
+  const addToManualCartDirect = (dish: MenuItem) => {
     setManualCart((prev) => {
-      const idx = prev.findIndex((i) => i.id === dish.id);
+      const idx = prev.findIndex(
+        (i) =>
+          (i.dishId === dish.id || i.id === dish.id) &&
+          !i.portionName &&
+          (!i.notes || i.notes === "")
+      );
       if (idx >= 0) {
         const copy = [...prev];
         copy[idx].quantity += 1;
@@ -549,14 +607,76 @@ export default function PosPage() {
         ...prev,
         {
           id: dish.id,
+          dishId: dish.id,
           name: dish.name,
           price: dish.base_price,
           quantity: 1,
           isVeg: dish.is_veg,
           category: dish.category,
+          notes: "",
         },
       ];
     });
+  };
+
+  const handleConfirmCustomDish = () => {
+    if (!customizingDish) return;
+
+    const portionPrice = selectedPortion
+      ? selectedPortion.price
+      : customizingDish.base_price;
+    const addonsPrice = selectedAddons.reduce((s, a) => s + (a.price || 0), 0);
+    const unitPrice = portionPrice + addonsPrice;
+
+    const portionLabel =
+      selectedPortion && selectedPortion.name.toLowerCase() !== "full"
+        ? ` (${selectedPortion.name})`
+        : "";
+    const displayName = `${customizingDish.name}${portionLabel}`;
+
+    const tagsStr = selectedPrepTags.join(", ");
+    const addonsStr = selectedAddons.map((a) => a.name).join(", ");
+    const noteParts: string[] = [];
+    if (tagsStr) noteParts.push(tagsStr);
+    if (addonsStr) noteParts.push(`Addons: ${addonsStr}`);
+    if (customDishNote.trim()) noteParts.push(customDishNote.trim());
+    const finalNotes = noteParts.join(" • ");
+
+    const cartEntryId = `${customizingDish.id}_${selectedPortion?.name || "def"}_${selectedAddons
+      .map((a) => a.name)
+      .sort()
+      .join("_")}_${selectedPrepTags.sort().join("_")}_${customDishNote.trim()}`;
+
+    setManualCart((prev) => {
+      const idx = prev.findIndex((c) => c.id === cartEntryId);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx].quantity += 1;
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          id: cartEntryId,
+          dishId: customizingDish.id,
+          name: displayName,
+          portionName: selectedPortion?.name,
+          price: unitPrice,
+          quantity: 1,
+          isVeg: customizingDish.is_veg,
+          category: customizingDish.category,
+          notes: finalNotes,
+          addons: selectedAddons.map((a) => ({ name: a.name, price: a.price })),
+          prepTags: selectedPrepTags,
+        },
+      ];
+    });
+
+    setCustomizingDish(null);
+  };
+
+  const addToManualCart = (dish: MenuItem) => {
+    handleDishClick(dish);
   };
 
   const updateManualQty = (id: string, delta: number) => {
@@ -766,6 +886,7 @@ export default function PosPage() {
           item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
           price: c.price,
           quantity: c.quantity,
+          notes: c.notes || "",
           isReady: true,
         }));
 
@@ -1321,10 +1442,15 @@ export default function PosPage() {
 
                   <div className="divide-y divide-amber-100/70">
                     {manualCart.map((it) => (
-                      <div key={it.id} className="py-1.5 flex items-center justify-between text-xs">
+                      <div key={it.id} className="py-2 flex items-center justify-between text-xs">
                         <div className="flex-1 pr-2">
-                          <p className="font-bold text-zinc-900">{it.name}</p>
-                          <p className="text-[10.5px] text-zinc-500 font-mono">₹{it.price} each</p>
+                          <p className="font-bold text-zinc-900 leading-tight">{it.name}</p>
+                          {it.notes && (
+                            <p className="text-[10.5px] text-amber-800 font-medium leading-tight mt-0.5">
+                              {it.notes}
+                            </p>
+                          )}
+                          <p className="text-[10px] text-zinc-400 font-mono mt-0.5">₹{it.price} each</p>
                         </div>
 
                         <div className="flex items-center gap-2">
@@ -1438,30 +1564,63 @@ export default function PosPage() {
                         </div>
                       ) : (
                         filteredCatalog.map((dish) => {
-                          const cartMatch = manualCart.find((c) => c.id === dish.id);
-                          const qtyInCart = cartMatch ? cartMatch.quantity : 0;
+                          const qtyInCart = manualCart
+                            .filter((c) => c.dishId === dish.id || c.id === dish.id)
+                            .reduce((s, c) => s + c.quantity, 0);
+
+                          const hasVariants = Boolean(
+                            dish.variantsConfig?.hasPortions ||
+                            dish.variantsConfig?.hasAddons ||
+                            (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
+                          );
 
                           return (
                             <div
                               key={dish.id}
-                              className="p-2 flex items-center justify-between hover:bg-zinc-50 text-xs"
+                              onClick={() => handleDishClick(dish)}
+                              className="p-2 flex items-center justify-between hover:bg-zinc-50 text-xs transition-colors rounded-lg group cursor-pointer"
                             >
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 min-w-0 pr-2">
                                 <span
                                   className={`w-2 h-2 rounded-full shrink-0 ${
                                     dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
                                   }`}
                                 />
-                                <div>
-                                  <span className="font-semibold text-zinc-800">{dish.name}</span>
-                                  <span className="text-[10px] text-zinc-400 font-mono ml-1.5">
+                                <div className="truncate">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-semibold text-zinc-800 truncate">{dish.name}</span>
+                                    {dish.variantsConfig?.hasPortions && (
+                                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-zinc-100 text-zinc-600 border border-zinc-200">
+                                        Portions
+                                      </span>
+                                    )}
+                                    {dish.variantsConfig?.hasAddons && (
+                                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                                        Add-ons
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-[10px] text-zinc-400 font-mono">
                                     ₹{dish.base_price}
+                                    {dish.variantsConfig?.hasPortions && " (Base/Full)"}
                                   </span>
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-2">
-                                {qtyInCart > 0 ? (
+                              <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                {hasVariants ? (
+                                  <button
+                                    onClick={() => handleDishClick(dish)}
+                                    className="px-2.5 py-1 bg-zinc-900 hover:bg-black text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                                  >
+                                    <span>Customize</span>
+                                    {qtyInCart > 0 && (
+                                      <span className="w-4 h-4 rounded-full bg-[#E46254] text-white text-[9px] flex items-center justify-center font-mono font-bold">
+                                        {qtyInCart}
+                                      </span>
+                                    )}
+                                  </button>
+                                ) : qtyInCart > 0 ? (
                                   <div className="flex items-center bg-zinc-100 rounded-md border border-zinc-200">
                                     <button
                                       onClick={() => updateManualQty(dish.id, -1)}
@@ -1473,7 +1632,7 @@ export default function PosPage() {
                                       {qtyInCart}
                                     </span>
                                     <button
-                                      onClick={() => addToManualCart(dish)}
+                                      onClick={() => addToManualCartDirect(dish)}
                                       className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
                                     >
                                       <Plus size={10} />
@@ -1481,7 +1640,7 @@ export default function PosPage() {
                                   </div>
                                 ) : (
                                   <button
-                                    onClick={() => addToManualCart(dish)}
+                                    onClick={() => addToManualCartDirect(dish)}
                                     className="px-2.5 py-0.5 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer"
                                   >
                                     + Add
@@ -1765,6 +1924,226 @@ export default function PosPage() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── DISH CUSTOMIZATION MODAL (PORTIONS, ADD-ONS, QUICK PREP TAGS) ── */}
+      {customizingDish && (
+        <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-zinc-200 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="p-4 border-b border-zinc-200 flex items-center justify-between bg-zinc-50/80">
+              <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                <span
+                  className={`w-3 h-3 rounded-full shrink-0 ${
+                    customizingDish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
+                  }`}
+                />
+                <div className="truncate">
+                  <h3 className="font-bold text-zinc-900 text-sm truncate">
+                    {customizingDish.name}
+                  </h3>
+                  <div className="flex items-center gap-2 text-[10.5px] text-zinc-500">
+                    <span>{customizingDish.category}</span>
+                    <span>•</span>
+                    <span className="font-mono font-semibold text-zinc-700">
+                      Base: ₹{customizingDish.base_price}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setCustomizingDish(null)}
+                className="w-8 h-8 rounded-full hover:bg-zinc-200/70 flex items-center justify-center text-zinc-400 hover:text-zinc-700 transition-colors cursor-pointer shrink-0"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-4 space-y-4 overflow-y-auto slim-scrollbar text-xs">
+              {/* Portions / Sizes */}
+              {customizingDish.variantsConfig?.hasPortions &&
+                customizingDish.variantsConfig.portions &&
+                customizingDish.variantsConfig.portions.length > 0 && (
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider block mb-2">
+                      Portion Size <span className="text-[#E46254]">*</span>
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {customizingDish.variantsConfig.portions.map((portion) => {
+                        const isSel = selectedPortion?.name === portion.name;
+                        const isFull = portion.name.toLowerCase() === "full";
+                        return (
+                          <button
+                            key={portion.name}
+                            type="button"
+                            onClick={() => setSelectedPortion(portion)}
+                            className={`p-2.5 rounded-xl border text-left transition-all flex items-center justify-between cursor-pointer ${
+                              isSel
+                                ? "bg-zinc-900 border-zinc-900 text-white shadow-sm"
+                                : "bg-zinc-50 border-zinc-200/80 text-zinc-700 hover:bg-zinc-100"
+                            }`}
+                          >
+                            <div>
+                              <p className="font-bold text-xs">{portion.name}</p>
+                              {isFull && (
+                                <p className={`text-[9.5px] ${isSel ? "text-zinc-300" : "text-zinc-400"}`}>
+                                  Base Price
+                                </p>
+                              )}
+                            </div>
+                            <span
+                              className={`font-mono font-bold text-xs ${
+                                isSel ? "text-amber-300" : "text-zinc-900"
+                              }`}
+                            >
+                              ₹{portion.price}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+              {/* Add-ons & Extras */}
+              {customizingDish.variantsConfig?.hasAddons &&
+                customizingDish.variantsConfig.addons &&
+                customizingDish.variantsConfig.addons.length > 0 && (
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider block mb-2">
+                      Add-ons & Extras
+                    </label>
+                    <div className="space-y-1.5">
+                      {customizingDish.variantsConfig.addons.map((addon) => {
+                        const isSel = selectedAddons.some(
+                          (a) => a.name === addon.name || a.id === addon.id
+                        );
+                        return (
+                          <button
+                            key={addon.id || addon.name}
+                            type="button"
+                            onClick={() => {
+                              if (isSel) {
+                                setSelectedAddons((prev) =>
+                                  prev.filter((a) => a.name !== addon.name)
+                                );
+                              } else {
+                                setSelectedAddons((prev) => [...prev, addon]);
+                              }
+                            }}
+                            className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between cursor-pointer ${
+                              isSel
+                                ? "bg-amber-50/80 border-amber-300 text-amber-950 font-medium"
+                                : "bg-white border-zinc-200/80 text-zinc-700 hover:bg-zinc-50"
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <div
+                                className={`w-4 h-4 rounded flex items-center justify-center text-[10px] ${
+                                  isSel ? "bg-amber-600 text-white" : "border border-zinc-300"
+                                }`}
+                              >
+                                {isSel && <Check size={10} strokeWidth={3} />}
+                              </div>
+                              <span className="text-xs">{addon.name}</span>
+                            </div>
+                            <span className="font-mono text-xs text-zinc-600 font-semibold">
+                              +₹{addon.price}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+              {/* Quick Kitchen Prep Tags */}
+              <div>
+                <label className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider block mb-2 flex items-center gap-1.5">
+                  <ChefHat size={13} className="text-[#E46254]" />
+                  <span>Kitchen Instructions (1-Tap)</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {(customizingDish.variantsConfig?.prepTags?.length
+                    ? customizingDish.variantsConfig.prepTags
+                    : COMMON_PREP_TAGS
+                  ).map((tag) => {
+                    const isSel = selectedPrepTags.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => {
+                          if (isSel) {
+                            setSelectedPrepTags((prev) => prev.filter((t) => t !== tag));
+                          } else {
+                            setSelectedPrepTags((prev) => [...prev, tag]);
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                          isSel
+                            ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs font-semibold"
+                            : "bg-zinc-100 hover:bg-zinc-200 border-zinc-200 text-zinc-700"
+                        }`}
+                      >
+                        {tag}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Custom Special Note */}
+              <div>
+                <label className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider block mb-1">
+                  Custom Special Note
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Serve hot, no salt on fries, extra napkins..."
+                  value={customDishNote}
+                  onChange={(e) => setCustomDishNote(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-zinc-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 bg-zinc-50"
+                />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-zinc-200 bg-zinc-50 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-wider">
+                  Item Total
+                </span>
+                <span className="text-base font-bold font-mono text-zinc-900">
+                  ₹
+                  {(selectedPortion ? selectedPortion.price : customizingDish.base_price) +
+                    selectedAddons.reduce((s, a) => s + (a.price || 0), 0)}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCustomizingDish(null)}
+                  className="px-3 py-2 text-xs font-semibold text-zinc-600 hover:text-zinc-900 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmCustomDish}
+                  className="px-4 py-2 bg-[#E46254] hover:bg-[#d55345] text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus size={13} strokeWidth={3} />
+                  <span>Add to Table</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
