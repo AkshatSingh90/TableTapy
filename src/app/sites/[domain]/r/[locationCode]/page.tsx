@@ -14,6 +14,7 @@ import { ThankYouCelebrationView, SettlementData } from "@/components/ThankYouCe
 import { TableUnlockModal } from "@/components/TableUnlockModal";
 import { generateSessionId, extractSessionId, attachSessionToNote } from "@/utils/orderSession";
 import { generateTablePin, getTableSessionSeed, normalizeTableIdentifier, resolveTablePinAndSeed } from "@/utils/tableSessionPin";
+import { extractVariantsFromDescription } from "@/utils/menuItemVariants";
 
 interface LoyaltyMilestone {
   id: string;
@@ -814,10 +815,16 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
               cartRef.current = [];
               setIsCartOpen(false);
               setIsBillModalOpen(false);
-              setSyncToast('Payment verified & table settled! Thank you for dining with us.');
+
+              // Wipe table unlock from sessionStorage immediately so refreshing locks the table
+              const cleanTable = (loc.name || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
               try {
+                sessionStorage.removeItem(`tabletapy_unlock_${rest.id}_${cleanTable}`);
                 localStorage.removeItem(`tabletapy_cart_${rest.id}_${loc.name}`);
               } catch {}
+              setIsTableUnlocked(false);
+
+              setSyncToast('Payment verified & table settled! Thank you for dining with us.');
             })
             // Real-time collaborative cart changes broadcast from table guests
             .on('broadcast', { event: 'cart_change' }, ({ payload }: any) => {
@@ -941,15 +948,20 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
         const menuData = menuRows || [];
 
         if (bType === 'HOTEL') {
-          const mapped = (menuData || []).map((d: any) => ({
-            id: d.id,
-            name: d.name,
-            desc: d.description,
-            basePrice: d.base_price,
-            category: d.category,
-            isVeg: d.is_veg,
-            img: d.img_url,
-          }));
+          const mapped = (menuData || []).map((d: any) => {
+            const { cleanDescription, config } = extractVariantsFromDescription(d.description, Number(d.base_price || 0));
+            return {
+              id: d.id,
+              name: d.name,
+              desc: cleanDescription,
+              description: cleanDescription,
+              basePrice: Number(d.base_price || 0),
+              category: d.category,
+              isVeg: d.is_veg,
+              img: d.img_url,
+              variantsConfig: config,
+            };
+          });
           setAllItems(mapped);
         } else {
           let finalTheme = { ...rest };
@@ -979,17 +991,22 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
           setDishBadges(loadedBadges);
 
           if (menuData) {
-            const mappedItems = menuData.map((d: any) => ({
-              id: d.id,
-              name: d.name,
-              desc: d.description,
-              basePrice: d.base_price,
-              img: d.img_url,
-              category: d.category,
-              badge: loadedBadges[d.id] || d.badge || null,
-              dietary: d.dietary,
-              isVeg: d.is_veg
-            }));
+            const mappedItems = menuData.map((d: any) => {
+              const { cleanDescription, config } = extractVariantsFromDescription(d.description, Number(d.base_price || 0));
+              return {
+                id: d.id,
+                name: d.name,
+                desc: cleanDescription,
+                description: cleanDescription,
+                basePrice: Number(d.base_price || 0),
+                img: d.img_url,
+                category: d.category,
+                badge: loadedBadges[d.id] || d.badge || null,
+                dietary: d.dietary,
+                isVeg: d.is_veg,
+                variantsConfig: config,
+              };
+            });
             setItems(mappedItems);
             const cats = ['ALL', ...Array.from(new Set(mappedItems.map((m: any) => m.category)))];
             setCategories(cats as string[]);
@@ -1317,7 +1334,7 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
         }
       }
 
-      // 1. Check if another guest at this table just submitted the exact same order in the last 2 minutes
+      // 1. Table Concurrency Guard: If multiple table guests click "Fire to Kitchen" at once
       const { data: recentOrders } = await supabase
         .from('orders')
         .select('*')
@@ -1328,23 +1345,28 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
         .limit(4);
 
       if (recentOrders && recentOrders.length > 0) {
-        const isDuplicate = recentOrders.some(recent => {
-          const ageSecs = (Date.now() - new Date(recent.created_at).getTime()) / 1000;
-          if (ageSecs > 150) return false;
-          return areItemListsIdentical(recent.items_json, cart);
-        });
+        const latestOrder = recentOrders[0];
+        const ageSecs = (Date.now() - new Date(latestOrder.created_at).getTime()) / 1000;
 
-        if (isDuplicate) {
-          // Clear duplicate local cart and notify user
+        // If an order was placed for this table within 6 seconds, or identical items within 120s:
+        const isRapidDuplicate = ageSecs < 6;
+        const isIdenticalItems = ageSecs < 120 && areItemListsIdentical(latestOrder.items_json, cart);
+
+        if (isRapidDuplicate || isIdenticalItems) {
+          // Clear duplicate local cart and attach to latest table orders
           setCart([]);
           cartRef.current = [];
           setIsCartOpen(false);
           try {
-            localStorage.removeItem(`tabletapy_cart_${theme.id}_${locationName}`);
+            if (restData?.id) localStorage.removeItem(`tabletapy_cart_${restData.id}_${locationName}`);
+            if (theme?.id) localStorage.removeItem(`tabletapy_cart_${theme.id}_${locationName}`);
           } catch {}
           setTableOrders(recentOrders.filter(o => o.status !== 'CANCELLED'));
-          setGuestAlertModal({ title: "Order Already Placed", message: "These exact items were just submitted by your table guest! We prevented a duplicate round from being added." });
-          return false;
+          setGuestAlertModal({ 
+            title: "Order Already Fired", 
+            message: "Your table partner just sent this order to the kitchen! Only 1 KOT was printed to prevent double ordering." 
+          });
+          return latestOrder.id;
         }
       }
 

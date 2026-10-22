@@ -93,6 +93,9 @@ export function extractVariantsFromDescription(
     .replace(/\[VARIANTS_B64:[^\]]+\]\s*/gi, "")
     .replace(/\[VARIANTS:[^\]]+\]\s*/gi, "")
     .replace(/\[REST:[^\]]+\]\s*/gi, "")
+    .replace(/\[REST\s*:\s*[^\]]+\]\s*/gi, "")
+    .replace(/rest:[0-9a-fA-F-]{10,}\s*/gi, "")
+    .replace(/\s+/g, " ")
     .trim();
 
   if (!parsedConfig) {

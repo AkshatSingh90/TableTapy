@@ -373,9 +373,27 @@ export default function CaptainAppPage() {
         setMenuItems(menuRows);
       }
 
-      // 4. Real-time Subscription for Kitchen & Table status updates
+      // 4. Real-time Subscription for Kitchen, Tables & Locations status updates
       orderChannel = supabase
         .channel(`captain_stream_${restaurant.id}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'locations', filter: `restaurant_id=eq.${restaurant.id}` }, payload => {
+          if (payload.eventType === 'INSERT') {
+            const newLoc = payload.new as LocationTable;
+            setTables(prev => {
+              if (prev.some(t => t.id === newLoc.id || t.name.toLowerCase() === newLoc.name.toLowerCase())) return prev;
+              const next = [...prev, newLoc].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+              setupTablePresenceListeners([newLoc]);
+              return next;
+            });
+            setBellNotice(`Table ${newLoc.name} added to floor!`);
+            setTimeout(() => setBellNotice(null), 4000);
+          } else if (payload.eventType === 'DELETE') {
+            setTables(prev => prev.filter(t => t.id !== payload.old.id));
+          } else if (payload.eventType === 'UPDATE') {
+            const updatedLoc = payload.new as LocationTable;
+            setTables(prev => prev.map(t => t.id === updatedLoc.id ? updatedLoc : t));
+          }
+        })
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: `restaurant_id=eq.${restaurant.id}` }, payload => {
           if (payload.eventType === 'INSERT') {
             const newOrd = payload.new as TableOrder;
@@ -409,6 +427,9 @@ export default function CaptainAppPage() {
                 activeOrdersRef.current = next;
                 return next;
               });
+              if (updated.payment_status === 'PAID') {
+                setPastOrdersHistory(prev => [updated, ...prev.filter(p => p.id !== updated.id)]);
+              }
             } else {
               // 1. When kitchen marks food ready/served or partial dishes are plated
               if (prevOrd && prevOrd.status !== 'SERVED' && updated.status === 'SERVED') {
@@ -1345,6 +1366,15 @@ export default function CaptainAppPage() {
                     clearedAt: Date.now() 
                   }
                 });
+                tableChannel.send({
+                  type: 'broadcast',
+                  event: 'pin_changed',
+                  payload: {
+                    tableName,
+                    action: 'table_cleared',
+                    timestamp: Date.now()
+                  }
+                });
                 setTimeout(() => supabase.removeChannel(tableChannel), 1500);
               }
             });
@@ -1354,7 +1384,15 @@ export default function CaptainAppPage() {
         }
       }
 
-      // 3. Update local state
+      // 3. Update local state: push settled orders into pastOrdersHistory so new Table PIN is derived immediately!
+      const settledOrderRecords = (tableOrders.length > 0 ? tableOrders : [order]).map(o => ({
+        ...o,
+        status: 'COMPLETED',
+        payment_status: 'PAID',
+        created_at: new Date().toISOString(),
+      }));
+      setPastOrdersHistory(prev => [...settledOrderRecords, ...prev]);
+
       setActiveOrders(prev => prev.filter(o => {
         const oNorm = normalize(o.table_no);
         return !(oNorm === targetNorm || oNorm.includes(targetNorm) || targetNorm.includes(oNorm) || orderIds.includes(o.id) || o.id === order.id);
@@ -1943,7 +1981,15 @@ export default function CaptainAppPage() {
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-2.5 sm:gap-4 flex-1 content-start">
               {tables
                 .filter(table => {
-                  if (!activeStaff?.assigned_tables || activeStaff.assigned_tables.length === 0 || activeStaff.assigned_tables.includes('ALL')) return true;
+                  if (
+                    !activeStaff ||
+                    activeStaff.role === 'CAPTAIN' ||
+                    !activeStaff.assigned_tables ||
+                    activeStaff.assigned_tables.length === 0 ||
+                    activeStaff.assigned_tables.includes('ALL')
+                  ) {
+                    return true;
+                  }
                   return activeStaff.assigned_tables.some(assigned => 
                     table.name.toLowerCase().includes(assigned.toLowerCase()) || assigned.toLowerCase().includes(table.name.toLowerCase())
                   );
@@ -2230,10 +2276,46 @@ export default function CaptainAppPage() {
                       const detailActive = activeOrders.filter(o => normalizeTableIdentifier(o.table_no) === normDetail);
                       const { pin: detailPin } = resolveTablePinAndSeed(detailTable.name, detailActive, detailPast);
                       return (
-                        <span className="px-2 py-0.5 rounded-lg bg-zinc-900 text-white font-mono text-[11px] font-bold flex items-center gap-1 shadow-xs" title="Give this PIN to seated guests">
-                          <KeyRound size={11} className="text-amber-400" />
-                          <span>PIN: {detailPin}</span>
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-2 py-0.5 rounded-lg bg-zinc-900 text-white font-mono text-[11px] font-bold flex items-center gap-1 shadow-xs" title="Give this PIN to seated guests">
+                            <KeyRound size={11} className="text-amber-400" />
+                            <span>PIN: {detailPin}</span>
+                          </span>
+                          <button
+                            type="button"
+                            title="Regenerate & Cycle Table PIN"
+                            onClick={() => {
+                              const newPastOrder = {
+                                id: `reset_${Date.now()}`,
+                                table_no: detailTable.name,
+                                status: 'COMPLETED',
+                                payment_status: 'PAID',
+                                created_at: new Date().toISOString(),
+                              };
+                              setPastOrdersHistory(prev => [newPastOrder, ...prev]);
+                              triggerHaptic([60, 40, 60]);
+                              try {
+                                const cleanTable = (detailTable.name || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+                                const ch = supabase.channel(`table_session_${restaurant?.id}_${cleanTable}`);
+                                ch.subscribe((status: string) => {
+                                  if (status === 'SUBSCRIBED') {
+                                    ch.send({
+                                      type: 'broadcast',
+                                      event: 'pin_changed',
+                                      payload: { tableName: detailTable.name, timestamp: Date.now() }
+                                    });
+                                    setTimeout(() => supabase.removeChannel(ch), 1000);
+                                  }
+                                });
+                              } catch {}
+                              setBellNotice(`Table ${detailTable.name} PIN cycled!`);
+                              setTimeout(() => setBellNotice(null), 3000);
+                            }}
+                            className="p-1 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-600 transition-colors cursor-pointer"
+                          >
+                            <RotateCcw size={12} />
+                          </button>
+                        </div>
                       );
                     })()}
                     {(() => {

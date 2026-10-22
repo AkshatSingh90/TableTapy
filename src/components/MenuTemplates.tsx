@@ -25,6 +25,14 @@ import {
   Loader2
 } from "lucide-react";
 
+import { 
+  ItemVariantsConfig, 
+  extractVariantsFromDescription, 
+  COMMON_PREP_TAGS, 
+  PortionOption, 
+  AddonOption 
+} from "@/utils/menuItemVariants";
+
 export function DishBadgePill({ 
   badge, 
   mode = 'glass' 
@@ -74,9 +82,9 @@ export function DishBadgePill({
   );
 }
 
-export const triggerHaptic = () => {
+export const triggerHaptic = (pattern: number | number[] = 30) => {
   if (typeof navigator !== 'undefined' && navigator.vibrate) {
-    navigator.vibrate(30);
+    navigator.vibrate(pattern);
   }
 };
 
@@ -133,12 +141,16 @@ export interface MenuItem {
   id: string;
   name: string;
   desc: string;
+  description?: string;
   basePrice: number;
   img?: string;
   category: string;
   badge?: string;
   dietary?: string[];
   isVeg?: boolean;
+  variantsConfig?: ItemVariantsConfig;
+  portionName?: string;
+  notes?: string;
 }
 
 export const MOCK_ITEMS: MenuItem[] = [
@@ -1036,9 +1048,41 @@ export function MenuTemplate({
 // SHARED MODALS (Cart & Modifiers)
 // ==========================================
 export function ModifiersSheet({ item, primaryColor, radius = 'rounded', cardStyle = 'solid', onClose, onAddToCart }: any) {
-  const [extraTruffle, setExtraTruffle] = useState(false);
   if (!item) return null;
-  const finalPrice = item.basePrice + (extraTruffle ? 2.50 : 0);
+
+  // Resolve variants configuration safely
+  const variantsConfig: ItemVariantsConfig = useMemo(() => {
+    if (item.variantsConfig) return item.variantsConfig;
+    const { config } = extractVariantsFromDescription(item.desc || item.description || '', item.basePrice || 0);
+    return config;
+  }, [item]);
+
+  // Portions State: default to 'Full' or marked isDefault
+  const defaultPortion = useMemo(() => {
+    if (!variantsConfig.hasPortions || !variantsConfig.portions || variantsConfig.portions.length === 0) {
+      return { name: 'Full', price: item.basePrice || 0, isDefault: true };
+    }
+    return (
+      variantsConfig.portions.find(p => p.isDefault || p.name.toLowerCase() === 'full') ||
+      variantsConfig.portions[0]
+    );
+  }, [variantsConfig, item.basePrice]);
+
+  const [selectedPortion, setSelectedPortion] = useState<PortionOption>(defaultPortion);
+  const [selectedAddons, setSelectedAddons] = useState<AddonOption[]>([]);
+  const [selectedPrepTags, setSelectedPrepTags] = useState<string[]>([]);
+  const [customDishNote, setCustomDishNote] = useState<string>('');
+
+  useEffect(() => {
+    setSelectedPortion(defaultPortion);
+    setSelectedAddons([]);
+    setSelectedPrepTags([]);
+    setCustomDishNote('');
+  }, [item.id, defaultPortion]);
+
+  const portionPrice = variantsConfig.hasPortions && selectedPortion ? selectedPortion.price : item.basePrice;
+  const addonsTotal = selectedAddons.reduce((sum, a) => sum + (Number(a.price) || 0), 0);
+  const finalPrice = portionPrice + addonsTotal;
 
   const radSheetClass = cardStyle === 'brutalist' ? 'rounded-none' : radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-t-[3rem]' : 'rounded-t-3xl';
   const radBtnClass = cardStyle === 'brutalist' ? 'rounded-none' : radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-full' : 'rounded-2xl';
@@ -1051,36 +1095,218 @@ export function ModifiersSheet({ item, primaryColor, radius = 'rounded', cardSty
     ? findPalette(QSR_PALETTES, primaryColor, '#E53935')
     : { bg: '#fff', card: '#fff', accent: primaryColor, text: '#000', border: '#ddd', line: '#ddd' };
 
+  const handleAddCustomizedItem = () => {
+    triggerHaptic();
+    const isCustomPortion = variantsConfig.hasPortions && selectedPortion && selectedPortion.name.toLowerCase() !== 'full';
+    const formattedName = isCustomPortion ? `${item.name} (${selectedPortion.name})` : item.name;
+
+    const noteParts: string[] = [];
+    if (selectedPrepTags.length > 0) noteParts.push(selectedPrepTags.join(', '));
+    if (selectedAddons.length > 0) noteParts.push(`Add-ons: ${selectedAddons.map(a => a.name).join(', ')}`);
+    if (customDishNote.trim()) noteParts.push(customDishNote.trim());
+    const finalNotes = noteParts.join(' • ');
+
+    const customizedItem = {
+      ...item,
+      name: formattedName,
+      portionName: selectedPortion?.name,
+      notes: finalNotes,
+      basePrice: portionPrice,
+    };
+
+    onAddToCart(customizedItem, finalPrice, finalNotes);
+  };
+
+  const availableTags = variantsConfig.prepTags && variantsConfig.prepTags.length > 0
+    ? variantsConfig.prepTags
+    : COMMON_PREP_TAGS;
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end animate-in fade-in duration-200 pointer-events-auto">
       {/* Soft Background Blur */}
-      <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-xs" onClick={onClose} />
       
-      <div className={`relative w-full flex flex-col max-h-[85%] overflow-hidden animate-in slide-in-from-bottom-full duration-300 text-gray-900 shadow-2xl ${cardStyle === 'brutalist' ? 'bg-white border-t-4 border-l-4 border-r-4 border-black' : 'bg-white'} ${radSheetClass}`}>
+      <div className={`relative w-full flex flex-col max-h-[88%] overflow-hidden animate-in slide-in-from-bottom-full duration-300 text-gray-900 shadow-2xl ${cardStyle === 'brutalist' ? 'bg-white border-t-4 border-l-4 border-r-4 border-black' : 'bg-white'} ${radSheetClass}`}>
         
-        <div className="relative h-48 shrink-0">
-          <img src={item.img} className={`w-full h-full object-cover ${cardStyle === 'brutalist' ? 'border-b-4 border-black' : ''}`} />
-          <button onClick={onClose} className={`absolute top-4 right-4 w-8 h-8 flex items-center justify-center transition-colors ${cardStyle === 'brutalist' ? 'bg-white border-2 border-black text-black shadow-[2px_2px_0_0_#000] hover:shadow-[3px_3px_0_0_#000]' : 'bg-black/50 backdrop-blur-md text-white rounded-full hover:bg-black/70'}`}><X size={16} strokeWidth={cardStyle === 'brutalist' ? 3 : 2} /></button>
-        </div>
+        {item.img && (
+          <div className="relative h-44 shrink-0">
+            <img src={item.img} alt={item.name} className={`w-full h-full object-cover ${cardStyle === 'brutalist' ? 'border-b-4 border-black' : ''}`} />
+            <button onClick={onClose} className={`absolute top-4 right-4 w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${cardStyle === 'brutalist' ? 'bg-white border-2 border-black text-black shadow-[2px_2px_0_0_#000]' : 'bg-black/50 backdrop-blur-md text-white rounded-full hover:bg-black/70'}`}>
+              <X size={16} strokeWidth={cardStyle === 'brutalist' ? 3 : 2} />
+            </button>
+          </div>
+        )}
 
-        <div className="p-6 overflow-y-auto custom-scrollbar flex-1 space-y-6">
+        {/* Modal Header if no image */}
+        {!item.img && (
+          <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="font-bold text-base text-gray-900">{item.name}</h2>
+            <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200 flex items-center justify-center cursor-pointer">
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
+        <div className="p-5 overflow-y-auto custom-scrollbar flex-1 space-y-5">
+          {item.img && (
+            <div>
+              <div className="flex items-center justify-between">
+                <h2 className={`text-xl font-bold text-gray-900 ${cardStyle === 'brutalist' ? 'tracking-tight uppercase' : ''}`}>{item.name}</h2>
+                <span className="font-mono font-bold text-base text-gray-900">₹{item.basePrice}</span>
+              </div>
+              {item.desc && (
+                <p className={`text-xs mt-1.5 leading-relaxed ${cardStyle === 'brutalist' ? 'text-black font-medium' : 'text-gray-500'}`}>{item.desc}</p>
+              )}
+            </div>
+          )}
+
+          {/* Portion Size Selection */}
+          {variantsConfig.hasPortions && variantsConfig.portions && variantsConfig.portions.length > 0 && (
+            <div className="space-y-2.5">
+              <h3 className={`text-[11px] font-bold uppercase tracking-wider flex items-center justify-between ${cardStyle === 'brutalist' ? 'text-black' : 'text-gray-500'}`}>
+                <span>Choose Portion Size</span>
+                <span className="text-[10px] text-[#E46254] font-semibold">Required</span>
+              </h3>
+              <div className="grid grid-cols-2 gap-2">
+                {variantsConfig.portions.map(p => {
+                  const isSel = selectedPortion?.name === p.name;
+                  const isFull = p.name.toLowerCase() === 'full';
+                  return (
+                    <button
+                      key={p.name}
+                      type="button"
+                      onClick={() => { triggerHaptic([40]); setSelectedPortion(p); }}
+                      className={`p-3 rounded-2xl border text-left transition-all flex items-center justify-between cursor-pointer ${
+                        isSel
+                          ? cardStyle === 'brutalist'
+                            ? 'border-4 border-black bg-yellow-300 text-black shadow-[3px_3px_0_0_#000]'
+                            : 'border-zinc-900 bg-zinc-900 text-white shadow-xs'
+                          : cardStyle === 'brutalist'
+                          ? 'border-2 border-black bg-white hover:bg-gray-50'
+                          : 'border-gray-200 bg-gray-50/70 hover:bg-gray-100/70 text-gray-800'
+                      }`}
+                    >
+                      <div>
+                        <p className="font-bold text-xs">{p.name}</p>
+                        {isFull && (
+                          <p className={`text-[9.5px] ${isSel ? 'text-zinc-300' : 'text-gray-400'}`}>Base Price</p>
+                        )}
+                      </div>
+                      <span className={`font-mono font-bold text-xs ${isSel ? 'text-amber-300' : 'text-gray-900'}`}>
+                        ₹{p.price}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Add-ons & Extras Selection */}
+          {variantsConfig.hasAddons && variantsConfig.addons && variantsConfig.addons.length > 0 && (
+            <div className="space-y-2">
+              <h3 className={`text-[11px] font-bold uppercase tracking-wider ${cardStyle === 'brutalist' ? 'text-black' : 'text-gray-500'}`}>
+                Add-ons & Extras
+              </h3>
+              <div className="space-y-1.5">
+                {variantsConfig.addons.map(addon => {
+                  const isSel = selectedAddons.some(a => a.name === addon.name || a.id === addon.id);
+                  return (
+                    <button
+                      key={addon.id || addon.name}
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic([40]);
+                        if (isSel) {
+                          setSelectedAddons(prev => prev.filter(a => a.name !== addon.name));
+                        } else {
+                          setSelectedAddons(prev => [...prev, addon]);
+                        }
+                      }}
+                      className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between cursor-pointer ${
+                        isSel
+                          ? cardStyle === 'brutalist'
+                            ? 'border-3 border-black bg-amber-100 font-bold shadow-[2px_2px_0_0_#000]'
+                            : 'border-amber-300 bg-amber-50/80 text-amber-950 font-medium'
+                          : cardStyle === 'brutalist'
+                          ? 'border-2 border-black bg-white hover:bg-gray-50'
+                          : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`w-4 h-4 rounded flex items-center justify-center text-[10px] ${
+                          isSel ? 'bg-amber-600 text-white' : 'border border-gray-300'
+                        }`}>
+                          {isSel && <Check size={10} strokeWidth={3} />}
+                        </div>
+                        <span className="text-xs">{addon.name}</span>
+                      </div>
+                      <span className="font-mono text-xs font-semibold text-gray-600">
+                        +₹{addon.price}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 1-Tap Kitchen Prep Instructions */}
+          <div className="space-y-2">
+            <h3 className={`text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${cardStyle === 'brutalist' ? 'text-black' : 'text-gray-500'}`}>
+              <ChefHat size={12} className="text-[#E46254]" />
+              <span>Cooking Preferences (1-Tap)</span>
+            </h3>
+            <div className="flex flex-wrap gap-1.5">
+              {availableTags.map(tag => {
+                const isSel = selectedPrepTags.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic([30]);
+                      if (isSel) {
+                        setSelectedPrepTags(prev => prev.filter(t => t !== tag));
+                      } else {
+                        setSelectedPrepTags(prev => [...prev, tag]);
+                      }
+                    }}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
+                      isSel
+                        ? 'bg-[#E46254] text-white border-[#E46254] shadow-2xs font-semibold'
+                        : cardStyle === 'brutalist'
+                        ? 'border border-black bg-white hover:bg-gray-100 text-black'
+                        : 'bg-gray-100 hover:bg-gray-200 border-gray-200 text-gray-700'
+                    }`}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Special Instructions Note Input */}
           <div>
-            <h2 className={`text-2xl font-bold text-gray-900 ${cardStyle === 'brutalist' ? 'tracking-tight uppercase' : ''}`}>{item.name}</h2>
-            <p className={`text-sm mt-2 leading-relaxed ${cardStyle === 'brutalist' ? 'text-black font-medium' : 'text-gray-500'}`}>{item.desc}</p>
-          </div>
-          <div className="space-y-3">
-            <h3 className={`text-xs font-bold uppercase tracking-wider ${cardStyle === 'brutalist' ? 'text-black' : 'text-gray-400'}`}>Customizations</h3>
-            <label className={`flex items-center justify-between p-4 cursor-pointer transition-all ${cardStyle === 'brutalist' ? 'border-4 border-black bg-white hover:bg-gray-100 shadow-[4px_4px_0_0_#000]' : 'border border-gray-200 hover:bg-gray-50'} ${radBtnClass}`}>
-              <span className={`text-sm ${cardStyle === 'brutalist' ? 'font-black uppercase' : 'font-semibold text-gray-700'}`}>Extra Truffle (+$2.50)</span>
-              <input type="checkbox" checked={extraTruffle} onChange={(e) => setExtraTruffle(e.target.checked)} className={`w-6 h-6 accent-black rounded-none ${cardStyle === 'brutalist' ? 'border-2 border-black' : ''}`} />
+            <label className={`block text-[11px] font-bold uppercase tracking-wider mb-1 ${cardStyle === 'brutalist' ? 'text-black' : 'text-gray-500'}`}>
+              Special Note
             </label>
+            <input
+              type="text"
+              placeholder="e.g., Extra hot, less salt, sauce on the side..."
+              value={customDishNote}
+              onChange={e => setCustomDishNote(e.target.value)}
+              className="w-full px-3 py-2 text-xs border border-gray-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 bg-gray-50 font-medium"
+            />
           </div>
         </div>
 
-        <div className={`p-5 shrink-0 ${cardStyle === 'brutalist' ? 'bg-white border-t-[3px] border-black' : 'bg-gray-50 border-t border-gray-100'}`} style={cardStyle === 'brutalist' ? { backgroundColor: activePalette.bg, borderColor: activePalette.border } : {}}>
+        {/* Modal Bottom CTA */}
+        <div className={`p-4 shrink-0 border-t ${cardStyle === 'brutalist' ? 'bg-white border-black border-t-4' : 'bg-gray-50 border-gray-100'}`}>
           <button 
-            onClick={() => { triggerHaptic(); onAddToCart(item, finalPrice); }} 
-            className={`w-full py-4 px-5 font-bold flex items-center justify-between transition-transform active:translate-y-0 ${cardStyle === 'brutalist' ? 'rounded-full border-[3px] hover:-translate-y-[2px] font-stencil text-2xl tracking-widest' : `shadow-md text-base hover:opacity-90 active:scale-[0.98] ${radBtnClass}`}`}
+            onClick={handleAddCustomizedItem}
+            className={`w-full py-3.5 px-5 font-bold flex items-center justify-between transition-transform active:translate-y-0 cursor-pointer ${cardStyle === 'brutalist' ? 'rounded-full border-[3px] hover:-translate-y-[2px] font-stencil text-2xl tracking-widest' : `shadow-md text-base hover:opacity-90 active:scale-[0.98] ${radBtnClass}`}`}
             style={cardStyle === 'brutalist' ? { 
               backgroundColor: activePalette.accent, 
               color: activePalette.text, 
@@ -1089,7 +1315,7 @@ export function ModifiersSheet({ item, primaryColor, radius = 'rounded', cardSty
             } : { backgroundColor: primaryColor, color: '#fff' }}
           >
             <span>Add to Order</span>
-            <span>${finalPrice.toFixed(2)}</span>
+            <span className="font-mono">₹{finalPrice.toFixed(0)}</span>
           </button>
         </div>
       </div>
@@ -1121,7 +1347,6 @@ export function CartSheet({
   runningGrandTotal = 0,
   activeRoundsCount = 0
 }: any) {
-  const [step, setStep] = useState<'cart' | 'checkout'>('cart');
   const [name, setName] = useState(savedCustomerName || '');
   const [phone, setPhone] = useState(savedCustomerPhone || '');
   const [note, setNote] = useState('');
@@ -1137,15 +1362,21 @@ export function CartSheet({
   const subtotal = (cart || []).reduce((acc: number, curr: any) => acc + curr.price, 0);
 
   const groupedCart = useMemo(() => {
-    const map = new Map<string, { item: any; count: number; unitPrice: number; totalPrice: number }>();
+    const map = new Map<string, { item: any; count: number; unitPrice: number; totalPrice: number; notes?: string }>();
     for (const c of (cart || [])) {
-      const key = c.item?.id || c.item?.name || 'unknown';
+      const key = `${c.item?.id || c.item?.name || 'unknown'}_${c.item?.portionName || ''}_${c.item?.notes || c.notes || ''}`;
       const existing = map.get(key);
       if (existing) {
         existing.count += 1;
         existing.totalPrice += c.price;
       } else {
-        map.set(key, { item: c.item, count: 1, unitPrice: c.price, totalPrice: c.price });
+        map.set(key, { 
+          item: c.item, 
+          count: 1, 
+          unitPrice: c.price, 
+          totalPrice: c.price,
+          notes: c.item?.notes || c.notes 
+        });
       }
     }
     return Array.from(map.values());
@@ -1156,7 +1387,6 @@ export function CartSheet({
   const handleClose = () => {
     onClose();
     setTimeout(() => {
-      setStep('cart');
       if (!savedCustomerName) setName('');
       if (!savedCustomerPhone) setPhone('');
       setNote('');
@@ -1179,13 +1409,13 @@ export function CartSheet({
     ? { bg: '#fff', card: '#fff', accent: '#000', text: '#000', border: '#000', line: '#000' }
     : { bg: '#fff', card: '#fff', accent: primaryColor, text: '#000', border: '#ddd', line: '#ddd' };
 
-  const handleCheckoutSubmit = async () => {
+  const handleDirectFireToKitchen = async () => {
     const finalCustomerPhone = (phone || savedCustomerPhone || '').trim();
     const finalCustomerName = (name || savedCustomerName || '').trim();
 
-    if (!hasActiveSession) {
+    if (!hasActiveSession && (!savedCustomerName || !savedCustomerPhone)) {
       if (!finalCustomerName) {
-        setInputError('Please enter your name to proceed.');
+        setInputError('Please enter your name to fire the order.');
         return;
       }
       const digits = finalCustomerPhone.replace(/\D/g, '');
@@ -1224,380 +1454,293 @@ export function CartSheet({
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end animate-in fade-in duration-200 pointer-events-auto">
       <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm" onClick={handleClose} />
-      <div className={`relative w-full flex flex-col max-h-[90%] overflow-hidden animate-in slide-in-from-bottom-full duration-300 text-gray-900 shadow-2xl ${cardStyle === 'brutalist' ? 'bg-white border-t-4 border-l-4 border-r-4 border-black' : 'bg-white'} ${radSheetClass}`}>
+      <div className={`relative w-full flex flex-col max-h-[92%] overflow-hidden animate-in slide-in-from-bottom-full duration-300 text-gray-900 shadow-2xl ${cardStyle === 'brutalist' ? 'bg-white border-t-4 border-l-4 border-r-4 border-black' : 'bg-white'} ${radSheetClass}`}>
         
         {/* HEADER */}
-        <div className={`p-5 flex justify-between items-center ${cardStyle === 'brutalist' ? 'border-b-4 border-black' : 'border-b border-gray-100'}`}>
+        <div className={`p-4 px-5 flex justify-between items-center ${cardStyle === 'brutalist' ? 'border-b-4 border-black' : 'border-b border-gray-100'}`}>
           <div>
             <h2 className={`font-extrabold text-lg ${cardStyle === 'brutalist' ? 'uppercase tracking-tighter' : 'tracking-tight'}`}>
-              {step === 'cart' 
-                ? hasActiveSession ? `Round #${roundNumber} Cart (${cart.length})` : `Your Cart (${cart.length})` 
-                : hasActiveSession ? `Review Round #${roundNumber} • Table ${tableNo || ''}` : `Review Order • Table ${tableNo || ''}`}
+              {hasActiveSession ? `Round #${roundNumber} Cart (${cart.length})` : `Your Cart (${cart.length})`}
             </h2>
-            {step === 'cart' ? (
-              <p className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1.5 mt-0.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                {hasActiveSession ? 'Adding items to your live table tab' : 'Live synced with your table'}
-              </p>
-            ) : (
-              <p className="text-[11px] text-zinc-500 font-medium mt-0.5">
-                {hasActiveSession ? 'Dishes fire directly to the kitchen · Pay at the end of dining' : 'Enter your details once · Settle bill when finished dining'}
-              </p>
-            )}
+            <p className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              {hasActiveSession ? 'Fires directly to kitchen · Added to live tab' : 'Dine First • Pay at the End'}
+            </p>
           </div>
-          {step === 'checkout' ? (
-            <div className="flex items-center gap-2">
-              <button 
-                onClick={() => setStep('cart')} 
-                className="text-xs font-bold text-gray-500 hover:text-gray-900 cursor-pointer px-2 py-1 rounded-lg hover:bg-gray-100 transition-colors"
-              >
-                Back
-              </button>
-              <button 
-                onClick={handleClose} 
-                className={`w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${cardStyle === 'brutalist' ? 'bg-white border-2 border-black text-black' : 'rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
-              >
-                <X size={16} />
-              </button>
-            </div>
-          ) : (
-            <button 
-              onClick={handleClose} 
-              className={`w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${cardStyle === 'brutalist' ? 'bg-white border-2 border-black text-black' : 'rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
-            >
-              <X size={16} />
-            </button>
-          )}
+          <button 
+            onClick={handleClose} 
+            className={`w-8 h-8 flex items-center justify-center transition-colors cursor-pointer ${cardStyle === 'brutalist' ? 'bg-white border-2 border-black text-black' : 'rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+          >
+            <X size={16} />
+          </button>
         </div>
 
         {/* SCROLLABLE BODY */}
-        <div className={`p-6 overflow-y-auto custom-scrollbar flex-1 space-y-4 ${cardStyle === 'brutalist' ? 'font-mono' : ''}`}>
+        <div className={`p-5 overflow-y-auto custom-scrollbar flex-1 space-y-4 ${cardStyle === 'brutalist' ? 'font-mono' : ''}`}>
           
-          {/* STEP 1: CART */}
-          {step === 'cart' && (
-            <>
-              {hasActiveSession && activeRoundsCount > 0 && (
-                <div className="p-3.5 bg-zinc-900 text-white rounded-2xl flex items-center justify-between shadow-xs mb-2 border border-white/10">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                    <div>
-                      <p className="text-[10.5px] font-bold text-zinc-300 uppercase tracking-wider">
-                        Running Table Tab
-                      </p>
-                      <p className="text-[12.5px] font-extrabold text-white">
-                        {activeRoundsCount} Round{activeRoundsCount > 1 ? 's' : ''} Already Placed
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] font-black tabular-nums text-emerald-400">
-                      ₹{runningGrandTotal.toFixed(2)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onClose();
-                        if (onOpenBill) onOpenBill();
-                      }}
-                      className="px-2.5 py-1 text-[11px] font-bold bg-white/15 hover:bg-white/25 active:bg-white/20 text-white rounded-xl transition-all cursor-pointer border border-white/15"
-                    >
-                      View Bill
-                    </button>
-                  </div>
+          {hasActiveSession && activeRoundsCount > 0 && (
+            <div className="p-3.5 bg-zinc-900 text-white rounded-2xl flex items-center justify-between shadow-xs border border-white/10">
+              <div className="flex items-center gap-2.5">
+                <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <div>
+                  <p className="text-[10px] font-bold text-zinc-300 uppercase tracking-wider">
+                    Running Table Tab
+                  </p>
+                  <p className="text-[12px] font-extrabold text-white">
+                    {activeRoundsCount} Round{activeRoundsCount > 1 ? 's' : ''} Already Placed
+                  </p>
                 </div>
-              )}
-
-              {cart.length === 0 ? (
-                <div className="py-12 flex flex-col items-center justify-center text-center">
-                  <div className="w-12 h-12 rounded-full bg-gray-100 text-gray-400 flex items-center justify-center mb-3">
-                    <Utensils size={20} />
-                  </div>
-                  <p className="text-sm font-bold text-gray-800">Your cart is empty</p>
-                  <p className="text-xs text-gray-400 mt-1">Add items from the menu to get started</p>
-                </div>
-              ) : (
-                <>
-                  <div className="space-y-2.5">
-                    {groupedCart.map((g, idx) => (
-                      <div 
-                        key={g.item?.id || idx} 
-                        className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${
-                          cardStyle === 'brutalist' 
-                            ? 'bg-white border-2 border-black rounded-none shadow-[2px_2px_0_0_#000]' 
-                            : 'bg-zinc-50/80 border-zinc-200/70 shadow-xs'
-                        }`}
-                      >
-                        <div className="flex-1 pr-3 min-w-0">
-                          <h4 className={`text-[14px] truncate ${cardStyle === 'brutalist' ? 'font-black uppercase' : 'font-bold text-zinc-900'}`}>
-                            {g.item?.name}
-                          </h4>
-                          <span className="text-[11.5px] font-semibold text-zinc-400 tabular-nums">
-                            ₹{g.unitPrice.toFixed(0)} each
-                          </span>
-                        </div>
-                        
-                        <div className="flex items-center gap-3 shrink-0">
-                          {onUpdateQuantity && (
-                            <div className={`flex items-center gap-1 p-0.5 border ${
-                              cardStyle === 'brutalist' 
-                                ? 'border-black bg-white rounded-none' 
-                                : 'rounded-xl border-zinc-200 bg-white shadow-xs'
-                            }`}>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  triggerHaptic();
-                                  onUpdateQuantity(g.item, -1);
-                                }}
-                                className={`w-7 h-7 flex items-center justify-center text-xs font-black transition-all cursor-pointer active:scale-90 ${
-                                  cardStyle === 'brutalist'
-                                    ? 'bg-yellow-400 text-black border border-black'
-                                    : 'rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-800'
-                                }`}
-                              >
-                                -
-                              </button>
-                              <span className="w-6 text-center font-black text-xs text-zinc-900 tabular-nums select-none">
-                                {g.count}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  triggerHaptic();
-                                  onUpdateQuantity(g.item, 1);
-                                }}
-                                className={`w-7 h-7 flex items-center justify-center text-xs font-black transition-all cursor-pointer active:scale-90 ${
-                                  cardStyle === 'brutalist'
-                                    ? 'bg-yellow-400 text-black border border-black'
-                                    : 'rounded-lg text-white shadow-xs'
-                                }`}
-                                style={cardStyle !== 'brutalist' ? { backgroundColor: primaryColor } : {}}
-                              >
-                                +
-                              </button>
-                            </div>
-                          )}
-                          <span className={`text-[14.5px] tabular-nums min-w-[55px] text-right ${cardStyle === 'brutalist' ? 'font-black text-black' : 'font-black text-zinc-900'}`}>
-                            ₹{g.totalPrice.toFixed(0)}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Cart Value Booster Bar */}
-                  {promotionsConfig?.cartBoosterEnabled && (
-                    <div className="p-3 bg-zinc-50 border border-zinc-200/80 rounded-2xl">
-                      {boosterEligible ? (
-                        <div className="flex items-center justify-between text-xs font-semibold text-zinc-900">
-                          <div className="flex items-center gap-1.5">
-                            <Check size={14} className="text-emerald-600 shrink-0" />
-                            <span>Flat ₹{promotionsConfig.cartBoosterDiscount || 100} Privilege Applied</span>
-                          </div>
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
-                            -₹{promotionsConfig.cartBoosterDiscount || 100}
-                          </span>
-                        </div>
-                      ) : (
-                        <div>
-                          <div className="flex justify-between items-center text-xs font-medium text-zinc-600 mb-1.5">
-                            <span>Cart Privilege</span>
-                            <span className="font-semibold text-zinc-900">
-                              Add ₹{((promotionsConfig.cartBoosterMinSpend || 1000) - subtotal).toFixed(0)} more for Flat ₹{promotionsConfig.cartBoosterDiscount || 100} OFF
-                            </span>
-                          </div>
-                          <div className="w-full h-1.5 bg-zinc-200 rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-zinc-900 rounded-full transition-all duration-300"
-                              style={{ width: `${Math.min(100, (subtotal / (promotionsConfig.cartBoosterMinSpend || 1000)) * 100)}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="pt-3 space-y-2.5 text-sm font-medium">
-                    <div className={`flex justify-between ${cardStyle === 'brutalist' ? 'text-black font-bold uppercase' : 'text-gray-500'}`}>
-                      <span>Subtotal</span>
-                      <span>₹{subtotal.toFixed(2)}</span>
-                    </div>
-
-                    {boosterDiscount > 0 && (
-                      <div className="flex justify-between text-emerald-700 font-semibold">
-                        <span>Cart Value Booster</span>
-                        <span>-₹{boosterDiscount.toFixed(2)}</span>
-                      </div>
-                    )}
-
-                    <div className={`flex justify-between ${cardStyle === 'brutalist' ? 'text-black font-bold uppercase' : 'text-gray-500'}`}>
-                      <span>GST / Tax (5%)</span>
-                      <span>₹{((subtotal - boosterDiscount) * 0.05).toFixed(2)}</span>
-                    </div>
-
-                    <div className={`flex justify-between text-xl font-extrabold pt-3 text-gray-900 ${cardStyle === 'brutalist' ? 'border-t-4 border-black uppercase' : 'border-t border-gray-100'}`}>
-                      <span>Round Total</span>
-                      <span>₹{((subtotal - boosterDiscount) * 1.05).toFixed(2)}</span>
-                    </div>
-                  </div>
-                </>
-              )}
-            </>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[13px] font-black tabular-nums text-emerald-400">
+                  ₹{runningGrandTotal.toFixed(0)}
+                </span>
+                {onOpenBill && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenBill();
+                    }}
+                    className="px-2.5 py-1 text-[11px] font-bold bg-white/15 hover:bg-white/25 text-white rounded-xl transition-all cursor-pointer border border-white/15"
+                  >
+                    View Bill
+                  </button>
+                )}
+              </div>
+            </div>
           )}
 
-          {/* STEP 2: REVIEW ORDER & SEND TO KITCHEN */}
-          {step === 'checkout' && (
-            <div className="space-y-4 animate-in slide-in-from-right-4 duration-300">
-              {/* Dine First, Pay Later Assurance Badge */}
+          {cart.length === 0 ? (
+            <div className="py-12 flex flex-col items-center justify-center text-center">
+              <div className="w-12 h-12 rounded-full bg-gray-100 text-gray-400 flex items-center justify-center mb-3">
+                <Utensils size={20} />
+              </div>
+              <p className="text-sm font-bold text-gray-800">Your cart is empty</p>
+              <p className="text-xs text-gray-400 mt-1">Tap dishes on the menu to add items</p>
+            </div>
+          ) : (
+            <>
+              {/* DISHES LIST */}
+              <div className="space-y-2">
+                {groupedCart.map((g, idx) => (
+                  <div 
+                    key={g.item?.id ? `${g.item.id}_${idx}` : idx} 
+                    className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${
+                      cardStyle === 'brutalist' 
+                        ? 'bg-white border-2 border-black rounded-none shadow-[2px_2px_0_0_#000]' 
+                        : 'bg-zinc-50/80 border-zinc-200/70 shadow-xs'
+                    }`}
+                  >
+                    <div className="flex-1 pr-3 min-w-0">
+                      <h4 className={`text-[13.5px] truncate leading-tight ${cardStyle === 'brutalist' ? 'font-black uppercase' : 'font-bold text-zinc-900'}`}>
+                        {g.item?.name}
+                      </h4>
+                      {g.notes && (
+                        <p className="text-[11px] text-amber-800 font-medium leading-snug mt-0.5 truncate">
+                          {g.notes}
+                        </p>
+                      )}
+                      <span className="text-[11px] font-semibold text-zinc-400 tabular-nums">
+                        ₹{g.unitPrice.toFixed(0)} each
+                      </span>
+                    </div>
+                    
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      {onUpdateQuantity && (
+                        <div className={`flex items-center gap-1 p-0.5 border ${
+                          cardStyle === 'brutalist' 
+                            ? 'border-black bg-white rounded-none' 
+                            : 'rounded-xl border-zinc-200 bg-white shadow-xs'
+                        }`}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic();
+                              onUpdateQuantity(g.item, -1);
+                            }}
+                            className={`w-6 h-6 flex items-center justify-center text-xs font-black transition-all cursor-pointer active:scale-90 ${
+                              cardStyle === 'brutalist'
+                                ? 'bg-yellow-400 text-black border border-black'
+                                : 'rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-800'
+                            }`}
+                          >
+                            -
+                          </button>
+                          <span className="w-5 text-center font-black text-xs text-zinc-900 tabular-nums select-none">
+                            {g.count}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic();
+                              onUpdateQuantity(g.item, 1);
+                            }}
+                            className={`w-6 h-6 flex items-center justify-center text-xs font-black transition-all cursor-pointer active:scale-90 ${
+                              cardStyle === 'brutalist'
+                                ? 'bg-yellow-400 text-black border border-black'
+                                : 'rounded-lg text-white shadow-xs'
+                            }`}
+                            style={cardStyle !== 'brutalist' ? { backgroundColor: primaryColor } : {}}
+                          >
+                            +
+                          </button>
+                        </div>
+                      )}
+                      <span className={`text-[13.5px] tabular-nums min-w-[50px] text-right ${cardStyle === 'brutalist' ? 'font-black text-black' : 'font-black text-zinc-900'}`}>
+                        ₹{g.totalPrice.toFixed(0)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* DINE FIRST, PAY AT THE END ASSURANCE BADGE */}
               <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200/80 flex items-center gap-3 text-emerald-950 text-xs">
                 <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
                   <Sparkles size={16} />
                 </div>
                 <div className="min-w-0">
-                  <p className="font-bold text-[12.5px] text-emerald-900">Dine First • Pay at the End</p>
+                  <p className="font-bold text-[12px] text-emerald-900">Dine First • Pay at the End</p>
                   <p className="text-[11px] text-emerald-700 font-medium leading-snug">
                     {hasActiveSession 
-                      ? `Round #${roundNumber} is fired straight to the chef. All rounds combine into your final table bill.`
-                      : 'Your order goes straight to the kitchen. Settle your final bill whenever you finish dining.'}
+                      ? `Round #${roundNumber} is fired straight to the chef. All rounds combine into your final table bill.` 
+                      : 'Your dishes fire directly to the kitchen. Settle your final table bill whenever you finish dining.'}
                   </p>
                 </div>
               </div>
 
-              {hasActiveSession ? (
-                /* Round 2+ : Customer is already seated */
-                <div className="space-y-4">
-                  <div className="p-3.5 bg-zinc-50 border border-zinc-200/80 rounded-2xl flex items-center justify-between">
-                    <div>
-                      <p className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Active Table Session</p>
-                      <p className="text-[14px] font-bold text-zinc-800">
-                        {savedCustomerName ? `${savedCustomerName} • ` : ''}Table {tableNo || ''} (Round #{roundNumber})
-                      </p>
-                    </div>
-                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      Live Tab
-                    </span>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">Special Cooking Instructions (Optional)</label>
-                    <textarea 
-                      value={note} 
-                      onChange={e => setNote(e.target.value)} 
-                      placeholder="e.g., Serve hot, extra spicy, less ice..." 
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-semibold resize-none h-20 text-sm" 
-                    />
-                  </div>
-                </div>
-              ) : (
-                /* Round 1 : Enter Name & Phone once */
-                <div className="space-y-4">
+              {/* GUEST INFO (ROUND 1 IF NOT ALREADY SAVED) */}
+              {!hasActiveSession && (!savedCustomerName || !savedCustomerPhone) && (
+                <div className="space-y-3 p-3.5 bg-zinc-50 border border-zinc-200/80 rounded-2xl">
                   {inputError && (
-                    <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold rounded-xl animate-in fade-in">
+                    <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold rounded-xl animate-in fade-in">
                       {inputError}
                     </div>
                   )}
-                  <div>
-                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">Your Name</label>
-                    <input 
-                      type="text" 
-                      value={name} 
-                      onChange={e => { setName(e.target.value); setInputError(null); }} 
-                      placeholder="Enter your name" 
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-semibold text-sm" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">Mobile Number</label>
-                    <input 
-                      type="tel" 
-                      maxLength={10}
-                      value={phone} 
-                      onChange={e => { setPhone(e.target.value.replace(/\D/g, '')); setInputError(null); }} 
-                      placeholder="10-digit mobile number" 
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-semibold text-sm" 
-                    />
-                    <p className="text-[11px] text-zinc-400 mt-1">Your orders and table tab will be linked to this number.</p>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">Special Cooking Instructions (Optional)</label>
-                    <textarea 
-                      value={note} 
-                      onChange={e => setNote(e.target.value)} 
-                      placeholder="e.g., Less spicy, no onions" 
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-semibold resize-none h-16 text-sm" 
-                    />
-                  </div>
-
-                  {businessType === 'HOTEL' && (
+                  <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">Payment Method</label>
-                      <button onClick={() => setPayMethod('ROOM_CHARGE')} className={`w-full py-3 text-sm font-bold border-2 rounded-xl transition-all ${payMethod === 'ROOM_CHARGE' ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-200 text-gray-500 bg-transparent'}`}>Charge to Room</button>
+                      <label className="block text-[10.5px] font-bold text-gray-500 uppercase tracking-wider mb-1">Your Name</label>
+                      <input 
+                        type="text" 
+                        value={name} 
+                        onChange={e => { setName(e.target.value); setInputError(null); }} 
+                        placeholder="Enter name" 
+                        className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-semibold text-xs" 
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10.5px] font-bold text-gray-500 uppercase tracking-wider mb-1">Mobile Number</label>
+                      <input 
+                        type="tel" 
+                        maxLength={10}
+                        value={phone} 
+                        onChange={e => { setPhone(e.target.value.replace(/\D/g, '')); setInputError(null); }} 
+                        placeholder="10-digit number" 
+                        className="w-full px-3 py-2 bg-white border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-semibold text-xs font-mono" 
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* SPECIAL COOKING INSTRUCTIONS */}
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                  <ChefHat size={13} className="text-zinc-600" />
+                  <span>Cooking Instructions for Chef (Optional)</span>
+                </label>
+                <textarea 
+                  value={note} 
+                  onChange={e => setNote(e.target.value)} 
+                  placeholder="e.g. Serve hot, extra spicy, less salt, less ice in drinks..." 
+                  className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-medium resize-none h-16 text-xs" 
+                />
+              </div>
+
+              {/* CART BOOSTER PRIVILEGE */}
+              {promotionsConfig?.cartBoosterEnabled && (
+                <div className="p-3 bg-zinc-50 border border-zinc-200/80 rounded-2xl">
+                  {boosterEligible ? (
+                    <div className="flex items-center justify-between text-xs font-semibold text-zinc-900">
+                      <div className="flex items-center gap-1.5">
+                        <Check size={14} className="text-emerald-600 shrink-0" />
+                        <span>Flat ₹{promotionsConfig.cartBoosterDiscount || 100} Privilege Applied</span>
+                      </div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
+                        -₹{promotionsConfig.cartBoosterDiscount || 100}
+                      </span>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="flex justify-between items-center text-xs font-medium text-zinc-600 mb-1.5">
+                        <span>Cart Privilege</span>
+                        <span className="font-semibold text-zinc-900">
+                          Add ₹{((promotionsConfig.cartBoosterMinSpend || 1000) - subtotal).toFixed(0)} more for Flat ₹{promotionsConfig.cartBoosterDiscount || 100} OFF
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-zinc-200 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-zinc-900 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.min(100, (subtotal / (promotionsConfig.cartBoosterMinSpend || 1000)) * 100)}%` }}
+                        />
+                      </div>
                     </div>
                   )}
                 </div>
               )}
 
-              {/* Round Summary */}
-              <div className="pt-3 border-t border-gray-100 space-y-2 text-xs font-medium">
+              {/* BILL SUMMARY */}
+              <div className="pt-2 space-y-1.5 text-xs font-medium">
                 <div className="flex justify-between text-gray-500">
-                  <span>Round Subtotal ({cart.length} {cart.length === 1 ? 'item' : 'items'})</span>
-                  <span>₹{subtotal.toFixed(2)}</span>
+                  <span>Round Subtotal</span>
+                  <span className="font-mono">₹{subtotal.toFixed(2)}</span>
                 </div>
 
                 {boosterDiscount > 0 && (
                   <div className="flex justify-between text-emerald-700 font-semibold">
                     <span>Cart Value Booster</span>
-                    <span>-₹{boosterDiscount.toFixed(2)}</span>
+                    <span className="font-mono">-₹{boosterDiscount.toFixed(2)}</span>
                   </div>
                 )}
 
                 <div className="flex justify-between text-gray-500">
-                  <span>GST / Tax (5%)</span>
-                  <span>₹{gstAmount.toFixed(2)}</span>
+                  <span>GST (5%)</span>
+                  <span className="font-mono">₹{gstAmount.toFixed(2)}</span>
                 </div>
 
-                <div className="flex justify-between text-base font-extrabold pt-2 border-t border-gray-100 text-gray-900">
+                <div className="flex justify-between text-sm font-extrabold pt-2 border-t border-gray-100 text-gray-900">
                   <span>Round Total</span>
-                  <span>₹{total.toFixed(2)}</span>
+                  <span className="font-mono">₹{total.toFixed(2)}</span>
                 </div>
               </div>
-            </div>
+            </>
           )}
 
         </div>
 
-        {/* BOTTOM ACTION BAR */}
-        {step === 'cart' && cart.length > 0 && (
-          <div className={`p-5 shrink-0 ${cardStyle === 'brutalist' ? 'bg-white border-t-[3px] border-black' : 'bg-gray-50 border-t border-gray-100'}`} style={cardStyle === 'brutalist' ? { backgroundColor: activePalette.bg, borderColor: activePalette.border } : {}}>
-            <button 
-              onClick={() => { triggerHaptic(); setStep('checkout'); }}
-              className={`w-full py-4 font-bold flex items-center justify-center gap-2 transition-transform active:translate-y-0 cursor-pointer ${cardStyle === 'brutalist' ? 'rounded-full border-[3px] hover:-translate-y-[2px] font-stencil text-2xl tracking-widest' : `shadow-md text-base hover:opacity-90 active:scale-[0.98] ${radBtnClass}`}`}
-              style={cardStyle === 'brutalist' ? { backgroundColor: activePalette.accent, color: activePalette.text, borderColor: activePalette.border, boxShadow: `4px 4px 0 0 ${activePalette.border}` } : { backgroundColor: primaryColor, color: '#fff' }}
-            >
-              <span>{hasActiveSession ? `Review Round #${roundNumber} • ₹${total.toFixed(2)}` : `Review Order • ₹${total.toFixed(2)}`}</span>
-            </button>
-          </div>
-        )}
-
-        {step === 'checkout' && (
-          <div className={`p-5 shrink-0 ${cardStyle === 'brutalist' ? 'bg-white border-t-[3px] border-black' : 'bg-gray-50 border-t border-gray-100'}`} style={cardStyle === 'brutalist' ? { backgroundColor: activePalette.bg, borderColor: activePalette.border } : {}}>
+        {/* BOTTOM ACTION BAR - DIRECT FIRE TO KITCHEN */}
+        {cart.length > 0 && (
+          <div className={`p-4 shrink-0 ${cardStyle === 'brutalist' ? 'bg-white border-t-[3px] border-black' : 'bg-gray-50 border-t border-gray-100'}`} style={cardStyle === 'brutalist' ? { backgroundColor: activePalette.bg, borderColor: activePalette.border } : {}}>
             <button 
               disabled={isSubmitting}
-              onClick={handleCheckoutSubmit}
-              className={`w-full py-4 font-bold flex items-center justify-center gap-2 transition-transform active:translate-y-0 cursor-pointer ${cardStyle === 'brutalist' ? 'rounded-full border-[3px] hover:-translate-y-[2px] font-stencil text-2xl tracking-widest' : `shadow-md text-base hover:opacity-90 active:scale-[0.98] ${radBtnClass}`}`}
+              onClick={handleDirectFireToKitchen}
+              className={`w-full py-4 px-5 font-bold flex items-center justify-between transition-transform active:translate-y-0 cursor-pointer ${cardStyle === 'brutalist' ? 'rounded-full border-[3px] hover:-translate-y-[2px] font-stencil text-2xl tracking-widest' : `shadow-md text-base hover:opacity-90 active:scale-[0.98] ${radBtnClass}`}`}
               style={cardStyle === 'brutalist' ? { backgroundColor: activePalette.accent, color: activePalette.text, borderColor: activePalette.border, boxShadow: `4px 4px 0 0 ${activePalette.border}` } : { backgroundColor: primaryColor, color: '#fff' }}
             >
               {isSubmitting ? (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center gap-2 w-full">
                   <Loader2 size={18} className="animate-spin" />
-                  <span>Sending to Kitchen...</span>
+                  <span>Firing to Kitchen...</span>
                 </div>
               ) : (
-                <span>
-                  {hasActiveSession 
-                    ? `Send Round #${roundNumber} to Kitchen • ₹${total.toFixed(2)}` 
-                    : `Send Order to Kitchen • ₹${total.toFixed(2)}`}
-                </span>
+                <>
+                  <span className="flex items-center gap-2">
+                    <Flame size={18} className="text-amber-300" />
+                    <span>{hasActiveSession ? `Fire Round #${roundNumber} to Kitchen` : 'Fire to Kitchen'}</span>
+                  </span>
+                  <span className="font-mono text-base font-extrabold">₹{total.toFixed(2)}</span>
+                </>
               )}
             </button>
           </div>

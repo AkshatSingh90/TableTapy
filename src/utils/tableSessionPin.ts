@@ -18,16 +18,19 @@ export function normalizeTableIdentifier(tableIdentifier: string): string {
 }
 
 /**
- * Generates a stable, friendly 4-digit numeric PIN from a table identifier using 32-bit FNV-1a.
+ * Generates a stable, friendly 4-digit numeric PIN from a table identifier and session seed using 32-bit FNV-1a.
  * Gives high entropy, uniform distribution, and identical output across all clients without network delays.
  */
-export function generateTablePin(tableIdentifier: string, _sessionSeed: string = ''): string {
+export function generateTablePin(tableIdentifier: string, sessionSeed: string = ''): string {
   const normTable = normalizeTableIdentifier(tableIdentifier);
   if (!normTable) return '1234';
 
+  const cleanSeed = (sessionSeed || '').trim().toLowerCase();
+  const input = cleanSeed ? `${normTable}_${cleanSeed}` : normTable;
+
   let hash = 2166136261 >>> 0;
-  for (let i = 0; i < normTable.length; i++) {
-    hash ^= normTable.charCodeAt(i);
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
     hash = Math.imul(hash, 16777619) >>> 0;
   }
 
@@ -37,18 +40,55 @@ export function generateTablePin(tableIdentifier: string, _sessionSeed: string =
 
 /**
  * Resolves the rock-solid PIN and seed for a table across both Captain and Customer views.
- * Unbreakable: guaranteed identical across Captain, Customer, POS, and KDS at all times.
+ * 1. While table has an active dining session, PIN is locked and stable across all rounds.
+ * 2. When a dining session is settled/paid, a fresh PIN is instantly derived from the settled order
+ *    so the departing customer cannot refresh back into the menu.
  */
 export function resolveTablePinAndSeed(
   tableName: string,
-  _activeTableOrders: any[] = [],
-  _historicalTableOrders: any[] = []
+  activeTableOrders: any[] = [],
+  historicalTableOrders: any[] = []
 ): { pin: string; seed: string } {
   const normTable = normalizeTableIdentifier(tableName);
-  const pin = generateTablePin(normTable);
+
+  // 1. If table has active unpaid orders in progress, check if any order already has [PIN:XXXX] saved
+  if (activeTableOrders && activeTableOrders.length > 0) {
+    for (const order of activeTableOrders) {
+      const pinMatch = (order.note || '').match(/\[PIN:(\d{4})\]/i);
+      if (pinMatch && pinMatch[1]) {
+        return {
+          pin: pinMatch[1],
+          seed: `pinned_${pinMatch[1]}`
+        };
+      }
+    }
+
+    // Anchor seed to the very first order of this active dining session
+    const firstActive = activeTableOrders[0];
+    const sessionMatch = (firstActive.note || '').match(/\[SESSION:([a-zA-Z0-9_-]+)\]/i);
+    const sessionTag = sessionMatch?.[1] || firstActive.id || 'active_first';
+    const activeSeed = `active_${sessionTag}`;
+    return {
+      pin: generateTablePin(normTable, activeSeed),
+      seed: activeSeed
+    };
+  }
+
+  // 2. If table is vacant or just settled, derive seed from the last completed/settled (PAID) order
+  const settledOrders = (historicalTableOrders || []).filter((o: any) => o.payment_status === 'PAID');
+  if (settledOrders.length > 0) {
+    const lastSettled = settledOrders[0];
+    const settledSeed = `settled_${lastSettled.id || lastSettled.created_at}`;
+    return {
+      pin: generateTablePin(normTable, settledSeed),
+      seed: settledSeed
+    };
+  }
+
+  // 3. Fallback initial table PIN
   return {
-    pin,
-    seed: `table_${normTable}_${pin}`
+    pin: generateTablePin(normTable, 'initial'),
+    seed: `initial_${normTable}`
   };
 }
 
