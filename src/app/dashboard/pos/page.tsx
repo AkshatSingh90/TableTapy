@@ -31,6 +31,10 @@ import {
   Percent,
   ChefHat,
   Tag,
+  Hash,
+  Delete,
+  CornerDownLeft,
+  SlidersHorizontal,
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
@@ -85,11 +89,14 @@ interface TableRound {
   source: "QR" | "STAFF" | "CAPTAIN";
   createdAt: string;
   items: Array<{
+    itemIndex: number;
     name: string;
     quantity: number;
     price: number;
     isVeg?: boolean;
     notes?: string;
+    isVoided?: boolean;
+    voidReason?: string;
   }>;
 }
 
@@ -98,6 +105,7 @@ interface TableSessionData {
   orders: OrderRecord[];
   rounds: TableRound[];
   allItems: Array<{
+    itemIndex: number;
     name: string;
     quantity: number;
     price: number;
@@ -106,6 +114,8 @@ interface TableSessionData {
     source: "QR" | "STAFF" | "CAPTAIN";
     roundNumber: number;
     orderId: string;
+    isVoided?: boolean;
+    voidReason?: string;
   }>;
   totalBill: number;
   customerName?: string;
@@ -146,7 +156,7 @@ export default function PosPage() {
   const [activeOrders, setActiveOrders] = useState<OrderRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Terminal Navigation & Filters
+  // Terminal Navigation & Floor Filters
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("DINE_IN");
   const [tableFilter, setTableFilter] = useState<"ALL" | "OCCUPIED" | "VACANT">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
@@ -160,34 +170,52 @@ export default function PosPage() {
   const [selectedDrawerCat, setSelectedDrawerCat] = useState("ALL");
   const [catalogVegFilter, setCatalogVegFilter] = useState<"ALL" | "VEG" | "NON_VEG">("ALL");
 
-  // Manual Punching / Staged Cart
+  // Multiplier / Rapid Numpad State
+  const [multiplierInput, setMultiplierInput] = useState<string>("");
+  const [selectedTicketItemId, setSelectedTicketItemId] = useState<string | null>(null);
+
+  // Manual Punching / Staged Cart (Lives directly on the Unified Ticket Stream)
   const [manualCart, setManualCart] = useState<NewStaffItem[]>([]);
   const [batchNote, setBatchNote] = useState("");
   const [manualCustomerName, setManualCustomerName] = useState("");
   const [manualCustomerPhone, setManualCustomerPhone] = useState("");
+  const [isGuestInfoModalOpen, setIsGuestInfoModalOpen] = useState(false);
 
-  // Dish Customizer State (Portions, Add-ons, Quick Prep Tags)
+  // Quick Dish Customizer Popover (For extra add-ons / instructions only)
   const [customizingDish, setCustomizingDish] = useState<MenuItem | null>(null);
   const [selectedPortion, setSelectedPortion] = useState<PortionOption | null>(null);
   const [selectedAddons, setSelectedAddons] = useState<AddonOption[]>([]);
   const [selectedPrepTags, setSelectedPrepTags] = useState<string[]>([]);
   const [customDishNote, setCustomDishNote] = useState<string>("");
 
+  // Item Voiding Modal State
+  const [voidingItemTarget, setVoidingItemTarget] = useState<{
+    orderId: string;
+    itemIndex: number;
+    name: string;
+    quantity: number;
+    price: number;
+  } | null>(null);
+  const [voidReason, setVoidReason] = useState<string>("Guest changed mind");
+  const [customVoidReason, setCustomVoidReason] = useState<string>("");
+
   // Settlement & Discount State
   const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [customDiscountRupees, setCustomDiscountRupees] = useState<string>("");
+  const [discountReason, setDiscountReason] = useState<string>("");
   const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Multi-Tender Split Payment State (Supports Cash, UPI, and Card simultaneously)
+  const [isSplitMode, setIsSplitMode] = useState(false);
+  const [splitCash, setSplitCash] = useState<string>("");
+  const [splitUpi, setSplitUpi] = useState<string>("");
+  const [splitCard, setSplitCard] = useState<string>("");
+
   // Table Transfer State
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [transferTargetTable, setTransferTargetTable] = useState<string>("");
-
-  // Split Tender State
-  const [isSplitMode, setIsSplitMode] = useState(false);
-  const [splitUpiAmount, setSplitUpiAmount] = useState<string>("");
-  const [splitCashAmount, setSplitCashAmount] = useState<string>("");
 
   // Table Bill Printed State (In-Memory tracking per session)
   const [printedTables, setPrintedTables] = useState<Set<string>>(new Set());
@@ -208,6 +236,7 @@ export default function PosPage() {
     subtotal?: number;
     discount?: number;
     tax?: number;
+    roundOff?: number;
     grandTotal?: number;
     paymentMethod?: string;
     time: string;
@@ -220,7 +249,7 @@ export default function PosPage() {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage(null);
-    }, 3200);
+    }, 3000);
   };
 
   /* ─── 1. Load Initial Core POS Data ──────────────────────────────── */
@@ -327,8 +356,12 @@ export default function PosPage() {
       if (e.key === "Escape") {
         if (customizingDish) {
           setCustomizingDish(null);
+        } else if (voidingItemTarget) {
+          setVoidingItemTarget(null);
         } else if (isTransferModalOpen) {
           setIsTransferModalOpen(false);
+        } else if (isGuestInfoModalOpen) {
+          setIsGuestInfoModalOpen(false);
         } else if (isPaymentDrawerOpen) {
           setIsPaymentDrawerOpen(false);
         } else {
@@ -338,7 +371,7 @@ export default function PosPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [customizingDish, isTransferModalOpen, isPaymentDrawerOpen]);
+  }, [customizingDish, voidingItemTarget, isTransferModalOpen, isGuestInfoModalOpen, isPaymentDrawerOpen]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
@@ -401,7 +434,6 @@ export default function PosPage() {
       };
 
       existing.orders.push(order);
-      existing.totalBill += Number(order.total || 0);
 
       if (order.status === "NEW") {
         existing.hasNewRound = true;
@@ -448,20 +480,37 @@ export default function PosPage() {
       }
 
       const roundIndex = existing.rounds.length + 1;
-      const roundItems: Array<{ name: string; quantity: number; price: number; isVeg?: boolean; notes?: string }> = [];
+      const roundItems: Array<{
+        itemIndex: number;
+        name: string;
+        quantity: number;
+        price: number;
+        isVeg?: boolean;
+        notes?: string;
+        isVoided?: boolean;
+        voidReason?: string;
+      }> = [];
 
       if (Array.isArray(order.items_json)) {
-        order.items_json.forEach((raw: any) => {
+        order.items_json.forEach((raw: any, idx: number) => {
           const itemObj = raw.item || raw;
+          const isVoided = Boolean(raw.isVoided || raw.is_voided || raw.voided);
           const parsedItem = {
+            itemIndex: idx,
             name: itemObj.name || "Custom Item",
             price: Number(raw.price || itemObj.basePrice || itemObj.base_price || 0),
             quantity: Number(raw.quantity || 1),
             isVeg: itemObj.isVeg ?? itemObj.is_veg ?? true,
             notes: raw.notes || raw.specialInstructions || "",
+            isVoided,
+            voidReason: raw.voidReason || raw.void_reason,
           };
 
           roundItems.push(parsedItem);
+
+          if (!isVoided) {
+            existing.totalBill += parsedItem.price * parsedItem.quantity;
+          }
 
           existing.allItems.push({
             ...parsedItem,
@@ -560,12 +609,16 @@ export default function PosPage() {
     }
     setManualCart([]);
     setBatchNote("");
+    setMultiplierInput("");
+    setSelectedTicketItemId(null);
     setIsPaymentDrawerOpen(false);
     setIsSplitMode(false);
-    setSplitUpiAmount("");
-    setSplitCashAmount("");
+    setSplitCash("");
+    setSplitUpi("");
+    setSplitCard("");
     setDiscountPercent(0);
     setCustomDiscountRupees("");
+    setDiscountReason("");
     setSelectedDrawerCat("ALL");
     setDishSearchQuery("");
   }, [activeTableModal]);
@@ -597,45 +650,53 @@ export default function PosPage() {
     });
   }, [menuItems, selectedDrawerCat, dishSearchQuery, catalogVegFilter]);
 
-  const handleDishClick = (dish: MenuItem) => {
-    const hasVariants = Boolean(
-      dish.variantsConfig?.hasPortions ||
-      dish.variantsConfig?.hasAddons ||
-      (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
-    );
-
-    if (hasVariants) {
-      const defaultPortion =
-        dish.variantsConfig?.portions?.find(
-          (p) => p.isDefault || p.name.toLowerCase() === "full"
-        ) ||
-        dish.variantsConfig?.portions?.[0] || {
-          name: "Full",
-          price: dish.base_price,
-          isDefault: true,
-        };
-
-      setCustomizingDish(dish);
-      setSelectedPortion(defaultPortion);
-      setSelectedAddons([]);
-      setSelectedPrepTags([]);
-      setCustomDishNote("");
-    } else {
-      addToManualCartDirect(dish);
-    }
+  /* ─── 4. High-Speed Punching with Multiplier & In-Line Portions ─── */
+  const getPunchMultiplier = () => {
+    const val = parseInt(multiplierInput, 10);
+    return isNaN(val) || val <= 0 ? 1 : val;
   };
 
-  const addToManualCartDirect = (dish: MenuItem) => {
+  const handleQuickAddPortion = (dish: MenuItem, portion: PortionOption) => {
+    const qty = getPunchMultiplier();
+    const isFull = portion.name.toLowerCase() === "full";
+    const displayName = isFull ? dish.name : `${dish.name} (${portion.name})`;
+    const cartEntryId = `${dish.id}_${portion.name}`;
+
+    setManualCart((prev) => {
+      const idx = prev.findIndex((c) => c.id === cartEntryId);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx].quantity += qty;
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          id: cartEntryId,
+          dishId: dish.id,
+          name: displayName,
+          portionName: portion.name,
+          price: portion.price,
+          quantity: qty,
+          isVeg: dish.is_veg,
+          category: dish.category,
+          notes: "",
+        },
+      ];
+    });
+
+    setMultiplierInput("");
+  };
+
+  const handleQuickAddBase = (dish: MenuItem) => {
+    const qty = getPunchMultiplier();
     setManualCart((prev) => {
       const idx = prev.findIndex(
-        (i) =>
-          (i.dishId === dish.id || i.id === dish.id) &&
-          !i.portionName &&
-          (!i.notes || i.notes === "")
+        (i) => (i.dishId === dish.id || i.id === dish.id) && !i.portionName && (!i.notes || i.notes === "")
       );
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx].quantity += 1;
+        copy[idx].quantity += qty;
         return copy;
       }
       return [
@@ -645,21 +706,38 @@ export default function PosPage() {
           dishId: dish.id,
           name: dish.name,
           price: dish.base_price,
-          quantity: 1,
+          quantity: qty,
           isVeg: dish.is_veg,
           category: dish.category,
           notes: "",
         },
       ];
     });
+
+    setMultiplierInput("");
+  };
+
+  const handleOpenCustomizer = (dish: MenuItem) => {
+    const defaultPortion =
+      dish.variantsConfig?.portions?.find((p) => p.isDefault || p.name.toLowerCase() === "full") ||
+      dish.variantsConfig?.portions?.[0] || {
+        name: "Full",
+        price: dish.base_price,
+        isDefault: true,
+      };
+
+    setCustomizingDish(dish);
+    setSelectedPortion(defaultPortion);
+    setSelectedAddons([]);
+    setSelectedPrepTags([]);
+    setCustomDishNote("");
   };
 
   const handleConfirmCustomDish = () => {
     if (!customizingDish) return;
+    const qty = getPunchMultiplier();
 
-    const portionPrice = selectedPortion
-      ? selectedPortion.price
-      : customizingDish.base_price;
+    const portionPrice = selectedPortion ? selectedPortion.price : customizingDish.base_price;
     const addonsPrice = selectedAddons.reduce((s, a) => s + (a.price || 0), 0);
     const unitPrice = portionPrice + addonsPrice;
 
@@ -686,7 +764,7 @@ export default function PosPage() {
       const idx = prev.findIndex((c) => c.id === cartEntryId);
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx].quantity += 1;
+        copy[idx].quantity += qty;
         return copy;
       }
       return [
@@ -697,7 +775,7 @@ export default function PosPage() {
           name: displayName,
           portionName: selectedPortion?.name,
           price: unitPrice,
-          quantity: 1,
+          quantity: qty,
           isVeg: customizingDish.is_veg,
           category: customizingDish.category,
           notes: finalNotes,
@@ -708,6 +786,7 @@ export default function PosPage() {
     });
 
     setCustomizingDish(null);
+    setMultiplierInput("");
   };
 
   const updateManualQty = (id: string, delta: number) => {
@@ -724,10 +803,35 @@ export default function PosPage() {
     );
   };
 
-  /* ─── 4. Financial Calculations ─────────────────────────────────── */
+  /* ─── 5. Numpad Logic (Immediate Quantity Multiplier or Ticket Qty Override) ─── */
+  const handleNumpadPress = (digit: string) => {
+    if (selectedTicketItemId) {
+      // If a ticket item is selected, override its quantity
+      const targetQty = parseInt(digit, 10);
+      if (!isNaN(targetQty) && targetQty > 0) {
+        setManualCart((prev) =>
+          prev.map((it) => (it.id === selectedTicketItemId ? { ...it, quantity: targetQty } : it))
+        );
+      }
+      setSelectedTicketItemId(null);
+      return;
+    }
+
+    if (multiplierInput.length >= 2) return;
+    setMultiplierInput((prev) => (prev === "0" ? digit : prev + digit));
+  };
+
+  const handleClearNumpad = () => {
+    setMultiplierInput("");
+    setSelectedTicketItemId(null);
+  };
+
+  /* ─── 6. Financial Calculations (With Indian Cash Round-Off) ─── */
   const subtotal = useMemo(() => {
     const existingTotal = activeSession
-      ? activeSession.allItems.reduce((s, it) => s + it.price * it.quantity, 0)
+      ? activeSession.allItems
+          .filter((it) => !it.isVoided)
+          .reduce((s, it) => s + it.price * it.quantity, 0)
       : 0;
     const manualTotal = manualCart.reduce((s, it) => s + it.price * it.quantity, 0);
     return existingTotal + manualTotal;
@@ -744,9 +848,18 @@ export default function PosPage() {
     return Math.max(0, (subtotal - effectiveDiscount) * 0.05); // 5% GST
   }, [subtotal, effectiveDiscount]);
 
-  const grandTotal = useMemo(() => {
-    return Math.round(subtotal - effectiveDiscount + taxTotal);
+  const rawTotal = useMemo(() => {
+    return subtotal - effectiveDiscount + taxTotal;
   }, [subtotal, effectiveDiscount, taxTotal]);
+
+  // Round off to nearest ₹1 (Standard practice across Indian hospitality)
+  const grandTotal = useMemo(() => {
+    return Math.round(rawTotal);
+  }, [rawTotal]);
+
+  const roundOffAmount = useMemo(() => {
+    return Number((grandTotal - rawTotal).toFixed(2));
+  }, [grandTotal, rawTotal]);
 
   const changeDue = useMemo(() => {
     const tendered = parseFloat(cashTendered);
@@ -754,7 +867,15 @@ export default function PosPage() {
     return Math.round(tendered - grandTotal);
   }, [cashTendered, grandTotal]);
 
-  /* ─── 5. Actions: Send KOT, Print Bill, Settle ──────────────────── */
+  // Multi-Tender Remaining Balance
+  const splitRemaining = useMemo(() => {
+    const c = parseFloat(splitCash) || 0;
+    const u = parseFloat(splitUpi) || 0;
+    const cd = parseFloat(splitCard) || 0;
+    return grandTotal - (c + u + cd);
+  }, [grandTotal, splitCash, splitUpi, splitCard]);
+
+  /* ─── 7. Actions: Send KOT, Void Items, Print Bill, Settle ───────── */
   const handleSendManualKOT = async () => {
     if (manualCart.length === 0 || !activeTableModal) return;
 
@@ -772,6 +893,7 @@ export default function PosPage() {
         quantity: c.quantity,
         notes: c.notes || "",
         isReady: false,
+        isVoided: false,
       }));
 
       const roundNum = (activeSession?.rounds.length || 0) + 1;
@@ -808,9 +930,10 @@ export default function PosPage() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
-      showToast(`${activeTableModal}: Round #${roundNum} fired to kitchen`);
+      showToast(`${activeTableModal}: Round #${roundNum} sent to kitchen`);
       setManualCart([]);
       setBatchNote("");
+      setMultiplierInput("");
 
       if (restaurantId) fetchActiveOrders(restaurantId);
 
@@ -824,20 +947,50 @@ export default function PosPage() {
     }
   };
 
-  const handleCancelOrder = async (orderId: string) => {
-    if (!confirm("Are you sure you want to cancel this order round?")) return;
+  /* Item-Level Voiding with Audit Log */
+  const handleConfirmItemVoid = async () => {
+    if (!voidingItemTarget || !restaurantId) return;
+
+    const finalReason = customVoidReason.trim() || voidReason;
     setIsSubmitting(true);
     try {
+      const order = activeOrders.find((o) => o.id === voidingItemTarget.orderId);
+      if (!order) throw new Error("Order not found");
+
+      const itemsCopy = [...(order.items_json || [])];
+      if (itemsCopy[voidingItemTarget.itemIndex]) {
+        itemsCopy[voidingItemTarget.itemIndex] = {
+          ...itemsCopy[voidingItemTarget.itemIndex],
+          isVoided: true,
+          voidReason: finalReason,
+          voidedAt: new Date().toISOString(),
+        };
+      }
+
+      // Recompute new order total
+      const newTotal = itemsCopy.reduce((sum, raw) => {
+        if (raw.isVoided || raw.is_voided) return sum;
+        const p = Number(raw.price || raw.item?.basePrice || 0);
+        const q = Number(raw.quantity || 1);
+        return sum + p * q;
+      }, 0);
+
       const { error } = await supabase
         .from("orders")
-        .update({ status: "CANCELLED" })
-        .eq("id", orderId);
+        .update({
+          items_json: itemsCopy,
+          total: newTotal,
+        })
+        .eq("id", voidingItemTarget.orderId);
 
       if (error) throw error;
-      showToast("Order round cancelled");
-      if (restaurantId) fetchActiveOrders(restaurantId);
+
+      showToast(`Voided ${voidingItemTarget.name} (${finalReason})`);
+      setVoidingItemTarget(null);
+      setCustomVoidReason("");
+      fetchActiveOrders(restaurantId);
     } catch (err: any) {
-      showToast("Failed to cancel: " + (err.message || "Error"));
+      showToast("Void failed: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
@@ -877,7 +1030,13 @@ export default function PosPage() {
   const handlePrintGuestBill = () => {
     if (!activeTableModal) return;
     const combinedItems = [
-      ...(activeSession?.allItems || []),
+      ...(activeSession?.allItems || [])
+        .filter((it) => !it.isVoided)
+        .map((it) => ({
+          name: it.name,
+          quantity: it.quantity,
+          price: it.price,
+        })),
       ...manualCart.map((c) => ({
         name: c.name,
         quantity: c.quantity,
@@ -903,6 +1062,7 @@ export default function PosPage() {
       subtotal,
       discount: effectiveDiscount,
       tax: taxTotal,
+      roundOff: roundOffAmount,
       grandTotal,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
@@ -924,11 +1084,13 @@ export default function PosPage() {
       kotNumber: round.roundNumber,
       customerName: activeSession?.customerName,
       customerPhone: activeSession?.customerPhone,
-      items: round.items.map((i) => ({
-        name: i.name,
-        quantity: i.quantity,
-        notes: `REPRINT - Round #${round.roundNumber}`,
-      })),
+      items: round.items
+        .filter((i) => !i.isVoided)
+        .map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          notes: `REPRINT - Round #${round.roundNumber}`,
+        })),
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
@@ -937,7 +1099,10 @@ export default function PosPage() {
     }, 100);
   };
 
-  const handleSettleTable = async (method: PaymentMethod, splitDetails?: { upi: number; cash: number }) => {
+  const handleSettleTable = async (
+    method: PaymentMethod,
+    splitBreakdown?: { cash: number; upi: number; card: number }
+  ) => {
     if (!activeTableModal || subtotal === 0) {
       showToast("No items to settle");
       return;
@@ -946,9 +1111,13 @@ export default function PosPage() {
     setIsSubmitting(true);
     try {
       const orderIds = (activeSession?.orders || []).map((o) => o.id);
-      const settleNote = splitDetails 
-        ? `[POS Settled: Split UPI ₹${splitDetails.upi} + Cash ₹${splitDetails.cash}]`
-        : `[POS Settled: ${method}]`;
+      let settleNote = `[POS Settled: ${method}]`;
+      if (splitBreakdown) {
+        settleNote = `[POS Split: Cash ₹${splitBreakdown.cash} + UPI ₹${splitBreakdown.upi} + Card ₹${splitBreakdown.card}]`;
+      }
+      if (discountReason.trim()) {
+        settleNote += ` (Discount Reason: ${discountReason.trim()})`;
+      }
 
       if (orderIds.length > 0) {
         await supabase
@@ -956,7 +1125,7 @@ export default function PosPage() {
           .update({
             status: "COMPLETED",
             payment_status: "PAID",
-            payment_method: splitDetails ? "UPI" : method,
+            payment_method: splitBreakdown ? "SPLIT" : method,
             total: grandTotal,
             note: settleNote,
           })
@@ -971,6 +1140,7 @@ export default function PosPage() {
           quantity: c.quantity,
           notes: c.notes || "",
           isReady: true,
+          isVoided: false,
         }));
 
         await supabase.from("orders").insert({
@@ -979,7 +1149,7 @@ export default function PosPage() {
           total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
           status: "COMPLETED",
           payment_status: "PAID",
-          payment_method: splitDetails ? "UPI" : method,
+          payment_method: splitBreakdown ? "SPLIT" : method,
           customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
           customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
           items_json: unsavedPayload,
@@ -994,14 +1164,20 @@ export default function PosPage() {
         return copy;
       });
 
-      const methodLabel = splitDetails 
-        ? `Split (UPI ₹${splitDetails.upi} + Cash ₹${splitDetails.cash})` 
+      const methodLabel = splitBreakdown
+        ? `Split (Cash ₹${splitBreakdown.cash} + UPI ₹${splitBreakdown.upi} + Card ₹${splitBreakdown.card})`
         : method;
 
       showToast(`Table ${activeTableModal} settled ₹${grandTotal} via ${methodLabel}`);
 
       const combinedItems = [
-        ...(activeSession?.allItems || []),
+        ...(activeSession?.allItems || [])
+          .filter((it) => !it.isVoided)
+          .map((it) => ({
+            name: it.name,
+            quantity: it.quantity,
+            price: it.price,
+          })),
         ...manualCart.map((c) => ({
           name: c.name,
           quantity: c.quantity,
@@ -1020,6 +1196,7 @@ export default function PosPage() {
         subtotal,
         discount: effectiveDiscount,
         tax: taxTotal,
+        roundOff: roundOffAmount,
         grandTotal,
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
@@ -1030,6 +1207,7 @@ export default function PosPage() {
       setBatchNote("");
       setDiscountPercent(0);
       setCustomDiscountRupees("");
+      setDiscountReason("");
 
       if (restaurantId) fetchActiveOrders(restaurantId);
 
@@ -1246,7 +1424,7 @@ export default function PosPage() {
                         </div>
                       </div>
 
-                      {/* Status Indicator (Clean, No Harsh Pulsing Dots) */}
+                      {/* Status Indicator (Clean, Calm, No Pulsing Dots) */}
                       <div className="flex items-center gap-1 flex-wrap justify-end">
                         {hasBillRequest ? (
                           <span className="px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10.5px] font-bold shadow-2xs">
@@ -1343,7 +1521,7 @@ export default function PosPage() {
       {activeTableModal && (
         <div className="fixed inset-0 z-50 bg-[#FCFAF8] flex flex-col h-screen w-screen overflow-hidden animate-in fade-in duration-150">
           
-          {/* 1. Command Station Header Deck */}
+          {/* 1. Command Station Header Deck (Clean, Calm, Restaurant-Focused) */}
           <div className="shrink-0 bg-white border-b border-zinc-200/80 px-6 py-3.5 flex items-center justify-between gap-4 z-20">
             <div className="flex items-center gap-3">
               <button
@@ -1383,8 +1561,8 @@ export default function PosPage() {
               </div>
             </div>
 
-            {/* Center: Guest info, Seated time, and Table PIN */}
-            <div className="hidden md:flex items-center gap-4 text-xs font-medium text-zinc-600">
+            {/* Center: Operational Info (Elapsed Timer & Rock-Solid Table PIN) */}
+            <div className="flex items-center gap-4 text-xs font-medium text-zinc-600">
               {!isVacantTable && activeSession?.firstOrderAt && (
                 <div className="flex items-center gap-1.5 text-zinc-500">
                   <Clock size={13} className="text-[#E46254]" />
@@ -1394,7 +1572,7 @@ export default function PosPage() {
 
               {/* Table PIN Badge */}
               <div className="flex items-center gap-1.5 bg-[#E46254]/5 border border-[#E46254]/20 px-3 py-1 rounded-xl">
-                <span className="text-[11px] text-[#C2410C] font-semibold">PIN:</span>
+                <span className="text-[11px] text-[#C2410C] font-semibold">Table PIN:</span>
                 <span className="font-mono font-bold text-zinc-900 text-xs tracking-wider">{currentTablePin}</span>
                 <button
                   type="button"
@@ -1406,32 +1584,18 @@ export default function PosPage() {
                 </button>
               </div>
 
-              {/* Guest Name & Phone Quick Edit */}
-              <div className="flex items-center gap-2 pl-2 border-l border-zinc-200">
-                <div className="flex items-center gap-1">
-                  <User size={12} className="text-zinc-400" />
-                  <input
-                    type="text"
-                    placeholder="Guest Name..."
-                    value={manualCustomerName}
-                    onChange={(e) => setManualCustomerName(e.target.value)}
-                    className="bg-transparent border-b border-transparent hover:border-zinc-300 focus:border-[#E46254] outline-none text-xs font-semibold text-zinc-800 w-28 placeholder:text-zinc-400 transition-colors"
-                  />
-                </div>
-                <div className="flex items-center gap-1">
-                  <Phone size={12} className="text-zinc-400" />
-                  <input
-                    type="tel"
-                    placeholder="Phone..."
-                    value={manualCustomerPhone}
-                    onChange={(e) => setManualCustomerPhone(e.target.value)}
-                    className="bg-transparent border-b border-transparent hover:border-zinc-300 focus:border-[#E46254] outline-none text-xs font-mono text-zinc-700 w-24 placeholder:text-zinc-400 transition-colors"
-                  />
-                </div>
-              </div>
+              {/* Optional Guest CRM Button */}
+              <button
+                onClick={() => setIsGuestInfoModalOpen(true)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-600 text-xs transition-colors cursor-pointer"
+                title="Edit Guest Name / Phone"
+              >
+                <User size={12} className="text-zinc-400" />
+                <span>{manualCustomerName || activeSession?.customerName || "Add Guest"}</span>
+              </button>
             </div>
 
-            {/* Right: Quick Switcher & Table Transfer & Close */}
+            {/* Right: Table Switcher & Transfer & Close */}
             <div className="flex items-center gap-2">
               <select
                 value={activeTableModal}
@@ -1473,37 +1637,136 @@ export default function PosPage() {
             </div>
           </div>
 
-          {/* 2. Command Station Body: Two Spacious Panels */}
+          {/* 2. Command Station Body: Unified Ticket on Left, Speed Catalog on Right */}
           <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
             
-            {/* ── LEFT PANEL (42%): Table Orders & Bill Breakdown ── */}
-            <div className="w-full lg:w-[42%] flex flex-col border-r border-zinc-200/80 bg-white overflow-hidden">
+            {/* ── UNIFIED TICKET STREAM ON LEFT (44% Width) ── */}
+            <div className="w-full lg:w-[44%] flex flex-col border-r border-zinc-200/80 bg-white overflow-hidden">
               <div className="flex-1 overflow-y-auto p-5 space-y-4 slim-scrollbar">
                 
                 {/* Header status bar */}
                 <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
                   <div>
-                    <h3 className="text-sm font-bold text-zinc-900 tracking-tight">Table Orders & Rounds</h3>
+                    <h3 className="text-sm font-bold text-zinc-900 tracking-tight">Active Table Ticket</h3>
                     <p className="text-[11px] text-zinc-400 mt-0.5">
                       {!isVacantTable
-                        ? `${activeSession?.rounds.length} ${activeSession?.rounds.length === 1 ? 'round' : 'rounds'} fired so far`
-                        : "No active orders yet"}
+                        ? `${activeSession?.rounds.length} ${activeSession?.rounds.length === 1 ? 'round' : 'rounds'} fired`
+                        : "No orders fired yet"}
                     </p>
                   </div>
-                  {!isVacantTable && (
-                    <span className="font-mono font-bold text-sm text-zinc-900">
-                      Running: ₹{activeSession?.totalBill}
-                    </span>
-                  )}
+                  <span className="font-mono font-bold text-sm text-zinc-900">
+                    Live Total: ₹{grandTotal}
+                  </span>
                 </div>
 
-                {/* Stream of Rounds */}
+                {/* 1. CURRENT UNFIRED STAGED ITEMS (Right at the top of the ticket!) */}
+                {manualCart.length > 0 && (
+                  <div className="bg-[#FAF8F7] border-2 border-dashed border-[#E46254]/40 rounded-2xl p-4 space-y-3 animate-in fade-in zoom-in-95 duration-100">
+                    <div className="flex items-center justify-between pb-2 border-b border-[#E46254]/15">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-[#E46254] animate-pulse" />
+                        <span className="font-bold text-xs text-[#C2410C] uppercase tracking-wide">
+                          Unfired Round #{(activeSession?.rounds.length || 0) + 1}
+                        </span>
+                        <span className="text-[11px] text-zinc-400">({manualCart.reduce((s, it) => s + it.quantity, 0)} items)</span>
+                      </div>
+                      <button
+                        onClick={() => setManualCart([])}
+                        className="text-[11px] text-zinc-400 hover:text-rose-600 font-medium cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+
+                    <div className="divide-y divide-[#E46254]/10">
+                      {manualCart.map((it) => (
+                        <div
+                          key={it.id}
+                          onClick={() => setSelectedTicketItemId(it.id === selectedTicketItemId ? null : it.id)}
+                          className={`py-2 flex items-center justify-between text-xs rounded-lg px-2 transition-colors cursor-pointer ${
+                            selectedTicketItemId === it.id ? "bg-[#E46254]/10 ring-1 ring-[#E46254]/30" : "hover:bg-white"
+                          }`}
+                        >
+                          <div className="flex items-start gap-2.5 flex-1 pr-2">
+                            <span className="font-mono font-bold text-[#E46254] w-6 shrink-0 mt-0.5">
+                              {it.quantity}×
+                            </span>
+                            <div>
+                              <span className="font-semibold text-zinc-900 block leading-tight">{it.name}</span>
+                              {it.notes && (
+                                <span className="text-[10.5px] text-[#C2410C] font-medium block mt-0.5">
+                                  {it.notes}
+                                </span>
+                              )}
+                              <span className="text-[10px] text-zinc-400 font-mono">₹{it.price} each</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center bg-white rounded-lg border border-zinc-200">
+                              <button
+                                onClick={() => updateManualQty(it.id, -1)}
+                                className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                              >
+                                <Minus size={11} />
+                              </button>
+                              <span className="w-5 text-center font-mono font-bold text-xs">
+                                {it.quantity}
+                              </span>
+                              <button
+                                onClick={() => updateManualQty(it.id, 1)}
+                                className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                              >
+                                <Plus size={11} />
+                              </button>
+                            </div>
+
+                            <span className="w-14 text-right font-mono font-bold text-zinc-900 tabular-nums">
+                              ₹{it.price * it.quantity}
+                            </span>
+
+                            <button
+                              onClick={() => setManualCart((prev) => prev.filter((i) => i.id !== it.id))}
+                              className="text-zinc-300 hover:text-rose-600 p-1 cursor-pointer"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Batch Cooking Instructions & Fire Button */}
+                    <div className="pt-2 border-t border-[#E46254]/15 space-y-2">
+                      <input
+                        type="text"
+                        placeholder="Kitchen instructions for this round (e.g. Serve starters first)..."
+                        value={batchNote}
+                        onChange={(e) => setBatchNote(e.target.value)}
+                        className="w-full px-3 py-1.5 bg-white border border-zinc-200 rounded-xl text-xs font-medium outline-none focus:border-[#E46254]"
+                      />
+
+                      <button
+                        disabled={isSubmitting}
+                        onClick={handleSendManualKOT}
+                        className="w-full py-2.5 px-4 bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-2 cursor-pointer transition-all"
+                      >
+                        <Send size={13} />
+                        <span>
+                          Fire Round #{(activeSession?.rounds.length || 0) + 1} to Kitchen (₹{manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. PREVIOUSLY FIRED ROUNDS STREAM */}
                 {!isVacantTable && activeSession && activeSession.rounds.length > 0 ? (
                   <div className="space-y-3">
                     {activeSession.rounds.map((round) => (
                       <div
                         key={round.orderId}
-                        className="bg-white rounded-2xl border border-zinc-200/80 p-4 space-y-3 shadow-2xs hover:border-[#E46254]/25 transition-all"
+                        className="bg-white rounded-2xl border border-zinc-200/80 p-4 space-y-3 shadow-2xs hover:border-zinc-300 transition-all"
                       >
                         <div className="flex items-center justify-between text-xs pb-2 border-b border-zinc-100">
                           <div className="flex items-center gap-2">
@@ -1518,29 +1781,25 @@ export default function PosPage() {
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              onClick={() => handleReprintKOT(round)}
-                              className="px-2 py-1 rounded-lg text-[11px] font-semibold text-zinc-600 bg-white hover:bg-zinc-50 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
-                              title="Reprint KOT"
-                            >
-                              <Printer size={11} />
-                              <span>KOT</span>
-                            </button>
-                            <button
-                              onClick={() => handleCancelOrder(round.orderId)}
-                              className="p-1 text-zinc-300 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
-                              title="Cancel round"
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
+                          <button
+                            onClick={() => handleReprintKOT(round)}
+                            className="px-2 py-1 rounded-lg text-[11px] font-semibold text-zinc-600 bg-white hover:bg-zinc-50 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                            title="Reprint KOT"
+                          >
+                            <Printer size={11} />
+                            <span>Reprint KOT</span>
+                          </button>
                         </div>
 
                         <div className="divide-y divide-zinc-50">
-                          {round.items.map((it, idx) => (
-                            <div key={idx} className="py-2 flex items-center justify-between text-xs">
-                              <div className="flex items-start gap-2.5">
+                          {round.items.map((it) => (
+                            <div
+                              key={it.itemIndex}
+                              className={`py-2 flex items-center justify-between text-xs ${
+                                it.isVoided ? "opacity-40 line-through" : ""
+                              }`}
+                            >
+                              <div className="flex items-start gap-2.5 flex-1 pr-2">
                                 <span className="font-bold font-mono text-zinc-400 w-5 shrink-0 mt-0.5">{it.quantity}×</span>
                                 <div>
                                   <span className="font-medium text-zinc-900 leading-snug block">{it.name}</span>
@@ -1549,34 +1808,60 @@ export default function PosPage() {
                                       {it.notes}
                                     </span>
                                   )}
+                                  {it.isVoided && it.voidReason && (
+                                    <span className="text-[10px] text-rose-600 font-semibold block mt-0.5">
+                                      Voided: {it.voidReason}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
-                              <span className="font-bold font-mono tabular-nums text-zinc-800 ml-3 shrink-0">
-                                ₹{it.price * it.quantity}
-                              </span>
+
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="font-bold font-mono tabular-nums text-zinc-800">
+                                  ₹{it.price * it.quantity}
+                                </span>
+
+                                {!it.isVoided && (
+                                  <button
+                                    onClick={() =>
+                                      setVoidingItemTarget({
+                                        orderId: round.orderId,
+                                        itemIndex: it.itemIndex,
+                                        name: it.name,
+                                        quantity: it.quantity,
+                                        price: it.price,
+                                      })
+                                    }
+                                    className="p-1 text-zinc-300 hover:text-rose-600 transition-colors cursor-pointer"
+                                    title="Void this item"
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           ))}
                         </div>
                       </div>
                     ))}
                   </div>
-                ) : (
+                ) : manualCart.length === 0 ? (
                   <div className="p-8 bg-[#FAF8F7] rounded-2xl border border-dashed border-zinc-200 text-center space-y-2">
                     <div className="w-10 h-10 rounded-2xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center mx-auto mb-1">
                       <UtensilsCrossed size={18} />
                     </div>
-                    <p className="text-xs font-bold text-zinc-800">Table is currently vacant</p>
+                    <p className="text-xs font-bold text-zinc-800">Table is vacant</p>
                     <p className="text-[11.5px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
-                      Select dishes from the menu catalog on the right to start this table and fire Round #1 to the kitchen.
+                      Tap dishes on the right to start this table and fire Round #1.
                     </p>
                   </div>
-                )}
+                ) : null}
 
-                {/* Financial Summary & Discounts */}
+                {/* 3. FINANCIAL SUMMARY WITH ROUND-OFF */}
                 {subtotal > 0 && (
                   <div className="bg-white rounded-2xl p-4.5 border border-zinc-200/80 space-y-3 text-xs shadow-2xs">
                     <div className="flex justify-between text-zinc-500">
-                      <span>Subtotal</span>
+                      <span>Item Subtotal</span>
                       <span className="font-semibold text-zinc-800 font-mono">₹{subtotal}</span>
                     </div>
 
@@ -1623,19 +1908,37 @@ export default function PosPage() {
                           className="w-16 px-1.5 py-1 bg-white border border-zinc-200 rounded-lg text-[11px] font-mono outline-none text-center focus:border-[#E46254]"
                         />
                       </div>
+
+                      {effectiveDiscount > 0 && (
+                        <input
+                          type="text"
+                          placeholder="Reason for discount (e.g. Owner guest, staff meal)..."
+                          value={discountReason}
+                          onChange={(e) => setDiscountReason(e.target.value)}
+                          className="w-full px-2.5 py-1 bg-[#FAF8F7] border border-zinc-200/80 rounded-lg text-[11px] outline-none focus:border-[#E46254]"
+                        />
+                      )}
                     </div>
 
                     {/* Taxes (5% GST) */}
                     <div className="flex justify-between text-zinc-500 pt-1.5 border-t border-zinc-100">
                       <span>Taxes (5% GST)</span>
-                      <span className="font-semibold text-zinc-800 font-mono">₹{taxTotal.toFixed(1)}</span>
+                      <span className="font-semibold text-zinc-800 font-mono">₹{taxTotal.toFixed(2)}</span>
                     </div>
+
+                    {/* Round-off */}
+                    {roundOffAmount !== 0 && (
+                      <div className="flex justify-between text-zinc-400 text-[11px]">
+                        <span>Round-off</span>
+                        <span className="font-mono">{roundOffAmount > 0 ? `+₹${roundOffAmount}` : `-₹${Math.abs(roundOffAmount)}`}</span>
+                      </div>
+                    )}
 
                     {/* Grand Total */}
                     <div className="flex items-center justify-between pt-2 border-t border-zinc-200">
                       <div>
                         <span className="text-xs font-bold text-zinc-900 block">Total Due</span>
-                        <span className="text-[10.5px] text-zinc-400">Includes all taxes & discounts</span>
+                        <span className="text-[10.5px] text-zinc-400">Includes all taxes & round-off</span>
                       </div>
                       <span className="text-xl font-black text-zinc-900 font-mono tabular-nums">
                         ₹{grandTotal}
@@ -1645,60 +1948,33 @@ export default function PosPage() {
                 )}
               </div>
 
-              {/* Left Panel Action Dock (Print & Settle or Payment Drawer) */}
+              {/* Action Bottom Bar on Left Panel */}
               <div className="p-4 bg-[#FAF8F7] border-t border-zinc-200/80 space-y-2.5 shrink-0">
-                {isVacantTable ? (
-                  /* VACANT TABLE: START TABLE AND FIRE */
-                  <button
-                    disabled={manualCart.length === 0 || isSubmitting}
-                    onClick={handleSendManualKOT}
-                    className="w-full py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#D35546] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-2xs cursor-pointer transition-all"
-                  >
-                    <Send size={14} />
-                    <span>
-                      {manualCart.length === 0
-                        ? "Select dishes from menu on right to start"
-                        : `Fire KOT to Kitchen & Seat Table (₹${manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})`}
-                    </span>
-                  </button>
-                ) : !isPaymentDrawerOpen ? (
-                  /* OCCUPIED TABLE: PRINT BILL OR SETTLE (PLUS EXTRA ROUND IF STAGED) */
-                  <div className="space-y-2">
-                    {manualCart.length > 0 && (
-                      <button
-                        disabled={isSubmitting}
-                        onClick={handleSendManualKOT}
-                        className="w-full py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#d55345] text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
-                      >
-                        <Send size={13} />
-                        <span>Fire New KOT Round (Round #{(activeSession?.rounds.length || 0) + 1})</span>
-                      </button>
-                    )}
+                {!isPaymentDrawerOpen ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={handlePrintGuestBill}
+                      className="py-2.5 px-3 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                    >
+                      <Printer size={14} />
+                      <span>Print Bill</span>
+                    </button>
 
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={handlePrintGuestBill}
-                        className="py-2.5 px-3 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                      >
-                        <Printer size={14} />
-                        <span>Print Bill</span>
-                      </button>
-
-                      <button
-                        onClick={() => setIsPaymentDrawerOpen(true)}
-                        className="py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                      >
-                        <CreditCard size={14} />
-                        <span>Settle (₹{grandTotal})</span>
-                      </button>
-                    </div>
+                    <button
+                      disabled={subtotal === 0}
+                      onClick={() => setIsPaymentDrawerOpen(true)}
+                      className="py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                    >
+                      <CreditCard size={14} />
+                      <span>Settle (₹{grandTotal})</span>
+                    </button>
                   </div>
                 ) : (
-                  /* SETTLE VIEW: CASH / UPI / CARD / SPLIT */
+                  /* ── MULTI-TENDER SETTLEMENT VIEW ── */
                   <div className="bg-white border border-zinc-200/80 rounded-2xl p-4 space-y-3 shadow-2xs animate-in fade-in duration-100">
                     <div className="flex items-center justify-between pb-1.5 border-b border-zinc-100">
                       <span className="text-xs font-bold text-zinc-900">
-                        Settle ₹{grandTotal} • Select Payment Mode:
+                        Settle ₹{grandTotal} • Select Payment Mode
                       </span>
                       <button
                         onClick={() => {
@@ -1742,7 +2018,7 @@ export default function PosPage() {
                           </button>
                         </div>
 
-                        {/* Cash Tendered & Split Mode */}
+                        {/* Cash Tendered & Split Mode Toggle */}
                         <div className="flex items-center justify-between pt-1 border-t border-zinc-100 text-xs">
                           <div className="flex items-center gap-2">
                             <input
@@ -1763,8 +2039,9 @@ export default function PosPage() {
                             type="button"
                             onClick={() => {
                               setIsSplitMode(true);
-                              setSplitUpiAmount(Math.floor(grandTotal / 2).toString());
-                              setSplitCashAmount(Math.ceil(grandTotal / 2).toString());
+                              setSplitCash(Math.ceil(grandTotal / 2).toString());
+                              setSplitUpi(Math.floor(grandTotal / 2).toString());
+                              setSplitCard("0");
                             }}
                             className="text-[11px] font-semibold text-[#E46254] hover:underline cursor-pointer"
                           >
@@ -1773,40 +2050,37 @@ export default function PosPage() {
                         </div>
                       </>
                     ) : (
-                      /* SPLIT TENDER SUB-PANEL */
+                      /* Flexible Multi-Split (Cash + UPI + Card) */
                       <div className="space-y-2.5 pt-1">
-                        <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="grid grid-cols-3 gap-2 text-xs">
                           <div>
-                            <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
-                              UPI Portion (₹)
-                            </label>
+                            <label className="text-[10px] font-semibold text-zinc-500 block mb-1">Cash (₹)</label>
                             <input
                               type="number"
-                              value={splitUpiAmount}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setSplitUpiAmount(val);
-                                const numVal = parseFloat(val) || 0;
-                                setSplitCashAmount(Math.max(0, grandTotal - numVal).toString());
-                              }}
+                              value={splitCash}
+                              onChange={(e) => setSplitCash(e.target.value)}
                               className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
                               placeholder="0"
                             />
                           </div>
 
                           <div>
-                            <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
-                              Cash Portion (₹)
-                            </label>
+                            <label className="text-[10px] font-semibold text-zinc-500 block mb-1">UPI (₹)</label>
                             <input
                               type="number"
-                              value={splitCashAmount}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setSplitCashAmount(val);
-                                const numVal = parseFloat(val) || 0;
-                                setSplitUpiAmount(Math.max(0, grandTotal - numVal).toString());
-                              }}
+                              value={splitUpi}
+                              onChange={(e) => setSplitUpi(e.target.value)}
+                              className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
+                              placeholder="0"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] font-semibold text-zinc-500 block mb-1">Card (₹)</label>
+                            <input
+                              type="number"
+                              value={splitCard}
+                              onChange={(e) => setSplitCard(e.target.value)}
                               className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
                               placeholder="0"
                             />
@@ -1814,26 +2088,41 @@ export default function PosPage() {
                         </div>
 
                         <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-100">
-                          <button
-                            type="button"
-                            onClick={() => setIsSplitMode(false)}
-                            className="text-zinc-500 hover:text-zinc-800 text-[11px] font-medium cursor-pointer"
-                          >
-                            Cancel Split
-                          </button>
+                          <div>
+                            {splitRemaining !== 0 ? (
+                              <span className="text-[11px] font-bold text-rose-600 font-mono">
+                                Remaining: ₹{splitRemaining}
+                              </span>
+                            ) : (
+                              <span className="text-[11px] font-bold text-emerald-600 font-mono">
+                                ✓ Balanced (₹{grandTotal})
+                              </span>
+                            )}
+                          </div>
 
-                          <button
-                            disabled={isSubmitting || (parseFloat(splitUpiAmount || "0") + parseFloat(splitCashAmount || "0")) !== grandTotal}
-                            onClick={() =>
-                              handleSettleTable("UPI", {
-                                upi: parseFloat(splitUpiAmount || "0"),
-                                cash: parseFloat(splitCashAmount || "0"),
-                              })
-                            }
-                            className="py-1.5 px-3 bg-zinc-900 hover:bg-black disabled:opacity-40 text-white rounded-lg font-bold text-xs cursor-pointer shadow-2xs"
-                          >
-                            Confirm Split Settle
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setIsSplitMode(false)}
+                              className="text-zinc-500 hover:text-zinc-800 text-[11px] font-medium cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+
+                            <button
+                              disabled={isSubmitting || splitRemaining !== 0}
+                              onClick={() =>
+                                handleSettleTable("CASH", {
+                                  cash: parseFloat(splitCash) || 0,
+                                  upi: parseFloat(splitUpi) || 0,
+                                  card: parseFloat(splitCard) || 0,
+                                })
+                              }
+                              className="py-1.5 px-3 bg-zinc-900 hover:bg-black disabled:opacity-40 text-white rounded-lg font-bold text-xs cursor-pointer shadow-2xs"
+                            >
+                              Confirm Split
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1842,17 +2131,17 @@ export default function PosPage() {
               </div>
             </div>
 
-            {/* ── RIGHT PANEL (58%): High-Speed Menu & Staged Round Dock ── */}
-            <div className="w-full lg:w-[58%] flex flex-col bg-[#FAF8F7] overflow-hidden">
+            {/* ── HIGH-SPEED MENU & RAPID NUMPAD (56% Width) ── */}
+            <div className="w-full lg:w-[56%] flex flex-col bg-[#FAF8F7] overflow-hidden">
               
-              {/* Search, Veg Filter, and Categories */}
+              {/* Top Search, Category Pills, and Multiplier Indicator */}
               <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
                 <div className="flex items-center gap-3">
                   <div className="relative flex-1">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
                     <input
                       type="text"
-                      placeholder="Search menu dishes, code, category... (press '/' to focus)"
+                      placeholder="Search dishes (Press '/' to focus)..."
                       value={dishSearchQuery}
                       onChange={(e) => setDishSearchQuery(e.target.value)}
                       className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
@@ -1902,6 +2191,16 @@ export default function PosPage() {
                       <span>Non-Veg</span>
                     </button>
                   </div>
+
+                  {/* Current Quantity Multiplier Pill */}
+                  {multiplierInput && (
+                    <div className="flex items-center gap-1.5 bg-[#E46254] text-white px-3 py-1 rounded-xl text-xs font-bold font-mono shadow-xs shrink-0 animate-in zoom-in-95">
+                      <span>QTY: {multiplierInput}×</span>
+                      <button onClick={handleClearNumpad} className="hover:opacity-75">
+                        <X size={12} />
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Categories Horizontal Pills */}
@@ -1922,204 +2221,259 @@ export default function PosPage() {
                 </div>
               </div>
 
-              {/* Dish Catalog Grid */}
-              <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
-                {filteredCatalog.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-400">
-                    <UtensilsCrossed size={24} className="mb-2 text-zinc-300" />
-                    <p className="text-xs font-semibold text-zinc-600">No dishes found</p>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">Try searching or picking a different category</p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                    {filteredCatalog.map((dish) => {
-                      const qtyInCart = manualCart
-                        .filter((c) => c.dishId === dish.id || c.id === dish.id)
-                        .reduce((s, c) => s + c.quantity, 0);
+              {/* Main Content Area: Dish Grid & Touch Numpad Dock */}
+              <div className="flex-1 flex overflow-hidden">
+                
+                {/* 1. Dish Catalog Grid (With Inline Portion Buttons!) */}
+                <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
+                  {filteredCatalog.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-400">
+                      <UtensilsCrossed size={24} className="mb-2 text-zinc-300" />
+                      <p className="text-xs font-semibold text-zinc-600">No dishes found</p>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">Try searching or picking a different category</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {filteredCatalog.map((dish) => {
+                        const hasPortions = Boolean(
+                          dish.variantsConfig?.hasPortions &&
+                          dish.variantsConfig.portions &&
+                          dish.variantsConfig.portions.length > 0
+                        );
+                        const hasAddonsOrTags = Boolean(
+                          dish.variantsConfig?.hasAddons ||
+                          (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
+                        );
 
-                      const hasVariants = Boolean(
-                        dish.variantsConfig?.hasPortions ||
-                        dish.variantsConfig?.hasAddons ||
-                        (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
-                      );
+                        return (
+                          <div
+                            key={dish.id}
+                            className="bg-white rounded-2xl border border-zinc-200/80 p-3.5 hover:border-[#E46254]/30 hover:shadow-xs transition-all flex flex-col justify-between group"
+                          >
+                            <div>
+                              <div className="flex items-start justify-between gap-2 mb-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <span
+                                    className={`w-2 h-2 rounded-full shrink-0 ${
+                                      dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
+                                    }`}
+                                  />
+                                  <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">
+                                    {dish.category}
+                                  </span>
+                                </div>
 
-                      return (
-                        <div
-                          key={dish.id}
-                          onClick={() => handleDishClick(dish)}
-                          className="bg-white rounded-2xl border border-zinc-200/80 p-3.5 hover:border-[#E46254]/30 hover:shadow-xs transition-all flex flex-col justify-between cursor-pointer group"
-                        >
-                          <div>
-                            <div className="flex items-start justify-between gap-2 mb-1.5">
-                              <div className="flex items-center gap-1.5">
-                                <span
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                                  }`}
-                                />
-                                <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">
-                                  {dish.category}
-                                </span>
+                                {hasAddonsOrTags && (
+                                  <button
+                                    onClick={() => handleOpenCustomizer(dish)}
+                                    className="text-[10px] font-semibold text-zinc-500 hover:text-[#E46254] flex items-center gap-1 cursor-pointer"
+                                    title="Add-ons / Prep Notes"
+                                  >
+                                    <SlidersHorizontal size={11} />
+                                    <span>Notes</span>
+                                  </button>
+                                )}
                               </div>
-                              {hasVariants && (
-                                <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-[#E46254]/5 text-[#C2410C] border border-[#E46254]/15">
-                                  Variants
-                                </span>
-                              )}
+
+                              <h4 className="text-xs font-bold text-zinc-900 group-hover:text-[#E46254] transition-colors line-clamp-1">
+                                {dish.name}
+                              </h4>
                             </div>
 
-                            <h4 className="text-xs font-bold text-zinc-900 group-hover:text-[#E46254] transition-colors line-clamp-1">
-                              {dish.name}
-                            </h4>
-                            {dish.description && (
-                              <p className="text-[10.5px] text-zinc-400 line-clamp-1 mt-0.5">
-                                {dish.description}
-                              </p>
-                            )}
-                          </div>
-
-                          <div className="mt-3 pt-2.5 border-t border-zinc-100 flex items-center justify-between" onClick={(e) => e.stopPropagation()}>
-                            <span className="font-mono font-bold text-xs text-zinc-900">
-                              ₹{dish.base_price}
-                            </span>
-
-                            {hasVariants ? (
-                              <button
-                                onClick={() => handleDishClick(dish)}
-                                className="px-2.5 py-1 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
-                              >
-                                <span>Customize</span>
-                                {qtyInCart > 0 && (
-                                  <span className="w-4 h-4 rounded-full bg-[#E46254] group-hover:bg-white group-hover:text-[#E46254] text-white text-[9.5px] flex items-center justify-center font-mono font-bold">
-                                    {qtyInCart}
-                                  </span>
-                                )}
-                              </button>
-                            ) : qtyInCart > 0 ? (
-                              <div className="flex items-center bg-white rounded-lg border border-zinc-200">
+                            {/* INLINE PORTION PICKER OR 1-TAP BASE BUTTON (Zero Modals!) */}
+                            <div className="mt-3 pt-2.5 border-t border-zinc-100">
+                              {hasPortions ? (
+                                <div className="grid grid-cols-2 gap-1.5">
+                                  {dish.variantsConfig!.portions!.map((portion) => (
+                                    <button
+                                      key={portion.name}
+                                      onClick={() => handleQuickAddPortion(dish, portion)}
+                                      className="py-1.5 px-2 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-xl text-left transition-all cursor-pointer shadow-2xs flex flex-col justify-between"
+                                    >
+                                      <span className="text-[10px] font-semibold block">{portion.name}</span>
+                                      <span className="text-xs font-bold font-mono">₹{portion.price}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
                                 <button
-                                  onClick={() => updateManualQty(dish.id, -1)}
-                                  className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                                  onClick={() => handleQuickAddBase(dish)}
+                                  className="w-full py-1.5 px-3 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-2xs flex items-center justify-between"
                                 >
-                                  <Minus size={11} />
+                                  <span>+ Add Item</span>
+                                  <span className="font-mono font-bold">₹{dish.base_price}</span>
                                 </button>
-                                <span className="w-5 text-center font-mono font-bold text-xs">
-                                  {qtyInCart}
-                                </span>
-                                <button
-                                  onClick={() => addToManualCartDirect(dish)}
-                                  className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
-                                >
-                                  <Plus size={11} />
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() => addToManualCartDirect(dish)}
-                                className="px-2.5 py-1 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-lg text-[11px] font-semibold transition-all cursor-pointer"
-                              >
-                                + Add
-                              </button>
-                            )}
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Staged Batch Dock (Active when manualCart.length > 0) */}
-              {manualCart.length > 0 && (
-                <div className="bg-white border-t border-zinc-200/80 p-4 space-y-3 shrink-0 shadow-lg animate-in slide-in-from-bottom-2 duration-150">
-                  <div className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2 font-bold text-zinc-900">
-                      <ChefHat size={15} className="text-[#E46254]" />
-                      <span>
-                        Staged Round Batch ({manualCart.reduce((s, it) => s + it.quantity, 0)} items)
-                      </span>
-                      <span className="font-mono font-bold text-[#E46254]">
-                        • ₹{manualCart.reduce((s, it) => s + it.price * it.quantity, 0)}
-                      </span>
+                        );
+                      })}
                     </div>
-                    <button
-                      onClick={() => setManualCart([])}
-                      className="text-[11px] text-zinc-400 hover:text-rose-600 font-medium cursor-pointer"
-                    >
-                      Clear Batch
-                    </button>
-                  </div>
+                  )}
+                </div>
 
-                  {/* Staged Items List */}
-                  <div className="max-h-36 overflow-y-auto slim-scrollbar divide-y divide-zinc-100 border border-zinc-100 rounded-xl">
-                    {manualCart.map((it) => (
-                      <div key={it.id} className="p-2 flex items-center justify-between text-xs bg-white">
-                        <div className="flex-1 pr-2">
-                          <span className="font-bold text-zinc-900 leading-tight block">{it.name}</span>
-                          {it.notes && (
-                            <span className="text-[10.5px] text-[#C2410C] font-medium leading-tight block">
-                              {it.notes}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2 shrink-0">
-                          <div className="flex items-center bg-white rounded-lg border border-zinc-200">
-                            <button
-                              onClick={() => updateManualQty(it.id, -1)}
-                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
-                            >
-                              <Minus size={10} />
-                            </button>
-                            <span className="w-5 text-center font-mono font-bold text-xs">
-                              {it.quantity}
-                            </span>
-                            <button
-                              onClick={() => updateManualQty(it.id, 1)}
-                              className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
-                            >
-                              <Plus size={10} />
-                            </button>
-                          </div>
-
-                          <span className="w-14 text-right font-mono font-bold text-zinc-900 tabular-nums">
-                            ₹{it.price * it.quantity}
-                          </span>
-
-                          <button
-                            onClick={() => setManualCart((prev) => prev.filter((i) => i.id !== it.id))}
-                            className="text-zinc-300 hover:text-rose-600 p-1 cursor-pointer"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Cooking Instructions & Fire Button */}
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      placeholder="Chef instructions for this round (e.g. Serve with Round 1, less spicy)..."
-                      value={batchNote}
-                      onChange={(e) => setBatchNote(e.target.value)}
-                      className="flex-1 px-3 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
-                    />
-
-                    <button
-                      disabled={isSubmitting}
-                      onClick={handleSendManualKOT}
-                      className="py-2.5 px-5 bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-2 cursor-pointer transition-all shrink-0"
-                    >
-                      <Send size={13} />
-                      <span>
-                        Fire Round #{(activeSession?.rounds.length || 0) + 1} (₹{manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})
+                {/* 2. PERSISTENT TOUCH NUMPAD FOR ULTRA-FAST QUANTITY ENTRY */}
+                <div className="w-44 bg-white border-l border-zinc-200/80 p-3 flex flex-col justify-between shrink-0">
+                  <div>
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-100 text-xs">
+                      <span className="font-bold text-zinc-700 flex items-center gap-1">
+                        <Hash size={13} className="text-[#E46254]" />
+                        <span>Qty Pad</span>
                       </span>
-                    </button>
+                      {multiplierInput && (
+                        <span className="font-mono font-bold text-[#E46254]">{multiplierInput}×</span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => handleNumpadPress(n)}
+                          className="h-10 rounded-xl bg-white hover:bg-[#E46254]/10 border border-zinc-200/80 hover:border-[#E46254]/30 font-mono font-bold text-sm text-zinc-800 hover:text-[#E46254] transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center justify-center"
+                        >
+                          {n}
+                        </button>
+                      ))}
+
+                      <button
+                        onClick={handleClearNumpad}
+                        className="col-span-2 h-10 rounded-xl bg-white hover:bg-rose-50 border border-zinc-200/80 hover:border-rose-200 font-bold text-xs text-zinc-600 hover:text-rose-600 transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center justify-center gap-1"
+                      >
+                        <Delete size={13} />
+                        <span>Clear</span>
+                      </button>
+                    </div>
+
+                    <p className="text-[10px] text-zinc-400 mt-3 text-center leading-relaxed">
+                      Tap a number, then tap a dish to punch that quantity instantly.
+                    </p>
                   </div>
                 </div>
-              )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── ITEM VOID REASON MODAL (Audit Compliance) ── */}
+      {voidingItemTarget && (
+        <div className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-sm w-full border border-zinc-200/80 shadow-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Trash2 size={16} className="text-rose-600" />
+                <h3 className="font-bold text-sm text-zinc-900">Void Item from Kitchen</h3>
+              </div>
+              <button onClick={() => setVoidingItemTarget(null)} className="text-zinc-400 hover:text-zinc-600">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-3 bg-[#FAF8F7] rounded-xl text-xs">
+              <p className="font-bold text-zinc-900">{voidingItemTarget.name}</p>
+              <p className="text-zinc-500 font-mono mt-0.5">
+                {voidingItemTarget.quantity}× • ₹{voidingItemTarget.price * voidingItemTarget.quantity}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-zinc-700 block uppercase tracking-wider">
+                Select Reason for Void:
+              </label>
+              {[
+                "Guest changed mind",
+                "Kitchen delay / took too long",
+                "Food quality issue / incorrect preparation",
+                "Wrong item punched by mistake",
+              ].map((reason) => (
+                <button
+                  key={reason}
+                  type="button"
+                  onClick={() => setVoidReason(reason)}
+                  className={`w-full p-2.5 rounded-xl border text-left text-xs transition-colors cursor-pointer ${
+                    voidReason === reason
+                      ? "bg-[#E46254] text-white border-[#E46254] font-semibold"
+                      : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50"
+                  }`}
+                >
+                  {reason}
+                </button>
+              ))}
+
+              <input
+                type="text"
+                placeholder="Or type custom reason..."
+                value={customVoidReason}
+                onChange={(e) => setCustomVoidReason(e.target.value)}
+                className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs outline-none focus:border-[#E46254]"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-100">
+              <button
+                onClick={() => setVoidingItemTarget(null)}
+                className="px-3 py-2 text-xs font-semibold text-zinc-600 hover:text-zinc-900 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isSubmitting}
+                onClick={handleConfirmItemVoid}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
+              >
+                Confirm Void
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── GUEST INFO / CRM MODAL ── */}
+      {isGuestInfoModalOpen && (
+        <div className="fixed inset-0 z-[75] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-sm w-full border border-zinc-200/80 shadow-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <User size={16} className="text-[#E46254]" />
+                <h3 className="font-bold text-sm text-zinc-900">Guest CRM & Contact</h3>
+              </div>
+              <button onClick={() => setIsGuestInfoModalOpen(false)} className="text-zinc-400 hover:text-zinc-600">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] font-semibold text-zinc-700 block mb-1">Guest Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Rahul Sharma"
+                  value={manualCustomerName}
+                  onChange={(e) => setManualCustomerName(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#FAF8F7] border border-zinc-200 rounded-xl text-xs font-medium outline-none focus:border-[#E46254]"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-semibold text-zinc-700 block mb-1">Phone Number</label>
+                <input
+                  type="tel"
+                  placeholder="e.g. 9876543210"
+                  value={manualCustomerPhone}
+                  onChange={(e) => setManualCustomerPhone(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#FAF8F7] border border-zinc-200 rounded-xl text-xs font-mono outline-none focus:border-[#E46254]"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-zinc-100">
+              <button
+                onClick={() => setIsGuestInfoModalOpen(false)}
+                className="px-4 py-2 bg-[#E46254] hover:bg-[#d55345] text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
+              >
+                Save Details
+              </button>
             </div>
           </div>
         </div>
@@ -2134,10 +2488,7 @@ export default function PosPage() {
                 <ArrowRightLeft size={16} className="text-[#E46254]" />
                 <h3 className="font-bold text-sm text-zinc-900">Transfer {activeTableModal}</h3>
               </div>
-              <button
-                onClick={() => setIsTransferModalOpen(false)}
-                className="text-zinc-400 hover:text-zinc-600 cursor-pointer"
-              >
+              <button onClick={() => setIsTransferModalOpen(false)} className="text-zinc-400 hover:text-zinc-600">
                 <X size={16} />
               </button>
             </div>
@@ -2187,7 +2538,7 @@ export default function PosPage() {
         </div>
       )}
 
-      {/* ── DISH CUSTOMIZATION MODAL (PORTIONS, ADD-ONS, QUICK PREP TAGS) ── */}
+      {/* ── DISH CUSTOMIZATION MODAL (Only when requested for addons / tags) ── */}
       {customizingDish && (
         <div className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl max-w-lg w-full border border-zinc-200/80 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
@@ -2399,7 +2750,7 @@ export default function PosPage() {
                   className="px-4 py-2 bg-[#E46254] hover:bg-[#d55345] text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
                 >
                   <Plus size={13} strokeWidth={3} />
-                  <span>Add to Table</span>
+                  <span>Add to Ticket</span>
                 </button>
               </div>
             </div>
@@ -2479,8 +2830,14 @@ export default function PosPage() {
                 ) : null}
                 <div className="flex justify-between">
                   <span>GST (5%):</span>
-                  <span>₹{printChit.tax?.toFixed(1)}</span>
+                  <span>₹{printChit.tax?.toFixed(2)}</span>
                 </div>
+                {printChit.roundOff !== 0 && (
+                  <div className="flex justify-between text-[10px]">
+                    <span>Round-off:</span>
+                    <span>{printChit.roundOff! > 0 ? `+₹${printChit.roundOff}` : `-₹${Math.abs(printChit.roundOff!)}`}</span>
+                  </div>
+                )}
                 <div className="flex justify-between font-bold text-sm border-t pt-1">
                   <span>Grand Total:</span>
                   <span>₹{printChit.grandTotal}</span>
