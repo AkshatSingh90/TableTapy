@@ -379,7 +379,7 @@ export default function PosPage() {
         setMenuItems(
           menuRows.map((dish) => ({
             ...dish,
-            variantsConfig: extractVariantsFromDescription(dish.description).config,
+            variantsConfig: extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
           }))
         );
       }
@@ -1881,8 +1881,8 @@ export default function PosPage() {
                       onClick={() => setSelectedDrawerCat(cat)}
                       className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
                         selectedDrawerCat === cat
-                          ? "bg-zinc-900 text-white shadow-2xs"
-                          : "bg-[#FAF8F7] hover:bg-zinc-100 text-zinc-600 border border-zinc-200/60"
+                          ? "bg-[#E46254]/10 text-[#C2410C] border border-[#E46254]/30 shadow-2xs"
+                          : "bg-[#FAF8F7] hover:bg-[#E46254]/5 text-zinc-600 border border-zinc-200/60"
                       }`}
                     >
                       {cat === "ALL" ? "All Categories" : cat}
@@ -1901,8 +1901,12 @@ export default function PosPage() {
                 ) : (
                   <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
                     {filteredCatalog.map((dish) => {
-                      const portions = dish.variantsConfig?.portions || [];
-                      const hasPortions = portions.length > 0;
+                      const hasPortions = Boolean(
+                        dish.variantsConfig?.hasPortions &&
+                        dish.variantsConfig.portions &&
+                        dish.variantsConfig.portions.length > 0
+                      );
+                      const portions = hasPortions ? dish.variantsConfig!.portions : [];
                       const hasAddons = Boolean(dish.variantsConfig?.hasAddons);
 
                       return (
@@ -1915,11 +1919,6 @@ export default function PosPage() {
                               <span className="font-bold text-xs text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2">
                                 {dish.name}
                               </span>
-                              <span
-                                className={`w-2 h-2 rounded-full shrink-0 mt-1 ${
-                                  dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                                }`}
-                              />
                             </div>
 
                             <span className="text-[10.5px] text-zinc-400 font-medium block">
@@ -2173,13 +2172,6 @@ export default function PosPage() {
                                 <div className="min-w-0">
                                   <div className="flex items-center gap-1.5 flex-wrap">
                                     <span className="font-semibold text-zinc-900 leading-snug truncate max-w-[170px]">{it.name}</span>
-                                    {it.isVeg !== undefined && (
-                                      <span
-                                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                          it.isVeg ? "bg-emerald-500" : "bg-[#E46254]"
-                                        }`}
-                                      />
-                                    )}
                                   </div>
                                   {it.notes && (
                                     <span className="text-[10.5px] text-[#C2410C] mt-0.5 block font-medium truncate max-w-[190px]">
@@ -2387,18 +2379,11 @@ export default function PosPage() {
           <div className="bg-white rounded-3xl max-w-md w-full border border-zinc-200/80 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="p-4 bg-[#FAF8F7] border-b border-zinc-200/80 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                    editingRoundItem.isVeg ? "bg-emerald-500" : "bg-[#E46254]"
-                  }`}
-                />
-                <div>
-                  <h3 className="font-bold text-sm text-zinc-900">{editingRoundItem.name}</h3>
-                  <span className="text-[11px] text-zinc-400 font-medium">
-                    Round #{editingRoundItem.roundNumber} • Dish #{editingRoundItem.itemIndex + 1}
-                  </span>
-                </div>
+              <div>
+                <h3 className="font-bold text-sm text-zinc-900">{editingRoundItem.name}</h3>
+                <span className="text-[11px] text-zinc-400 font-medium">
+                  Round #{editingRoundItem.roundNumber} • Dish #{editingRoundItem.itemIndex + 1}
+                </span>
               </div>
               <button
                 type="button"
@@ -2704,23 +2689,16 @@ export default function PosPage() {
           <div className="bg-white rounded-3xl max-w-lg w-full border border-zinc-200/80 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="p-4 bg-[#FAF8F7] border-b border-zinc-200/80 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                    customizingDish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                  }`}
-                />
-                <div>
-                  <h3 className="font-bold text-sm text-zinc-900">
-                    {customizingDish.name}
-                  </h3>
-                  <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-medium">
-                    <span>{customizingDish.category}</span>
-                    <span>•</span>
-                    <span className="font-mono">
-                      Base: ₹{customizingDish.base_price}
-                    </span>
-                  </div>
+              <div>
+                <h3 className="font-bold text-sm text-zinc-900">
+                  {customizingDish.name}
+                </h3>
+                <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-medium">
+                  <span>{customizingDish.category}</span>
+                  <span>•</span>
+                  <span className="font-mono">
+                    Base: ₹{customizingDish.base_price}
+                  </span>
                 </div>
               </div>
 
