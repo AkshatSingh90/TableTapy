@@ -292,7 +292,7 @@ export default function PosPage() {
       if (restId) {
         const { data: locData } = await supabase
           .from("locations")
-          .select("id, name, type, capacity, restaurant_id")
+          .select("id, name, type, restaurant_id")
           .eq("restaurant_id", restId)
           .order("name", { ascending: true });
 
@@ -305,7 +305,7 @@ export default function PosPage() {
       if (loadedLocations.length === 0 && user?.id && user.id !== restId) {
         const { data: userLocs } = await supabase
           .from("locations")
-          .select("id, name, type, capacity, restaurant_id")
+          .select("id, name, type, restaurant_id")
           .eq("restaurant_id", user.id)
           .order("name", { ascending: true });
 
@@ -319,7 +319,7 @@ export default function PosPage() {
       if (loadedLocations.length === 0) {
         const { data: anyLocs } = await supabase
           .from("locations")
-          .select("id, name, type, capacity, restaurant_id")
+          .select("id, name, type, restaurant_id")
           .order("name", { ascending: true });
 
         if (anyLocs && anyLocs.length > 0) {
