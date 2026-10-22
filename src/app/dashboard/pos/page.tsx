@@ -31,10 +31,8 @@ import {
   Percent,
   ChefHat,
   Tag,
-  Hash,
-  Delete,
-  CornerDownLeft,
   SlidersHorizontal,
+  Sparkles,
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createClient } from "@/utils/supabase/client";
@@ -95,8 +93,6 @@ interface TableRound {
     price: number;
     isVeg?: boolean;
     notes?: string;
-    isVoided?: boolean;
-    voidReason?: string;
   }>;
 }
 
@@ -114,8 +110,6 @@ interface TableSessionData {
     source: "QR" | "STAFF" | "CAPTAIN";
     roundNumber: number;
     orderId: string;
-    isVoided?: boolean;
-    voidReason?: string;
   }>;
   totalBill: number;
   customerName?: string;
@@ -125,6 +119,7 @@ interface TableSessionData {
   hasNewRound: boolean;
   hasBillRequest: boolean;
   hasUpiVerifyRequest: boolean;
+  isPaid: boolean;
 }
 
 interface NewStaffItem {
@@ -168,13 +163,8 @@ export default function PosPage() {
   // Menu Search & Filter in Full-Screen View
   const [dishSearchQuery, setDishSearchQuery] = useState("");
   const [selectedDrawerCat, setSelectedDrawerCat] = useState("ALL");
-  const [catalogVegFilter, setCatalogVegFilter] = useState<"ALL" | "VEG" | "NON_VEG">("ALL");
 
-  // Multiplier / Rapid Numpad State
-  const [multiplierInput, setMultiplierInput] = useState<string>("");
-  const [selectedTicketItemId, setSelectedTicketItemId] = useState<string | null>(null);
-
-  // Manual Punching / Staged Cart (Lives directly on the Unified Ticket Stream)
+  // Manual Punching / Staged Cart (Lives directly on the Unified Ticket Stream on the right)
   const [manualCart, setManualCart] = useState<NewStaffItem[]>([]);
   const [batchNote, setBatchNote] = useState("");
   const [manualCustomerName, setManualCustomerName] = useState("");
@@ -188,30 +178,11 @@ export default function PosPage() {
   const [selectedPrepTags, setSelectedPrepTags] = useState<string[]>([]);
   const [customDishNote, setCustomDishNote] = useState<string>("");
 
-  // Item Voiding Modal State
-  const [voidingItemTarget, setVoidingItemTarget] = useState<{
-    orderId: string;
-    itemIndex: number;
-    name: string;
-    quantity: number;
-    price: number;
-  } | null>(null);
-  const [voidReason, setVoidReason] = useState<string>("Guest changed mind");
-  const [customVoidReason, setCustomVoidReason] = useState<string>("");
-
   // Settlement & Discount State
   const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [customDiscountRupees, setCustomDiscountRupees] = useState<string>("");
   const [discountReason, setDiscountReason] = useState<string>("");
-  const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
-  const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Multi-Tender Split Payment State (Supports Cash, UPI, and Card simultaneously)
-  const [isSplitMode, setIsSplitMode] = useState(false);
-  const [splitCash, setSplitCash] = useState<string>("");
-  const [splitUpi, setSplitUpi] = useState<string>("");
-  const [splitCard, setSplitCard] = useState<string>("");
 
   // Table Transfer State
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
@@ -356,14 +327,10 @@ export default function PosPage() {
       if (e.key === "Escape") {
         if (customizingDish) {
           setCustomizingDish(null);
-        } else if (voidingItemTarget) {
-          setVoidingItemTarget(null);
         } else if (isTransferModalOpen) {
           setIsTransferModalOpen(false);
         } else if (isGuestInfoModalOpen) {
           setIsGuestInfoModalOpen(false);
-        } else if (isPaymentDrawerOpen) {
-          setIsPaymentDrawerOpen(false);
         } else {
           setActiveTableModal(null);
         }
@@ -371,7 +338,7 @@ export default function PosPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [customizingDish, voidingItemTarget, isTransferModalOpen, isGuestInfoModalOpen, isPaymentDrawerOpen]);
+  }, [customizingDish, isTransferModalOpen, isGuestInfoModalOpen]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
@@ -412,6 +379,7 @@ export default function PosPage() {
         hasNewRound: false,
         hasBillRequest: false,
         hasUpiVerifyRequest: false,
+        isPaid: false,
       });
     });
 
@@ -431,6 +399,7 @@ export default function PosPage() {
         hasNewRound: false,
         hasBillRequest: false,
         hasUpiVerifyRequest: false,
+        isPaid: false,
       };
 
       existing.orders.push(order);
@@ -487,14 +456,14 @@ export default function PosPage() {
         price: number;
         isVeg?: boolean;
         notes?: string;
-        isVoided?: boolean;
-        voidReason?: string;
       }> = [];
 
       if (Array.isArray(order.items_json)) {
         order.items_json.forEach((raw: any, idx: number) => {
           const itemObj = raw.item || raw;
           const isVoided = Boolean(raw.isVoided || raw.is_voided || raw.voided);
+          if (isVoided) return; // exclude voided items from bill
+
           const parsedItem = {
             itemIndex: idx,
             name: itemObj.name || "Custom Item",
@@ -502,15 +471,10 @@ export default function PosPage() {
             quantity: Number(raw.quantity || 1),
             isVeg: itemObj.isVeg ?? itemObj.is_veg ?? true,
             notes: raw.notes || raw.specialInstructions || "",
-            isVoided,
-            voidReason: raw.voidReason || raw.void_reason,
           };
 
           roundItems.push(parsedItem);
-
-          if (!isVoided) {
-            existing.totalBill += parsedItem.price * parsedItem.quantity;
-          }
+          existing.totalBill += parsedItem.price * parsedItem.quantity;
 
           existing.allItems.push({
             ...parsedItem,
@@ -537,6 +501,13 @@ export default function PosPage() {
       }
 
       map.set(order.table_no, existing);
+    });
+
+    // Check if table's active orders are paid
+    map.forEach((session) => {
+      if (session.orders.length > 0) {
+        session.isPaid = session.orders.every((o) => o.payment_status === "PAID");
+      }
     });
 
     return map;
@@ -584,6 +555,14 @@ export default function PosPage() {
 
   const isVacantTable = !activeSession || activeSession.status === "VACANT" || activeSession.rounds.length === 0;
 
+  // Has payment been collected for this seated table?
+  const isTablePaid = useMemo(() => {
+    if (!activeSession || activeSession.orders.length === 0) return false;
+    const nonCancelled = activeSession.orders.filter((o) => o.status !== "CANCELLED");
+    if (nonCancelled.length === 0) return false;
+    return nonCancelled.every((o) => o.payment_status === "PAID");
+  }, [activeSession]);
+
   // Table PIN derived deterministically
   const currentTablePin = useMemo(() => {
     if (!activeTableModal) return "1234";
@@ -609,13 +588,6 @@ export default function PosPage() {
     }
     setManualCart([]);
     setBatchNote("");
-    setMultiplierInput("");
-    setSelectedTicketItemId(null);
-    setIsPaymentDrawerOpen(false);
-    setIsSplitMode(false);
-    setSplitCash("");
-    setSplitUpi("");
-    setSplitCard("");
     setDiscountPercent(0);
     setCustomDiscountRupees("");
     setDiscountReason("");
@@ -642,22 +614,12 @@ export default function PosPage() {
         !q ||
         m.name.toLowerCase().includes(q) ||
         m.category.toLowerCase().includes(q);
-      const matchVeg =
-        catalogVegFilter === "ALL" ||
-        (catalogVegFilter === "VEG" && m.is_veg) ||
-        (catalogVegFilter === "NON_VEG" && !m.is_veg);
-      return matchCat && matchSearch && matchVeg;
+      return matchCat && matchSearch;
     });
-  }, [menuItems, selectedDrawerCat, dishSearchQuery, catalogVegFilter]);
+  }, [menuItems, selectedDrawerCat, dishSearchQuery]);
 
-  /* ─── 4. High-Speed Punching with Multiplier & In-Line Portions ─── */
-  const getPunchMultiplier = () => {
-    const val = parseInt(multiplierInput, 10);
-    return isNaN(val) || val <= 0 ? 1 : val;
-  };
-
+  /* ─── 4. 1-Tap Direct Punching (Inline Portions & Base Dish) ───── */
   const handleQuickAddPortion = (dish: MenuItem, portion: PortionOption) => {
-    const qty = getPunchMultiplier();
     const isFull = portion.name.toLowerCase() === "full";
     const displayName = isFull ? dish.name : `${dish.name} (${portion.name})`;
     const cartEntryId = `${dish.id}_${portion.name}`;
@@ -666,7 +628,7 @@ export default function PosPage() {
       const idx = prev.findIndex((c) => c.id === cartEntryId);
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx].quantity += qty;
+        copy[idx].quantity += 1;
         return copy;
       }
       return [
@@ -677,26 +639,23 @@ export default function PosPage() {
           name: displayName,
           portionName: portion.name,
           price: portion.price,
-          quantity: qty,
+          quantity: 1,
           isVeg: dish.is_veg,
           category: dish.category,
           notes: "",
         },
       ];
     });
-
-    setMultiplierInput("");
   };
 
   const handleQuickAddBase = (dish: MenuItem) => {
-    const qty = getPunchMultiplier();
     setManualCart((prev) => {
       const idx = prev.findIndex(
         (i) => (i.dishId === dish.id || i.id === dish.id) && !i.portionName && (!i.notes || i.notes === "")
       );
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx].quantity += qty;
+        copy[idx].quantity += 1;
         return copy;
       }
       return [
@@ -706,15 +665,13 @@ export default function PosPage() {
           dishId: dish.id,
           name: dish.name,
           price: dish.base_price,
-          quantity: qty,
+          quantity: 1,
           isVeg: dish.is_veg,
           category: dish.category,
           notes: "",
         },
       ];
     });
-
-    setMultiplierInput("");
   };
 
   const handleOpenCustomizer = (dish: MenuItem) => {
@@ -735,7 +692,6 @@ export default function PosPage() {
 
   const handleConfirmCustomDish = () => {
     if (!customizingDish) return;
-    const qty = getPunchMultiplier();
 
     const portionPrice = selectedPortion ? selectedPortion.price : customizingDish.base_price;
     const addonsPrice = selectedAddons.reduce((s, a) => s + (a.price || 0), 0);
@@ -764,7 +720,7 @@ export default function PosPage() {
       const idx = prev.findIndex((c) => c.id === cartEntryId);
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx].quantity += qty;
+        copy[idx].quantity += 1;
         return copy;
       }
       return [
@@ -775,7 +731,7 @@ export default function PosPage() {
           name: displayName,
           portionName: selectedPortion?.name,
           price: unitPrice,
-          quantity: qty,
+          quantity: 1,
           isVeg: customizingDish.is_veg,
           category: customizingDish.category,
           notes: finalNotes,
@@ -786,7 +742,6 @@ export default function PosPage() {
     });
 
     setCustomizingDish(null);
-    setMultiplierInput("");
   };
 
   const updateManualQty = (id: string, delta: number) => {
@@ -803,35 +758,10 @@ export default function PosPage() {
     );
   };
 
-  /* ─── 5. Numpad Logic (Immediate Quantity Multiplier or Ticket Qty Override) ─── */
-  const handleNumpadPress = (digit: string) => {
-    if (selectedTicketItemId) {
-      // If a ticket item is selected, override its quantity
-      const targetQty = parseInt(digit, 10);
-      if (!isNaN(targetQty) && targetQty > 0) {
-        setManualCart((prev) =>
-          prev.map((it) => (it.id === selectedTicketItemId ? { ...it, quantity: targetQty } : it))
-        );
-      }
-      setSelectedTicketItemId(null);
-      return;
-    }
-
-    if (multiplierInput.length >= 2) return;
-    setMultiplierInput((prev) => (prev === "0" ? digit : prev + digit));
-  };
-
-  const handleClearNumpad = () => {
-    setMultiplierInput("");
-    setSelectedTicketItemId(null);
-  };
-
-  /* ─── 6. Financial Calculations (With Indian Cash Round-Off) ─── */
+  /* ─── 5. Financial Calculations (With Indian Hospitality Round-Off) ─── */
   const subtotal = useMemo(() => {
     const existingTotal = activeSession
-      ? activeSession.allItems
-          .filter((it) => !it.isVoided)
-          .reduce((s, it) => s + it.price * it.quantity, 0)
+      ? activeSession.allItems.reduce((s, it) => s + it.price * it.quantity, 0)
       : 0;
     const manualTotal = manualCart.reduce((s, it) => s + it.price * it.quantity, 0);
     return existingTotal + manualTotal;
@@ -852,7 +782,6 @@ export default function PosPage() {
     return subtotal - effectiveDiscount + taxTotal;
   }, [subtotal, effectiveDiscount, taxTotal]);
 
-  // Round off to nearest ₹1 (Standard practice across Indian hospitality)
   const grandTotal = useMemo(() => {
     return Math.round(rawTotal);
   }, [rawTotal]);
@@ -861,21 +790,7 @@ export default function PosPage() {
     return Number((grandTotal - rawTotal).toFixed(2));
   }, [grandTotal, rawTotal]);
 
-  const changeDue = useMemo(() => {
-    const tendered = parseFloat(cashTendered);
-    if (isNaN(tendered) || tendered < grandTotal) return 0;
-    return Math.round(tendered - grandTotal);
-  }, [cashTendered, grandTotal]);
-
-  // Multi-Tender Remaining Balance
-  const splitRemaining = useMemo(() => {
-    const c = parseFloat(splitCash) || 0;
-    const u = parseFloat(splitUpi) || 0;
-    const cd = parseFloat(splitCard) || 0;
-    return grandTotal - (c + u + cd);
-  }, [grandTotal, splitCash, splitUpi, splitCard]);
-
-  /* ─── 7. Actions: Send KOT, Void Items, Print Bill, Settle ───────── */
+  /* ─── 6. Actions: Fire KOT, Void Entire Round, Payment Collected, Settle ─── */
   const handleSendManualKOT = async () => {
     if (manualCart.length === 0 || !activeTableModal) return;
 
@@ -893,7 +808,6 @@ export default function PosPage() {
         quantity: c.quantity,
         notes: c.notes || "",
         isReady: false,
-        isVoided: false,
       }));
 
       const roundNum = (activeSession?.rounds.length || 0) + 1;
@@ -930,10 +844,9 @@ export default function PosPage() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
-      showToast(`${activeTableModal}: Round #${roundNum} sent to kitchen`);
+      showToast(`${activeTableModal}: Round #${roundNum} fired to kitchen`);
       setManualCart([]);
       setBatchNote("");
-      setMultiplierInput("");
 
       if (restaurantId) fetchActiveOrders(restaurantId);
 
@@ -947,50 +860,135 @@ export default function PosPage() {
     }
   };
 
-  /* Item-Level Voiding with Audit Log */
-  const handleConfirmItemVoid = async () => {
-    if (!voidingItemTarget || !restaurantId) return;
+  /* Void an Entire Round with 1 tap (No micro-modal headache) */
+  const handleVoidRound = async (orderId: string, roundNumber: number) => {
+    if (!confirm(`Are you sure you want to void entire Round #${roundNumber}? This will cancel all dishes in this round.`)) {
+      return;
+    }
 
-    const finalReason = customVoidReason.trim() || voidReason;
     setIsSubmitting(true);
     try {
-      const order = activeOrders.find((o) => o.id === voidingItemTarget.orderId);
-      if (!order) throw new Error("Order not found");
-
-      const itemsCopy = [...(order.items_json || [])];
-      if (itemsCopy[voidingItemTarget.itemIndex]) {
-        itemsCopy[voidingItemTarget.itemIndex] = {
-          ...itemsCopy[voidingItemTarget.itemIndex],
-          isVoided: true,
-          voidReason: finalReason,
-          voidedAt: new Date().toISOString(),
-        };
-      }
-
-      // Recompute new order total
-      const newTotal = itemsCopy.reduce((sum, raw) => {
-        if (raw.isVoided || raw.is_voided) return sum;
-        const p = Number(raw.price || raw.item?.basePrice || 0);
-        const q = Number(raw.quantity || 1);
-        return sum + p * q;
-      }, 0);
-
       const { error } = await supabase
         .from("orders")
         .update({
-          items_json: itemsCopy,
-          total: newTotal,
+          status: "CANCELLED",
+          note: `[Voided Round #${roundNumber} by POS Cashier]`,
         })
-        .eq("id", voidingItemTarget.orderId);
+        .eq("id", orderId);
 
       if (error) throw error;
 
-      showToast(`Voided ${voidingItemTarget.name} (${finalReason})`);
-      setVoidingItemTarget(null);
-      setCustomVoidReason("");
-      fetchActiveOrders(restaurantId);
+      showToast(`Round #${roundNumber} has been voided`);
+      if (restaurantId) fetchActiveOrders(restaurantId);
     } catch (err: any) {
-      showToast("Void failed: " + (err.message || "Error"));
+      showToast("Failed to void round: " + (err.message || "Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /* STEP 1: PAYMENT COLLECTED (Triggers Thank You page on customer phone immediately) */
+  const handlePaymentCollected = async () => {
+    if (!activeTableModal || subtotal === 0) {
+      showToast("No active bill to collect payment for");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const nonCancelledOrders = (activeSession?.orders || []).filter((o) => o.status !== "CANCELLED");
+      const orderIds = nonCancelledOrders.map((o) => o.id);
+
+      // 1. Commit any currently staged manual cart items as PAID
+      if (manualCart.length > 0) {
+        const unsavedPayload = manualCart.map((c) => ({
+          item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
+          price: c.price,
+          quantity: c.quantity,
+          notes: c.notes || "",
+          isReady: true,
+        }));
+
+        await supabase.from("orders").insert({
+          restaurant_id: restaurantId,
+          table_no: activeTableModal,
+          total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+          status: "SERVED",
+          payment_status: "PAID",
+          payment_method: "PAYMENT_COLLECTED",
+          customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
+          customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
+          items_json: unsavedPayload,
+          note: `[POS Fired & Paid]`,
+        });
+        setManualCart([]);
+        setBatchNote("");
+      }
+
+      // 2. Mark existing active orders as PAID (Triggers Thank You View on customer device via Supabase Realtime!)
+      if (orderIds.length > 0) {
+        const { error } = await supabase
+          .from("orders")
+          .update({
+            payment_status: "PAID",
+            status: "SERVED",
+            payment_method: "PAYMENT_COLLECTED",
+            total: grandTotal,
+          })
+          .in("id", orderIds);
+
+        if (error) throw error;
+      }
+
+      showToast(`Payment received! Customer phone now shows Thank You view.`);
+      if (restaurantId) await fetchActiveOrders(restaurantId);
+    } catch (err: any) {
+      showToast("Failed to mark payment: " + (err.message || "Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /* STEP 2: SETTLE & FREE TABLE (When guests stand up and leave) */
+  const handleSettleAndFreeTable = async () => {
+    if (!activeTableModal) return;
+
+    setIsSubmitting(true);
+    try {
+      const nonCancelledOrders = (activeSession?.orders || []).filter((o) => o.status !== "CANCELLED");
+      const orderIds = nonCancelledOrders.map((o) => o.id);
+
+      if (orderIds.length > 0) {
+        const { error } = await supabase
+          .from("orders")
+          .update({
+            status: "COMPLETED",
+            payment_status: "PAID",
+            note: `[POS Settled & Vacated]`,
+          })
+          .in("id", orderIds);
+
+        if (error) throw error;
+      }
+
+      // Clear from printed check list
+      setPrintedTables((prev) => {
+        const copy = new Set(prev);
+        copy.delete(activeTableModal);
+        return copy;
+      });
+
+      showToast(`Table ${activeTableModal} settled & vacated. New PIN active!`);
+      setActiveTableModal(null); // Return to floor layout
+      setManualCart([]);
+      setBatchNote("");
+      setDiscountPercent(0);
+      setCustomDiscountRupees("");
+      setDiscountReason("");
+
+      if (restaurantId) await fetchActiveOrders(restaurantId);
+    } catch (err: any) {
+      showToast("Settlement failed: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
@@ -1030,13 +1028,11 @@ export default function PosPage() {
   const handlePrintGuestBill = () => {
     if (!activeTableModal) return;
     const combinedItems = [
-      ...(activeSession?.allItems || [])
-        .filter((it) => !it.isVoided)
-        .map((it) => ({
-          name: it.name,
-          quantity: it.quantity,
-          price: it.price,
-        })),
+      ...(activeSession?.allItems || []).map((it) => ({
+        name: it.name,
+        quantity: it.quantity,
+        price: it.price,
+      })),
       ...manualCart.map((c) => ({
         name: c.name,
         quantity: c.quantity,
@@ -1084,141 +1080,17 @@ export default function PosPage() {
       kotNumber: round.roundNumber,
       customerName: activeSession?.customerName,
       customerPhone: activeSession?.customerPhone,
-      items: round.items
-        .filter((i) => !i.isVoided)
-        .map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          notes: `REPRINT - Round #${round.roundNumber}`,
-        })),
+      items: round.items.map((i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        notes: `REPRINT - Round #${round.roundNumber}`,
+      })),
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
     setTimeout(() => {
       window.print();
     }, 100);
-  };
-
-  const handleSettleTable = async (
-    method: PaymentMethod,
-    splitBreakdown?: { cash: number; upi: number; card: number }
-  ) => {
-    if (!activeTableModal || subtotal === 0) {
-      showToast("No items to settle");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const orderIds = (activeSession?.orders || []).map((o) => o.id);
-      let settleNote = `[POS Settled: ${method}]`;
-      if (splitBreakdown) {
-        settleNote = `[POS Split: Cash ₹${splitBreakdown.cash} + UPI ₹${splitBreakdown.upi} + Card ₹${splitBreakdown.card}]`;
-      }
-      if (discountReason.trim()) {
-        settleNote += ` (Discount Reason: ${discountReason.trim()})`;
-      }
-
-      if (orderIds.length > 0) {
-        await supabase
-          .from("orders")
-          .update({
-            status: "COMPLETED",
-            payment_status: "PAID",
-            payment_method: splitBreakdown ? "SPLIT" : method,
-            total: grandTotal,
-            note: settleNote,
-          })
-          .in("id", orderIds);
-      }
-
-      // If manual items were left in cart, commit them directly as settled
-      if (manualCart.length > 0) {
-        const unsavedPayload = manualCart.map((c) => ({
-          item: { id: c.id, name: c.name, basePrice: c.price, category: c.category, isVeg: c.isVeg },
-          price: c.price,
-          quantity: c.quantity,
-          notes: c.notes || "",
-          isReady: true,
-          isVoided: false,
-        }));
-
-        await supabase.from("orders").insert({
-          restaurant_id: restaurantId,
-          table_no: activeTableModal,
-          total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
-          status: "COMPLETED",
-          payment_status: "PAID",
-          payment_method: splitBreakdown ? "SPLIT" : method,
-          customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
-          customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
-          items_json: unsavedPayload,
-          note: settleNote,
-        });
-      }
-
-      // Clear from printed list
-      setPrintedTables((prev) => {
-        const copy = new Set(prev);
-        copy.delete(activeTableModal);
-        return copy;
-      });
-
-      const methodLabel = splitBreakdown
-        ? `Split (Cash ₹${splitBreakdown.cash} + UPI ₹${splitBreakdown.upi} + Card ₹${splitBreakdown.card})`
-        : method;
-
-      showToast(`Table ${activeTableModal} settled ₹${grandTotal} via ${methodLabel}`);
-
-      const combinedItems = [
-        ...(activeSession?.allItems || [])
-          .filter((it) => !it.isVoided)
-          .map((it) => ({
-            name: it.name,
-            quantity: it.quantity,
-            price: it.price,
-          })),
-        ...manualCart.map((c) => ({
-          name: c.name,
-          quantity: c.quantity,
-          price: c.price,
-        })),
-      ];
-
-      setPrintChit({
-        type: "BILL",
-        mode: "DINE_IN",
-        tableOrToken: activeTableModal,
-        customerName: manualCustomerName.trim() || activeSession?.customerName,
-        customerPhone: manualCustomerPhone.trim() || activeSession?.customerPhone,
-        paymentMethod: method,
-        items: combinedItems,
-        subtotal,
-        discount: effectiveDiscount,
-        tax: taxTotal,
-        roundOff: roundOffAmount,
-        grandTotal,
-        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      });
-
-      setActiveTableModal(null);
-      setIsPaymentDrawerOpen(false);
-      setManualCart([]);
-      setBatchNote("");
-      setDiscountPercent(0);
-      setCustomDiscountRupees("");
-      setDiscountReason("");
-
-      if (restaurantId) fetchActiveOrders(restaurantId);
-
-      setTimeout(() => {
-        window.print();
-      }, 100);
-    } catch (err: any) {
-      showToast("Settlement failed: " + (err.message || "Error"));
-    } finally {
-      setIsSubmitting(false);
-    }
   };
 
   const upiIntentUrl = useMemo(() => {
@@ -1396,6 +1268,7 @@ export default function PosPage() {
               const isBillPrinted = printedTables.has(loc.name);
               const hasBillRequest = session?.hasBillRequest || false;
               const hasUpiVerifyRequest = session?.hasUpiVerifyRequest || false;
+              const isPaid = session?.isPaid || false;
 
               return (
                 <div
@@ -1404,6 +1277,8 @@ export default function PosPage() {
                   className={`relative rounded-2xl p-5 border transition-all duration-200 cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-md select-none group bg-white ${
                     hasBillRequest || hasUpiVerifyRequest
                       ? "border-[#E46254] ring-2 ring-[#E46254]/20"
+                      : isPaid
+                      ? "border-emerald-300 bg-emerald-50/20"
                       : isBillPrinted
                       ? "border-purple-300 bg-[#FAF7FB]"
                       : isOccupied
@@ -1424,7 +1299,7 @@ export default function PosPage() {
                         </div>
                       </div>
 
-                      {/* Status Indicator (Clean, Calm, No Pulsing Dots) */}
+                      {/* Status Indicator */}
                       <div className="flex items-center gap-1 flex-wrap justify-end">
                         {hasBillRequest ? (
                           <span className="px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10.5px] font-bold shadow-2xs">
@@ -1433,6 +1308,10 @@ export default function PosPage() {
                         ) : hasUpiVerifyRequest ? (
                           <span className="px-2.5 py-0.5 rounded-full bg-zinc-900 text-white text-[10.5px] font-bold shadow-2xs">
                             Verify UPI
+                          </span>
+                        ) : isPaid ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10.5px] font-bold border border-emerald-200">
+                            Paid • Seated
                           </span>
                         ) : isBillPrinted ? (
                           <span className="px-2.5 py-0.5 rounded-full bg-purple-50 text-purple-700 text-[10.5px] font-bold border border-purple-200">
@@ -1521,14 +1400,11 @@ export default function PosPage() {
       {activeTableModal && (
         <div className="fixed inset-0 z-50 bg-[#FCFAF8] flex flex-col h-screen w-screen overflow-hidden animate-in fade-in duration-150">
           
-          {/* 1. Command Station Header Deck (Clean, Calm, Restaurant-Focused) */}
+          {/* 1. Command Station Header Deck (Clean, Operational, No X button, No Table Switcher Dropdown) */}
           <div className="shrink-0 bg-white border-b border-zinc-200/80 px-6 py-3.5 flex items-center justify-between gap-4 z-20">
             <div className="flex items-center gap-3">
               <button
-                onClick={() => {
-                  setActiveTableModal(null);
-                  setIsPaymentDrawerOpen(false);
-                }}
+                onClick={() => setActiveTableModal(null)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
               >
                 <ChevronLeft size={15} />
@@ -1547,7 +1423,11 @@ export default function PosPage() {
                     <h2 className="text-lg font-bold text-zinc-900 tracking-tight leading-none">
                       {activeTableModal}
                     </h2>
-                    {!isVacantTable ? (
+                    {isTablePaid ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[11px] font-bold border border-emerald-200">
+                        Paid • Seated
+                      </span>
+                    ) : !isVacantTable ? (
                       <span className="px-2.5 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[11px] font-bold border border-[#E46254]/20">
                         Running • {activeSession?.rounds.length} {activeSession?.rounds.length === 1 ? "Round" : "Rounds"}
                       </span>
@@ -1561,8 +1441,8 @@ export default function PosPage() {
               </div>
             </div>
 
-            {/* Center: Operational Info (Elapsed Timer & Rock-Solid Table PIN) */}
-            <div className="flex items-center gap-4 text-xs font-medium text-zinc-600">
+            {/* Right: Operational Info (Elapsed Timer, Table PIN, Guest CRM & Transfer) */}
+            <div className="flex items-center gap-3 text-xs font-medium text-zinc-600">
               {!isVacantTable && activeSession?.firstOrderAt && (
                 <div className="flex items-center gap-1.5 text-zinc-500">
                   <Clock size={13} className="text-[#E46254]" />
@@ -1591,57 +1471,158 @@ export default function PosPage() {
                 title="Edit Guest Name / Phone"
               >
                 <User size={12} className="text-zinc-400" />
-                <span>{manualCustomerName || activeSession?.customerName || "Add Guest"}</span>
+                <span>{manualCustomerName || activeSession?.customerName || "Guest Details"}</span>
               </button>
-            </div>
-
-            {/* Right: Table Switcher & Transfer & Close */}
-            <div className="flex items-center gap-2">
-              <select
-                value={activeTableModal}
-                onChange={(e) => setActiveTableModal(e.target.value)}
-                className="bg-white border border-zinc-200/80 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-zinc-800 outline-none hover:border-[#E46254]/40 cursor-pointer shadow-2xs"
-              >
-                {locations.map((loc) => {
-                  const s = tableSessionMap.get(loc.name);
-                  const isOcc = s && s.status !== "VACANT";
-                  return (
-                    <option key={loc.id} value={loc.name}>
-                      {loc.name} {isOcc ? "• Running" : "• Vacant"}
-                    </option>
-                  );
-                })}
-              </select>
 
               {!isVacantTable && (
                 <button
                   onClick={() => setIsTransferModalOpen(true)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
                   title="Transfer orders to another table"
                 >
                   <ArrowRightLeft size={13} className="text-[#E46254]" />
-                  <span className="hidden sm:inline">Transfer</span>
+                  <span>Transfer Table</span>
                 </button>
               )}
-
-              <button
-                onClick={() => {
-                  setActiveTableModal(null);
-                  setIsPaymentDrawerOpen(false);
-                }}
-                className="p-1.5 rounded-xl text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer transition-colors"
-                title="Close Command Deck (Esc)"
-              >
-                <X size={18} />
-              </button>
             </div>
           </div>
 
-          {/* 2. Command Station Body: Unified Ticket on Left, Speed Catalog on Right */}
+          {/* 2. Command Station Body: ITEMS/MENU ON LEFT (57%), TICKET ON RIGHT (43%) */}
           <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
             
-            {/* ── UNIFIED TICKET STREAM ON LEFT (44% Width) ── */}
-            <div className="w-full lg:w-[44%] flex flex-col border-r border-zinc-200/80 bg-white overflow-hidden">
+            {/* ── LEFT PANEL (57%): High-Speed Menu Catalog (No Qty Pad, No Veg/Non-Veg Filter) ── */}
+            <div className="w-full lg:w-[57%] flex flex-col border-r border-zinc-200/80 bg-[#FAF8F7] overflow-hidden">
+              
+              {/* Top Search Bar & Category Tabs */}
+              <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
+                  <input
+                    type="text"
+                    placeholder="Search dishes (Press '/' to focus)..."
+                    value={dishSearchQuery}
+                    onChange={(e) => setDishSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
+                  />
+                  {dishSearchQuery && (
+                    <button
+                      onClick={() => setDishSearchQuery("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Categories Horizontal Tabs */}
+                <div className="flex items-center gap-1.5 overflow-x-auto slim-scrollbar py-0.5">
+                  {drawerCategories.map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => setSelectedDrawerCat(cat)}
+                      className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer shrink-0 border ${
+                        selectedDrawerCat.toLowerCase() === cat.toLowerCase()
+                          ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                          : "bg-white text-zinc-600 border-zinc-200/80 hover:bg-[#E46254]/5 hover:border-[#E46254]/20"
+                      }`}
+                    >
+                      {cat === "ALL" ? "All Dishes" : cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Dish Catalog Grid (Direct 1-Tap Buttons & Inline Portions) */}
+              <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
+                {filteredCatalog.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-400">
+                    <UtensilsCrossed size={24} className="mb-2 text-zinc-300" />
+                    <p className="text-xs font-semibold text-zinc-600">No dishes found</p>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">Try searching or picking a different category</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {filteredCatalog.map((dish) => {
+                      const hasPortions = Boolean(
+                        dish.variantsConfig?.hasPortions &&
+                        dish.variantsConfig.portions &&
+                        dish.variantsConfig.portions.length > 0
+                      );
+                      const hasAddonsOrTags = Boolean(
+                        dish.variantsConfig?.hasAddons ||
+                        (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
+                      );
+
+                      return (
+                        <div
+                          key={dish.id}
+                          className="bg-white rounded-2xl border border-zinc-200/80 p-3.5 hover:border-[#E46254]/30 hover:shadow-xs transition-all flex flex-col justify-between group"
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
+                                  }`}
+                                />
+                                <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">
+                                  {dish.category}
+                                </span>
+                              </div>
+
+                              {hasAddonsOrTags && (
+                                <button
+                                  onClick={() => handleOpenCustomizer(dish)}
+                                  className="text-[10px] font-semibold text-zinc-500 hover:text-[#E46254] flex items-center gap-1 cursor-pointer"
+                                  title="Add-ons / Prep Notes"
+                                >
+                                  <SlidersHorizontal size={11} />
+                                  <span>Notes</span>
+                                </button>
+                              )}
+                            </div>
+
+                            <h4 className="text-xs font-bold text-zinc-900 group-hover:text-[#E46254] transition-colors line-clamp-1">
+                              {dish.name}
+                            </h4>
+                          </div>
+
+                          {/* INLINE PORTION PICKER OR 1-TAP BASE BUTTON */}
+                          <div className="mt-3 pt-2.5 border-t border-zinc-100">
+                            {hasPortions ? (
+                              <div className="grid grid-cols-2 gap-1.5">
+                                {dish.variantsConfig!.portions!.map((portion) => (
+                                  <button
+                                    key={portion.name}
+                                    onClick={() => handleQuickAddPortion(dish, portion)}
+                                    className="py-1.5 px-2 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-xl text-left transition-all cursor-pointer shadow-2xs flex flex-col justify-between"
+                                  >
+                                    <span className="text-[10px] font-semibold block">{portion.name}</span>
+                                    <span className="text-xs font-bold font-mono">₹{portion.price}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => handleQuickAddBase(dish)}
+                                className="w-full py-1.5 px-3 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-2xs flex items-center justify-between"
+                              >
+                                <span>+ Add Item</span>
+                                <span className="font-mono font-bold">₹{dish.base_price}</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── RIGHT PANEL (43%): Table Ticket, Unfired Batch, Rounds & Payment / Settle Button ── */}
+            <div className="w-full lg:w-[43%] flex flex-col bg-white overflow-hidden">
               <div className="flex-1 overflow-y-auto p-5 space-y-4 slim-scrollbar">
                 
                 {/* Header status bar */}
@@ -1659,12 +1640,12 @@ export default function PosPage() {
                   </span>
                 </div>
 
-                {/* 1. CURRENT UNFIRED STAGED ITEMS (Right at the top of the ticket!) */}
+                {/* 1. CURRENT UNFIRED STAGED ITEMS (At the top of ticket) */}
                 {manualCart.length > 0 && (
                   <div className="bg-[#FAF8F7] border-2 border-dashed border-[#E46254]/40 rounded-2xl p-4 space-y-3 animate-in fade-in zoom-in-95 duration-100">
                     <div className="flex items-center justify-between pb-2 border-b border-[#E46254]/15">
                       <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-[#E46254] animate-pulse" />
+                        <span className="w-2 h-2 rounded-full bg-[#E46254]" />
                         <span className="font-bold text-xs text-[#C2410C] uppercase tracking-wide">
                           Unfired Round #{(activeSession?.rounds.length || 0) + 1}
                         </span>
@@ -1680,13 +1661,7 @@ export default function PosPage() {
 
                     <div className="divide-y divide-[#E46254]/10">
                       {manualCart.map((it) => (
-                        <div
-                          key={it.id}
-                          onClick={() => setSelectedTicketItemId(it.id === selectedTicketItemId ? null : it.id)}
-                          className={`py-2 flex items-center justify-between text-xs rounded-lg px-2 transition-colors cursor-pointer ${
-                            selectedTicketItemId === it.id ? "bg-[#E46254]/10 ring-1 ring-[#E46254]/30" : "hover:bg-white"
-                          }`}
-                        >
+                        <div key={it.id} className="py-2 flex items-center justify-between text-xs">
                           <div className="flex items-start gap-2.5 flex-1 pr-2">
                             <span className="font-mono font-bold text-[#E46254] w-6 shrink-0 mt-0.5">
                               {it.quantity}×
@@ -1702,7 +1677,7 @@ export default function PosPage() {
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center gap-2 shrink-0">
                             <div className="flex items-center bg-white rounded-lg border border-zinc-200">
                               <button
                                 onClick={() => updateManualQty(it.id, -1)}
@@ -1736,7 +1711,7 @@ export default function PosPage() {
                       ))}
                     </div>
 
-                    {/* Batch Cooking Instructions & Fire Button */}
+                    {/* Batch Instructions & Fire Button */}
                     <div className="pt-2 border-t border-[#E46254]/15 space-y-2">
                       <input
                         type="text"
@@ -1760,7 +1735,7 @@ export default function PosPage() {
                   </div>
                 )}
 
-                {/* 2. PREVIOUSLY FIRED ROUNDS STREAM */}
+                {/* 2. PREVIOUSLY FIRED ROUNDS STREAM (With 1-Tap Void Entire Round!) */}
                 {!isVacantTable && activeSession && activeSession.rounds.length > 0 ? (
                   <div className="space-y-3">
                     {activeSession.rounds.map((round) => (
@@ -1781,24 +1756,32 @@ export default function PosPage() {
                             </span>
                           </div>
 
-                          <button
-                            onClick={() => handleReprintKOT(round)}
-                            className="px-2 py-1 rounded-lg text-[11px] font-semibold text-zinc-600 bg-white hover:bg-zinc-50 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
-                            title="Reprint KOT"
-                          >
-                            <Printer size={11} />
-                            <span>Reprint KOT</span>
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleReprintKOT(round)}
+                              className="px-2 py-1 rounded-lg text-[11px] font-semibold text-zinc-600 bg-white hover:bg-zinc-50 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                              title="Reprint KOT"
+                            >
+                              <Printer size={11} />
+                              <span>KOT</span>
+                            </button>
+
+                            {/* 1-Tap Void Entire Round */}
+                            <button
+                              disabled={isSubmitting}
+                              onClick={() => handleVoidRound(round.orderId, round.roundNumber)}
+                              className="px-2 py-1 rounded-lg text-[11px] font-semibold text-rose-600 hover:text-white bg-rose-50 hover:bg-rose-600 border border-rose-200 hover:border-rose-600 flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                              title="Void this entire round"
+                            >
+                              <Trash2 size={11} />
+                              <span>Void Round</span>
+                            </button>
+                          </div>
                         </div>
 
                         <div className="divide-y divide-zinc-50">
                           {round.items.map((it) => (
-                            <div
-                              key={it.itemIndex}
-                              className={`py-2 flex items-center justify-between text-xs ${
-                                it.isVoided ? "opacity-40 line-through" : ""
-                              }`}
-                            >
+                            <div key={it.itemIndex} className="py-2 flex items-center justify-between text-xs">
                               <div className="flex items-start gap-2.5 flex-1 pr-2">
                                 <span className="font-bold font-mono text-zinc-400 w-5 shrink-0 mt-0.5">{it.quantity}×</span>
                                 <div>
@@ -1808,37 +1791,12 @@ export default function PosPage() {
                                       {it.notes}
                                     </span>
                                   )}
-                                  {it.isVoided && it.voidReason && (
-                                    <span className="text-[10px] text-rose-600 font-semibold block mt-0.5">
-                                      Voided: {it.voidReason}
-                                    </span>
-                                  )}
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-2 shrink-0">
-                                <span className="font-bold font-mono tabular-nums text-zinc-800">
-                                  ₹{it.price * it.quantity}
-                                </span>
-
-                                {!it.isVoided && (
-                                  <button
-                                    onClick={() =>
-                                      setVoidingItemTarget({
-                                        orderId: round.orderId,
-                                        itemIndex: it.itemIndex,
-                                        name: it.name,
-                                        quantity: it.quantity,
-                                        price: it.price,
-                                      })
-                                    }
-                                    className="p-1 text-zinc-300 hover:text-rose-600 transition-colors cursor-pointer"
-                                    title="Void this item"
-                                  >
-                                    <Trash2 size={12} />
-                                  </button>
-                                )}
-                              </div>
+                              <span className="font-bold font-mono tabular-nums text-zinc-800">
+                                ₹{it.price * it.quantity}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -1852,7 +1810,7 @@ export default function PosPage() {
                     </div>
                     <p className="text-xs font-bold text-zinc-800">Table is vacant</p>
                     <p className="text-[11.5px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
-                      Tap dishes on the right to start this table and fire Round #1.
+                      Select dishes from the menu on the left to start this table and fire Round #1.
                     </p>
                   </div>
                 ) : null}
@@ -1948,482 +1906,49 @@ export default function PosPage() {
                 )}
               </div>
 
-              {/* Action Bottom Bar on Left Panel */}
-              <div className="p-4 bg-[#FAF8F7] border-t border-zinc-200/80 space-y-2.5 shrink-0">
-                {!isPaymentDrawerOpen ? (
-                  <div className="grid grid-cols-2 gap-2">
+              {/* Action Bottom Bar on Right Panel (Print Bill + Payment Collected / Settle Table) */}
+              <div className="p-4 bg-[#FAF8F7] border-t border-zinc-200/80 space-y-2 shrink-0">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    onClick={handlePrintGuestBill}
+                    className="py-3 px-3 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                  >
+                    <Printer size={15} />
+                    <span>Print Bill</span>
+                  </button>
+
+                  {/* ── TWO-STAGE PAYMENT / SETTLE BUTTON IN THE EXACT SAME PLACE ── */}
+                  {!isTablePaid ? (
+                    /* STAGE 1: GUEST IS PAYING. Clicking marks PAID & triggers Thank You on their phone! */
                     <button
-                      onClick={handlePrintGuestBill}
-                      className="py-2.5 px-3 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                      disabled={subtotal === 0 || isSubmitting}
+                      onClick={handlePaymentCollected}
+                      className="sm:col-span-2 py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs"
+                      title="Mark payment as collected. This immediately triggers the Thank You celebration page on customer's phone."
                     >
-                      <Printer size={14} />
-                      <span>Print Bill</span>
-                    </button>
-
-                    <button
-                      disabled={subtotal === 0}
-                      onClick={() => setIsPaymentDrawerOpen(true)}
-                      className="py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                    >
-                      <CreditCard size={14} />
-                      <span>Settle (₹{grandTotal})</span>
-                    </button>
-                  </div>
-                ) : (
-                  /* ── MULTI-TENDER SETTLEMENT VIEW ── */
-                  <div className="bg-white border border-zinc-200/80 rounded-2xl p-4 space-y-3 shadow-2xs animate-in fade-in duration-100">
-                    <div className="flex items-center justify-between pb-1.5 border-b border-zinc-100">
-                      <span className="text-xs font-bold text-zinc-900">
-                        Settle ₹{grandTotal} • Select Payment Mode
-                      </span>
-                      <button
-                        onClick={() => {
-                          setIsPaymentDrawerOpen(false);
-                          setIsSplitMode(false);
-                        }}
-                        className="text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-
-                    {!isSplitMode ? (
-                      <>
-                        <div className="grid grid-cols-3 gap-2">
-                          <button
-                            disabled={isSubmitting}
-                            onClick={() => handleSettleTable("CASH")}
-                            className="py-2.5 px-2 bg-white hover:bg-[#E46254]/5 border border-zinc-200/80 hover:border-[#E46254]/30 text-zinc-900 rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                          >
-                            <Banknote size={16} className="text-[#E46254]" />
-                            <span>Cash</span>
-                          </button>
-
-                          <button
-                            disabled={isSubmitting}
-                            onClick={() => handleSettleTable("UPI")}
-                            className="py-2.5 px-2 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/25 text-[#C2410C] rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                          >
-                            <QrCode size={16} className="text-[#E46254]" />
-                            <span>UPI QR</span>
-                          </button>
-
-                          <button
-                            disabled={isSubmitting}
-                            onClick={() => handleSettleTable("CARD")}
-                            className="py-2.5 px-2 bg-white hover:bg-[#E46254]/5 border border-zinc-200/80 hover:border-[#E46254]/30 text-zinc-900 rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                          >
-                            <CreditCard size={16} className="text-[#E46254]" />
-                            <span>Card</span>
-                          </button>
-                        </div>
-
-                        {/* Cash Tendered & Split Mode Toggle */}
-                        <div className="flex items-center justify-between pt-1 border-t border-zinc-100 text-xs">
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number"
-                              placeholder="Cash given..."
-                              value={cashTendered}
-                              onChange={(e) => setCashTendered(e.target.value)}
-                              className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
-                            />
-                            {parseFloat(cashTendered) > grandTotal && (
-                              <span className="text-xs font-bold text-emerald-600 font-mono">
-                                Change: ₹{changeDue}
-                              </span>
-                            )}
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsSplitMode(true);
-                              setSplitCash(Math.ceil(grandTotal / 2).toString());
-                              setSplitUpi(Math.floor(grandTotal / 2).toString());
-                              setSplitCard("0");
-                            }}
-                            className="text-[11px] font-semibold text-[#E46254] hover:underline cursor-pointer"
-                          >
-                            Split Tender?
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      /* Flexible Multi-Split (Cash + UPI + Card) */
-                      <div className="space-y-2.5 pt-1">
-                        <div className="grid grid-cols-3 gap-2 text-xs">
-                          <div>
-                            <label className="text-[10px] font-semibold text-zinc-500 block mb-1">Cash (₹)</label>
-                            <input
-                              type="number"
-                              value={splitCash}
-                              onChange={(e) => setSplitCash(e.target.value)}
-                              className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
-                              placeholder="0"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="text-[10px] font-semibold text-zinc-500 block mb-1">UPI (₹)</label>
-                            <input
-                              type="number"
-                              value={splitUpi}
-                              onChange={(e) => setSplitUpi(e.target.value)}
-                              className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
-                              placeholder="0"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="text-[10px] font-semibold text-zinc-500 block mb-1">Card (₹)</label>
-                            <input
-                              type="number"
-                              value={splitCard}
-                              onChange={(e) => setSplitCard(e.target.value)}
-                              className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
-                              placeholder="0"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-100">
-                          <div>
-                            {splitRemaining !== 0 ? (
-                              <span className="text-[11px] font-bold text-rose-600 font-mono">
-                                Remaining: ₹{splitRemaining}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] font-bold text-emerald-600 font-mono">
-                                ✓ Balanced (₹{grandTotal})
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setIsSplitMode(false)}
-                              className="text-zinc-500 hover:text-zinc-800 text-[11px] font-medium cursor-pointer"
-                            >
-                              Cancel
-                            </button>
-
-                            <button
-                              disabled={isSubmitting || splitRemaining !== 0}
-                              onClick={() =>
-                                handleSettleTable("CASH", {
-                                  cash: parseFloat(splitCash) || 0,
-                                  upi: parseFloat(splitUpi) || 0,
-                                  card: parseFloat(splitCard) || 0,
-                                })
-                              }
-                              className="py-1.5 px-3 bg-zinc-900 hover:bg-black disabled:opacity-40 text-white rounded-lg font-bold text-xs cursor-pointer shadow-2xs"
-                            >
-                              Confirm Split
-                            </button>
-                          </div>
-                        </div>
+                      <CheckCircle2 size={16} />
+                      <div className="text-left">
+                        <span className="block leading-tight">Payment Collected (₹{grandTotal})</span>
+                        <span className="text-[10px] text-white/80 font-normal">Shows Thank You page on phone</span>
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* ── HIGH-SPEED MENU & RAPID NUMPAD (56% Width) ── */}
-            <div className="w-full lg:w-[56%] flex flex-col bg-[#FAF8F7] overflow-hidden">
-              
-              {/* Top Search, Category Pills, and Multiplier Indicator */}
-              <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
-                <div className="flex items-center gap-3">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
-                    <input
-                      type="text"
-                      placeholder="Search dishes (Press '/' to focus)..."
-                      value={dishSearchQuery}
-                      onChange={(e) => setDishSearchQuery(e.target.value)}
-                      className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
-                    />
-                    {dishSearchQuery && (
-                      <button
-                        onClick={() => setDishSearchQuery("")}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
-                      >
-                        <X size={13} />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Veg / Non-Veg Toggle */}
-                  <div className="flex items-center bg-[#FAF8F7] p-0.5 rounded-xl border border-zinc-200/80 shrink-0">
-                    <button
-                      onClick={() => setCatalogVegFilter("ALL")}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                        catalogVegFilter === "ALL"
-                          ? "bg-white text-zinc-900 shadow-2xs font-semibold"
-                          : "text-zinc-500 hover:text-zinc-800"
-                      }`}
-                    >
-                      All
                     </button>
-                    <button
-                      onClick={() => setCatalogVegFilter("VEG")}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1 ${
-                        catalogVegFilter === "VEG"
-                          ? "bg-white text-emerald-800 border border-emerald-200 shadow-2xs font-semibold"
-                          : "text-zinc-500 hover:text-zinc-800"
-                      }`}
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                      <span>Veg</span>
-                    </button>
-                    <button
-                      onClick={() => setCatalogVegFilter("NON_VEG")}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1 ${
-                        catalogVegFilter === "NON_VEG"
-                          ? "bg-white text-[#C2410C] border border-[#E46254]/30 shadow-2xs font-semibold"
-                          : "text-zinc-500 hover:text-zinc-800"
-                      }`}
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#E46254]" />
-                      <span>Non-Veg</span>
-                    </button>
-                  </div>
-
-                  {/* Current Quantity Multiplier Pill */}
-                  {multiplierInput && (
-                    <div className="flex items-center gap-1.5 bg-[#E46254] text-white px-3 py-1 rounded-xl text-xs font-bold font-mono shadow-xs shrink-0 animate-in zoom-in-95">
-                      <span>QTY: {multiplierInput}×</span>
-                      <button onClick={handleClearNumpad} className="hover:opacity-75">
-                        <X size={12} />
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Categories Horizontal Pills */}
-                <div className="flex items-center gap-1.5 overflow-x-auto slim-scrollbar py-0.5">
-                  {drawerCategories.map((cat) => (
-                    <button
-                      key={cat}
-                      onClick={() => setSelectedDrawerCat(cat)}
-                      className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer shrink-0 border ${
-                        selectedDrawerCat.toLowerCase() === cat.toLowerCase()
-                          ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
-                          : "bg-white text-zinc-600 border-zinc-200/80 hover:bg-[#E46254]/5 hover:border-[#E46254]/20"
-                      }`}
-                    >
-                      {cat === "ALL" ? "All Dishes" : cat}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Main Content Area: Dish Grid & Touch Numpad Dock */}
-              <div className="flex-1 flex overflow-hidden">
-                
-                {/* 1. Dish Catalog Grid (With Inline Portion Buttons!) */}
-                <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
-                  {filteredCatalog.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-400">
-                      <UtensilsCrossed size={24} className="mb-2 text-zinc-300" />
-                      <p className="text-xs font-semibold text-zinc-600">No dishes found</p>
-                      <p className="text-[11px] text-zinc-400 mt-0.5">Try searching or picking a different category</p>
-                    </div>
                   ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                      {filteredCatalog.map((dish) => {
-                        const hasPortions = Boolean(
-                          dish.variantsConfig?.hasPortions &&
-                          dish.variantsConfig.portions &&
-                          dish.variantsConfig.portions.length > 0
-                        );
-                        const hasAddonsOrTags = Boolean(
-                          dish.variantsConfig?.hasAddons ||
-                          (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
-                        );
-
-                        return (
-                          <div
-                            key={dish.id}
-                            className="bg-white rounded-2xl border border-zinc-200/80 p-3.5 hover:border-[#E46254]/30 hover:shadow-xs transition-all flex flex-col justify-between group"
-                          >
-                            <div>
-                              <div className="flex items-start justify-between gap-2 mb-1.5">
-                                <div className="flex items-center gap-1.5">
-                                  <span
-                                    className={`w-2 h-2 rounded-full shrink-0 ${
-                                      dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                                    }`}
-                                  />
-                                  <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">
-                                    {dish.category}
-                                  </span>
-                                </div>
-
-                                {hasAddonsOrTags && (
-                                  <button
-                                    onClick={() => handleOpenCustomizer(dish)}
-                                    className="text-[10px] font-semibold text-zinc-500 hover:text-[#E46254] flex items-center gap-1 cursor-pointer"
-                                    title="Add-ons / Prep Notes"
-                                  >
-                                    <SlidersHorizontal size={11} />
-                                    <span>Notes</span>
-                                  </button>
-                                )}
-                              </div>
-
-                              <h4 className="text-xs font-bold text-zinc-900 group-hover:text-[#E46254] transition-colors line-clamp-1">
-                                {dish.name}
-                              </h4>
-                            </div>
-
-                            {/* INLINE PORTION PICKER OR 1-TAP BASE BUTTON (Zero Modals!) */}
-                            <div className="mt-3 pt-2.5 border-t border-zinc-100">
-                              {hasPortions ? (
-                                <div className="grid grid-cols-2 gap-1.5">
-                                  {dish.variantsConfig!.portions!.map((portion) => (
-                                    <button
-                                      key={portion.name}
-                                      onClick={() => handleQuickAddPortion(dish, portion)}
-                                      className="py-1.5 px-2 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-xl text-left transition-all cursor-pointer shadow-2xs flex flex-col justify-between"
-                                    >
-                                      <span className="text-[10px] font-semibold block">{portion.name}</span>
-                                      <span className="text-xs font-bold font-mono">₹{portion.price}</span>
-                                    </button>
-                                  ))}
-                                </div>
-                              ) : (
-                                <button
-                                  onClick={() => handleQuickAddBase(dish)}
-                                  className="w-full py-1.5 px-3 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-2xs flex items-center justify-between"
-                                >
-                                  <span>+ Add Item</span>
-                                  <span className="font-mono font-bold">₹{dish.base_price}</span>
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    /* STAGE 2: GUEST HAS FINISHED & VACATED TABLE. Clicking completes session, cycles PIN & vacates table! */
+                    <button
+                      disabled={isSubmitting}
+                      onClick={handleSettleAndFreeTable}
+                      className="sm:col-span-2 py-3 px-4 rounded-xl bg-zinc-900 hover:bg-black disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs"
+                      title="Guests have vacated the table. Clicking settles the table, cycles to a new PIN in Captain app, and frees table to vacant."
+                    >
+                      <Sparkles size={16} className="text-[#E46254]" />
+                      <div className="text-left">
+                        <span className="block leading-tight">Table Vacated • Settle Table</span>
+                        <span className="text-[10px] text-zinc-400 font-normal">Generates new PIN & frees table</span>
+                      </div>
+                    </button>
                   )}
                 </div>
-
-                {/* 2. PERSISTENT TOUCH NUMPAD FOR ULTRA-FAST QUANTITY ENTRY */}
-                <div className="w-44 bg-white border-l border-zinc-200/80 p-3 flex flex-col justify-between shrink-0">
-                  <div>
-                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-100 text-xs">
-                      <span className="font-bold text-zinc-700 flex items-center gap-1">
-                        <Hash size={13} className="text-[#E46254]" />
-                        <span>Qty Pad</span>
-                      </span>
-                      {multiplierInput && (
-                        <span className="font-mono font-bold text-[#E46254]">{multiplierInput}×</span>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map((n) => (
-                        <button
-                          key={n}
-                          onClick={() => handleNumpadPress(n)}
-                          className="h-10 rounded-xl bg-white hover:bg-[#E46254]/10 border border-zinc-200/80 hover:border-[#E46254]/30 font-mono font-bold text-sm text-zinc-800 hover:text-[#E46254] transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center justify-center"
-                        >
-                          {n}
-                        </button>
-                      ))}
-
-                      <button
-                        onClick={handleClearNumpad}
-                        className="col-span-2 h-10 rounded-xl bg-white hover:bg-rose-50 border border-zinc-200/80 hover:border-rose-200 font-bold text-xs text-zinc-600 hover:text-rose-600 transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center justify-center gap-1"
-                      >
-                        <Delete size={13} />
-                        <span>Clear</span>
-                      </button>
-                    </div>
-
-                    <p className="text-[10px] text-zinc-400 mt-3 text-center leading-relaxed">
-                      Tap a number, then tap a dish to punch that quantity instantly.
-                    </p>
-                  </div>
-                </div>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── ITEM VOID REASON MODAL (Audit Compliance) ── */}
-      {voidingItemTarget && (
-        <div className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-sm w-full border border-zinc-200/80 shadow-2xl p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Trash2 size={16} className="text-rose-600" />
-                <h3 className="font-bold text-sm text-zinc-900">Void Item from Kitchen</h3>
-              </div>
-              <button onClick={() => setVoidingItemTarget(null)} className="text-zinc-400 hover:text-zinc-600">
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="p-3 bg-[#FAF8F7] rounded-xl text-xs">
-              <p className="font-bold text-zinc-900">{voidingItemTarget.name}</p>
-              <p className="text-zinc-500 font-mono mt-0.5">
-                {voidingItemTarget.quantity}× • ₹{voidingItemTarget.price * voidingItemTarget.quantity}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[11px] font-bold text-zinc-700 block uppercase tracking-wider">
-                Select Reason for Void:
-              </label>
-              {[
-                "Guest changed mind",
-                "Kitchen delay / took too long",
-                "Food quality issue / incorrect preparation",
-                "Wrong item punched by mistake",
-              ].map((reason) => (
-                <button
-                  key={reason}
-                  type="button"
-                  onClick={() => setVoidReason(reason)}
-                  className={`w-full p-2.5 rounded-xl border text-left text-xs transition-colors cursor-pointer ${
-                    voidReason === reason
-                      ? "bg-[#E46254] text-white border-[#E46254] font-semibold"
-                      : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50"
-                  }`}
-                >
-                  {reason}
-                </button>
-              ))}
-
-              <input
-                type="text"
-                placeholder="Or type custom reason..."
-                value={customVoidReason}
-                onChange={(e) => setCustomVoidReason(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs outline-none focus:border-[#E46254]"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-100">
-              <button
-                onClick={() => setVoidingItemTarget(null)}
-                className="px-3 py-2 text-xs font-semibold text-zinc-600 hover:text-zinc-900 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={isSubmitting}
-                onClick={handleConfirmItemVoid}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
-              >
-                Confirm Void
-              </button>
             </div>
           </div>
         </div>
@@ -2877,7 +2402,6 @@ export default function PosPage() {
           #thermal-chit {
             position: absolute !important;
             left: 0 !important;
-            top: 0 !important;
             width: 80mm !important;
             margin: 0 !important;
             padding: 4mm !important;
