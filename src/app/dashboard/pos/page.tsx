@@ -25,6 +25,9 @@ import {
   Users,
   CheckCircle2,
   ChevronRight,
+  ChevronLeft,
+  ArrowRightLeft,
+  Copy,
   Percent,
   ChefHat,
   Tag,
@@ -38,6 +41,7 @@ import {
   AddonOption,
   COMMON_PREP_TAGS,
 } from "@/utils/menuItemVariants";
+import { resolveTablePinAndSeed } from "@/utils/tableSessionPin";
 
 /* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
@@ -148,14 +152,17 @@ export default function PosPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Active Table Drawer
+  // Active Full-Screen Table Command Station
   const [activeTableModal, setActiveTableModal] = useState<string | null>(null);
 
-  // Manual Add Dish State inside Drawer
-  const [isAddDishOpen, setIsAddDishOpen] = useState(false);
+  // Menu Search & Filter in Full-Screen View
   const [dishSearchQuery, setDishSearchQuery] = useState("");
   const [selectedDrawerCat, setSelectedDrawerCat] = useState("ALL");
+  const [catalogVegFilter, setCatalogVegFilter] = useState<"ALL" | "VEG" | "NON_VEG">("ALL");
+
+  // Manual Punching / Staged Cart
   const [manualCart, setManualCart] = useState<NewStaffItem[]>([]);
+  const [batchNote, setBatchNote] = useState("");
   const [manualCustomerName, setManualCustomerName] = useState("");
   const [manualCustomerPhone, setManualCustomerPhone] = useState("");
 
@@ -172,6 +179,10 @@ export default function PosPage() {
   const [isPaymentDrawerOpen, setIsPaymentDrawerOpen] = useState(false);
   const [cashTendered, setCashTendered] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Table Transfer State
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferTargetTable, setTransferTargetTable] = useState<string>("");
 
   // Split Tender State
   const [isSplitMode, setIsSplitMode] = useState(false);
@@ -200,20 +211,22 @@ export default function PosPage() {
     grandTotal?: number;
     paymentMethod?: string;
     time: string;
-    reason?: string;
   } | null>(null);
 
-  // Toast
+  // Toast notifications
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 3200);
   };
 
-  /* ─── 1. Load Data & Realtime Sync ──────────────────────────────── */
+  /* ─── 1. Load Initial Core POS Data ──────────────────────────────── */
   const loadInitialData = async () => {
-    setLoading(true);
     try {
+      setLoading(true);
       const {
         data: { user },
       } = await supabase.auth.getUser();
@@ -312,14 +325,20 @@ export default function PosPage() {
         searchInputRef.current?.focus();
       }
       if (e.key === "Escape") {
-        setActiveTableModal(null);
-        setIsPaymentDrawerOpen(false);
-        setIsAddDishOpen(false);
+        if (customizingDish) {
+          setCustomizingDish(null);
+        } else if (isTransferModalOpen) {
+          setIsTransferModalOpen(false);
+        } else if (isPaymentDrawerOpen) {
+          setIsPaymentDrawerOpen(false);
+        } else {
+          setActiveTableModal(null);
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [customizingDish, isTransferModalOpen, isPaymentDrawerOpen]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
@@ -397,7 +416,6 @@ export default function PosPage() {
       }
 
       if (order.customer_name && !existing.customerName) {
-        // Strip auto-generated 'Table X' names so it doesn't display as a guest name
         const cleanName = order.customer_name.trim();
         if (!cleanName.toLowerCase().startsWith("table ")) {
           existing.customerName = cleanName;
@@ -488,7 +506,7 @@ export default function PosPage() {
   ).length;
   const vacantCount = locations.length - occupiedCount;
 
-  // Filtered Tables
+  // Filtered Tables for Floor Grid
   const filteredTables = useMemo(() => {
     return locations.filter((loc) => {
       const session = tableSessionMap.get(loc.name);
@@ -517,18 +535,31 @@ export default function PosPage() {
 
   const isVacantTable = !activeSession || activeSession.status === "VACANT" || activeSession.rounds.length === 0;
 
+  // Table PIN derived deterministically
+  const currentTablePin = useMemo(() => {
+    if (!activeTableModal) return "1234";
+    const { pin } = resolveTablePinAndSeed(activeTableModal, activeSession?.orders || []);
+    return pin;
+  }, [activeTableModal, activeSession]);
+
+  const handleCopyPin = (pin: string) => {
+    if (navigator?.clipboard) {
+      navigator.clipboard.writeText(pin);
+      showToast(`Table PIN ${pin} copied`);
+    }
+  };
+
   // Synchronize customer name & phone into edit inputs when table changes
   useEffect(() => {
     if (activeSession && activeSession.status !== "VACANT") {
       setManualCustomerName(activeSession.customerName || "");
       setManualCustomerPhone(activeSession.customerPhone || "");
-      setIsAddDishOpen(false);
     } else {
       setManualCustomerName("");
       setManualCustomerPhone("");
-      setIsAddDishOpen(true);
     }
     setManualCart([]);
+    setBatchNote("");
     setIsPaymentDrawerOpen(false);
     setIsSplitMode(false);
     setSplitUpiAmount("");
@@ -558,9 +589,13 @@ export default function PosPage() {
         !q ||
         m.name.toLowerCase().includes(q) ||
         m.category.toLowerCase().includes(q);
-      return matchCat && matchSearch;
+      const matchVeg =
+        catalogVegFilter === "ALL" ||
+        (catalogVegFilter === "VEG" && m.is_veg) ||
+        (catalogVegFilter === "NON_VEG" && !m.is_veg);
+      return matchCat && matchSearch && matchVeg;
     });
-  }, [menuItems, selectedDrawerCat, dishSearchQuery]);
+  }, [menuItems, selectedDrawerCat, dishSearchQuery, catalogVegFilter]);
 
   const handleDishClick = (dish: MenuItem) => {
     const hasVariants = Boolean(
@@ -675,10 +710,6 @@ export default function PosPage() {
     setCustomizingDish(null);
   };
 
-  const addToManualCart = (dish: MenuItem) => {
-    handleDishClick(dish);
-  };
-
   const updateManualQty = (id: string, delta: number) => {
     setManualCart((prev) =>
       prev
@@ -744,6 +775,8 @@ export default function PosPage() {
       }));
 
       const roundNum = (activeSession?.rounds.length || 0) + 1;
+      const noteParts: string[] = [`[POS Fired Round #${roundNum}]`];
+      if (batchNote.trim()) noteParts.push(batchNote.trim());
 
       const { error } = await supabase.from("orders").insert({
         restaurant_id: restaurantId,
@@ -754,7 +787,7 @@ export default function PosPage() {
         customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
         customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
         items_json: itemsPayload,
-        note: `[POS Fired Round #${roundNum}]`,
+        note: noteParts.join(" "),
       });
 
       if (error) throw error;
@@ -775,9 +808,9 @@ export default function PosPage() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
-      showToast(`Table ${activeTableModal}: KOT Round #${roundNum} sent to kitchen`);
+      showToast(`${activeTableModal}: Round #${roundNum} fired to kitchen`);
       setManualCart([]);
-      setIsAddDishOpen(false);
+      setBatchNote("");
 
       if (restaurantId) fetchActiveOrders(restaurantId);
 
@@ -786,6 +819,56 @@ export default function PosPage() {
       }, 100);
     } catch (err: any) {
       showToast("Failed to fire KOT: " + (err.message || "Network Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCancelOrder = async (orderId: string) => {
+    if (!confirm("Are you sure you want to cancel this order round?")) return;
+    setIsSubmitting(true);
+    try {
+      const { error } = await supabase
+        .from("orders")
+        .update({ status: "CANCELLED" })
+        .eq("id", orderId);
+
+      if (error) throw error;
+      showToast("Order round cancelled");
+      if (restaurantId) fetchActiveOrders(restaurantId);
+    } catch (err: any) {
+      showToast("Failed to cancel: " + (err.message || "Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleTransferTable = async (targetTable: string) => {
+    if (!activeTableModal || !targetTable || targetTable === activeTableModal) return;
+    const activeOrdersForTable = activeSession?.orders || [];
+    if (activeOrdersForTable.length === 0) {
+      setActiveTableModal(targetTable);
+      showToast(`Switched to ${targetTable}`);
+      setIsTransferModalOpen(false);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const orderIds = activeOrdersForTable.map((o) => o.id);
+      const { error } = await supabase
+        .from("orders")
+        .update({ table_no: targetTable })
+        .in("id", orderIds);
+
+      if (error) throw error;
+
+      showToast(`Transferred active orders to ${targetTable}`);
+      setActiveTableModal(targetTable);
+      setIsTransferModalOpen(false);
+      if (restaurantId) fetchActiveOrders(restaurantId);
+    } catch (err: any) {
+      showToast("Failed to transfer table: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
@@ -944,6 +1027,7 @@ export default function PosPage() {
       setActiveTableModal(null);
       setIsPaymentDrawerOpen(false);
       setManualCart([]);
+      setBatchNote("");
       setDiscountPercent(0);
       setCustomDiscountRupees("");
 
@@ -966,7 +1050,7 @@ export default function PosPage() {
   }, [upiId, restaurantName, grandTotal]);
 
   return (
-    <div className="flex h-screen flex-col bg-[#FAFAFA] font-sans text-zinc-900 select-none overflow-hidden">
+    <div className="flex h-screen flex-col bg-[#FCFAF8] font-sans text-zinc-900 select-none overflow-hidden">
       
       {/* Toast Alert */}
       {toastMessage && (
@@ -976,13 +1060,12 @@ export default function PosPage() {
         </div>
       )}
 
-      {/* ── TOP BAR: Matches Dashboard ── */}
+      {/* ── TOP BAR: Floor Tables Header ── */}
       <div className="shrink-0 bg-white border-b border-zinc-200/80 px-6 py-3.5 flex items-center justify-between gap-4 z-20">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <h1 className="text-[18px] font-bold text-zinc-900 tracking-tight">Floor Tables</h1>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 text-[10.5px] font-bold border border-emerald-500/20">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[11px] font-semibold border border-[#E46254]/20">
               Live Floor
             </span>
           </div>
@@ -990,10 +1073,10 @@ export default function PosPage() {
           <div className="h-4 w-px bg-zinc-200 mx-1" />
 
           {/* Mode Switcher */}
-          <div className="flex items-center bg-zinc-100 p-0.5 rounded-lg border border-zinc-200/80">
+          <div className="flex items-center bg-[#FAF8F7] p-0.5 rounded-xl border border-zinc-200/80">
             <button
               onClick={() => setTerminalMode("DINE_IN")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[12px] font-medium transition-all cursor-pointer ${
                 terminalMode === "DINE_IN"
                   ? "bg-white text-zinc-900 shadow-2xs font-semibold"
                   : "text-zinc-500 hover:text-zinc-900"
@@ -1005,7 +1088,7 @@ export default function PosPage() {
 
             <button
               onClick={() => setTerminalMode("TAKEAWAY")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[12px] font-medium transition-all cursor-pointer ${
                 terminalMode === "TAKEAWAY"
                   ? "bg-white text-zinc-900 shadow-2xs font-semibold"
                   : "text-zinc-500 hover:text-zinc-900"
@@ -1027,7 +1110,7 @@ export default function PosPage() {
               placeholder="Search tables, guests, phone... (Press '/')"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl pl-9 pr-8 py-1.5 text-[12.5px] placeholder:text-zinc-400 outline-none focus:border-zinc-400 focus:bg-white transition-all font-medium"
+              className="w-full bg-[#FAF8F7] border border-zinc-200/80 rounded-xl pl-9 pr-8 py-1.5 text-[12.5px] placeholder:text-zinc-400 outline-none focus:border-[#E46254] focus:bg-white transition-all font-medium"
             />
             {searchQuery && (
               <button
@@ -1044,8 +1127,8 @@ export default function PosPage() {
               if (restaurantId) fetchActiveOrders(restaurantId);
               showToast("Floor refreshed");
             }}
-            className="p-2 border border-zinc-200 bg-white rounded-xl text-zinc-500 hover:text-zinc-900 cursor-pointer transition-colors"
-            title="Refresh"
+            className="p-2 border border-zinc-200/80 bg-white hover:bg-zinc-50 rounded-xl text-zinc-500 hover:text-zinc-900 cursor-pointer transition-colors shadow-2xs"
+            title="Refresh floor"
           >
             <RotateCcw size={14} />
           </button>
@@ -1057,10 +1140,10 @@ export default function PosPage() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setTableFilter("ALL")}
-            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer border ${
+            className={`px-3 py-1 rounded-xl text-xs font-semibold transition-all cursor-pointer border ${
               tableFilter === "ALL"
-                ? "bg-zinc-900 text-white border-zinc-900 shadow-2xs font-semibold"
-                : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
+                ? "bg-zinc-900 text-white border-zinc-900 shadow-2xs"
+                : "bg-white text-zinc-600 border-zinc-200/80 hover:bg-[#E46254]/5 hover:border-[#E46254]/30"
             }`}
           >
             All Tables ({locations.length})
@@ -1068,26 +1151,24 @@ export default function PosPage() {
 
           <button
             onClick={() => setTableFilter("OCCUPIED")}
-            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 border ${
+            className={`px-3 py-1 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 border ${
               tableFilter === "OCCUPIED"
-                ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs font-semibold"
-                : "bg-white text-[#C2410C] border-zinc-200 hover:bg-[#E46254]/5"
+                ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                : "bg-white text-[#C2410C] border-zinc-200/80 hover:bg-[#E46254]/5 hover:border-[#E46254]/30"
             }`}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${tableFilter === "OCCUPIED" ? "bg-white" : "bg-[#E46254]"}`} />
-            <span>Active / Occupied ({occupiedCount})</span>
+            <span>Active / Seated ({occupiedCount})</span>
           </button>
 
           <button
             onClick={() => setTableFilter("VACANT")}
-            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 border ${
+            className={`px-3 py-1 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 border ${
               tableFilter === "VACANT"
-                ? "bg-emerald-600 text-white border-emerald-600 shadow-2xs font-semibold"
-                : "bg-white text-emerald-700 border-zinc-200 hover:bg-emerald-50"
+                ? "bg-zinc-800 text-white border-zinc-800 shadow-2xs"
+                : "bg-white text-zinc-700 border-zinc-200/80 hover:bg-zinc-50"
             }`}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${tableFilter === "VACANT" ? "bg-white" : "bg-emerald-500"}`} />
-            <span>Vacant ({vacantCount})</span>
+            <span>Vacant Tables ({vacantCount})</span>
           </button>
         </div>
 
@@ -1101,11 +1182,11 @@ export default function PosPage() {
       </div>
 
       {/* ── FLOOR TABLES GRID ── */}
-      <div className="flex-1 overflow-y-auto p-6 slim-scrollbar">
+      <div className="flex-1 overflow-y-auto p-6 slim-scrollbar bg-[#FCFAF8]">
         {locations.length === 0 ? (
-          <div className="h-[60vh] flex flex-col items-center justify-center text-center p-8 bg-white rounded-2xl border border-dashed border-zinc-200 max-w-md mx-auto">
+          <div className="h-[60vh] flex flex-col items-center justify-center text-center p-8 bg-white rounded-3xl border border-zinc-200/80 max-w-md mx-auto shadow-2xs">
             <div className="w-12 h-12 rounded-2xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center mb-3">
-              <UtensilsCrossed size={24} />
+              <UtensilsCrossed size={22} />
             </div>
             <h3 className="text-base font-bold text-zinc-900">No tables configured yet</h3>
             <p className="text-xs text-zinc-500 mt-1 mb-4 leading-relaxed">
@@ -1119,8 +1200,8 @@ export default function PosPage() {
             </Link>
           </div>
         ) : filteredTables.length === 0 ? (
-          <div className="h-[50vh] flex flex-col items-center justify-center text-center p-8">
-            <AlertCircle size={28} className="text-zinc-300 mb-2" />
+          <div className="h-[50vh] flex flex-col items-center justify-center text-center p-8 text-zinc-400">
+            <UtensilsCrossed size={24} className="mb-2 text-zinc-300" />
             <h3 className="text-sm font-semibold text-zinc-700">No tables matching this filter</h3>
             <p className="text-xs text-zinc-400 mt-0.5">Try switching between All, Active, or Vacant</p>
           </div>
@@ -1129,15 +1210,10 @@ export default function PosPage() {
             {filteredTables.map((loc) => {
               const session = tableSessionMap.get(loc.name);
               const isOccupied = session && session.status !== "VACANT";
-              const itemCount = session?.allItems.reduce((s, it) => s + it.quantity, 0) || 0;
 
               const elapsedMinutes = session?.firstOrderAt
                 ? Math.max(0, Math.floor((Date.now() - new Date(session.firstOrderAt).getTime()) / 60000))
                 : 0;
-
-              const hasQR = session?.allItems.some((i) => i.source === "QR");
-              const hasCaptain = session?.allItems.some((i) => i.source === "CAPTAIN");
-              const hasPOS = session?.allItems.some((i) => i.source === "STAFF");
 
               const isBillPrinted = printedTables.has(loc.name);
               const hasBillRequest = session?.hasBillRequest || false;
@@ -1147,19 +1223,19 @@ export default function PosPage() {
                 <div
                   key={loc.id}
                   onClick={() => setActiveTableModal(loc.name)}
-                  className={`relative rounded-2xl p-4.5 border transition-all duration-200 cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-md select-none group ${
+                  className={`relative rounded-2xl p-5 border transition-all duration-200 cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-md select-none group bg-white ${
                     hasBillRequest || hasUpiVerifyRequest
-                      ? "bg-amber-50/70 border-amber-300 ring-2 ring-amber-400/40"
+                      ? "border-[#E46254] ring-2 ring-[#E46254]/20"
                       : isBillPrinted
-                      ? "bg-purple-50/40 border-purple-200/90"
+                      ? "border-purple-300 bg-[#FAF7FB]"
                       : isOccupied
-                      ? "bg-white border-[#E46254]/30 hover:border-[#E46254] ring-1 ring-[#E46254]/10"
-                      : "bg-white border-zinc-200/80 hover:border-zinc-300"
+                      ? "border-[#E46254]/30 hover:border-[#E46254]"
+                      : "border-zinc-200/80 hover:border-[#E46254]/40"
                   }`}
                 >
                   <div>
                     {/* Header: Table Name & Status Badge */}
-                    <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="flex items-start justify-between gap-2 mb-3">
                       <div>
                         <h2 className="text-base font-bold text-zinc-900 tracking-tight group-hover:text-[#E46254] transition-colors">
                           {loc.name}
@@ -1170,28 +1246,26 @@ export default function PosPage() {
                         </div>
                       </div>
 
-                      {/* Status Indicator */}
+                      {/* Status Indicator (Clean, No Harsh Pulsing Dots) */}
                       <div className="flex items-center gap-1 flex-wrap justify-end">
                         {hasBillRequest ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold shadow-xs animate-pulse">
-                            🔔 Bill Call
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10.5px] font-bold shadow-2xs">
+                            Bill Call
                           </span>
                         ) : hasUpiVerifyRequest ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-600 text-white text-[10px] font-bold shadow-xs animate-pulse">
-                            📱 Verify UPI
+                          <span className="px-2.5 py-0.5 rounded-full bg-zinc-900 text-white text-[10.5px] font-bold shadow-2xs">
+                            Verify UPI
                           </span>
                         ) : isBillPrinted ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 text-[10.5px] font-bold border border-purple-200">
-                            🧾 Billed
+                          <span className="px-2.5 py-0.5 rounded-full bg-purple-50 text-purple-700 text-[10.5px] font-bold border border-purple-200">
+                            Billed
                           </span>
                         ) : isOccupied ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
-                            <span className="w-1.5 h-1.5 rounded-full bg-[#E46254] animate-pulse" />
-                            Active
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
+                            Running
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 text-[10.5px] font-semibold border border-emerald-500/20">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                          <span className="px-2.5 py-0.5 rounded-full bg-zinc-100 text-zinc-600 text-[10.5px] font-medium border border-zinc-200/60">
                             Vacant
                           </span>
                         )}
@@ -1201,11 +1275,10 @@ export default function PosPage() {
                     {/* Middle: Active Session Details or Vacant State */}
                     {isOccupied ? (
                       <div className="space-y-2 mt-3 pt-3 border-t border-zinc-100">
-                        {/* Guest & Timer */}
                         <div className="flex items-center justify-between text-xs">
                           <div className="flex items-center gap-1.5 truncate text-zinc-700 font-medium">
                             <User size={12} className="text-zinc-400 shrink-0" />
-                            <span className="truncate max-w-[110px]">
+                            <span className="truncate max-w-[120px]">
                               {session?.customerName || "Dine-in Guest"}
                             </span>
                           </div>
@@ -1215,7 +1288,6 @@ export default function PosPage() {
                           </span>
                         </div>
 
-                        {/* Customer Phone if present */}
                         {session?.customerPhone && (
                           <div className="flex items-center gap-1 text-[11px] text-zinc-500 font-mono">
                             <Phone size={10} className="text-zinc-400" />
@@ -1223,31 +1295,14 @@ export default function PosPage() {
                           </div>
                         )}
 
-                        {/* Order Origin Tags & Rounds Count */}
-                        <div className="flex items-center gap-1 flex-wrap pt-0.5">
-                          {hasQR && (
-                            <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-200">
-                              Online QR
-                            </span>
-                          )}
-                          {hasCaptain && (
-                            <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-purple-50 text-purple-700 border border-purple-200">
-                              Captain
-                            </span>
-                          )}
-                          {hasPOS && (
-                            <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-zinc-100 text-zinc-700 border border-zinc-200">
-                              POS
-                            </span>
-                          )}
-                          <span className="text-[10px] text-zinc-400 ml-auto font-mono">
-                            {session?.rounds.length} {session?.rounds.length === 1 ? "round" : "rounds"}
-                          </span>
+                        <div className="flex items-center justify-between text-[11px] text-zinc-400 pt-0.5 font-medium">
+                          <span>{session?.rounds.length} {session?.rounds.length === 1 ? "round" : "rounds"} fired</span>
+                          <span className="font-mono font-semibold text-zinc-700">₹{session?.totalBill || 0}</span>
                         </div>
                       </div>
                     ) : (
                       <div className="py-5 flex flex-col items-center justify-center text-center">
-                        <div className="w-8 h-8 rounded-full bg-zinc-50 border border-zinc-100 flex items-center justify-center text-zinc-300 mb-1.5">
+                        <div className="w-8 h-8 rounded-full bg-[#FAF8F7] border border-zinc-200/60 flex items-center justify-center text-zinc-400 mb-1.5">
                           <UtensilsCrossed size={14} />
                         </div>
                         <span className="text-[11.5px] text-zinc-400 font-medium">Ready for guests</span>
@@ -1255,7 +1310,7 @@ export default function PosPage() {
                     )}
                   </div>
 
-                  {/* Bottom: Total Bill or Quick Seat Action */}
+                  {/* Bottom Action */}
                   <div className="mt-4 pt-3 border-t border-zinc-100 flex items-center justify-between">
                     {isOccupied ? (
                       <>
@@ -1267,13 +1322,13 @@ export default function PosPage() {
                             ₹{session?.totalBill || 0}
                           </span>
                         </div>
-                        <span className="px-3 py-1.5 rounded-lg bg-[#E46254] text-white text-xs font-semibold group-hover:brightness-105 transition-all shadow-2xs">
-                          View & Settle
+                        <span className="px-3 py-1.5 rounded-xl bg-[#E46254] hover:bg-[#d55345] text-white text-xs font-semibold transition-all shadow-2xs">
+                          Command Deck
                         </span>
                       </>
                     ) : (
-                      <span className="w-full text-center py-1.5 rounded-lg bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-zinc-600 text-xs font-semibold transition-colors">
-                        + Start Order
+                      <span className="w-full text-center py-2 rounded-xl bg-white hover:bg-[#E46254]/5 border border-zinc-200/80 hover:border-[#E46254]/30 text-zinc-700 hover:text-[#E46254] text-xs font-semibold transition-colors">
+                        + Open & Order
                       </span>
                     )}
                   </div>
@@ -1284,135 +1339,219 @@ export default function PosPage() {
         )}
       </div>
 
-      {/* ── TABLE DETAILS MODAL / DRAWER ── */}
+      {/* ── PURE FULL-SCREEN TABLE COMMAND STATION ── */}
       {activeTableModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl max-w-xl w-full border border-zinc-200 shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-150">
-            
-            {/* Modal Header */}
-            <div className="p-4 border-b border-zinc-200 flex items-center justify-between bg-zinc-50/70">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center font-bold text-base shadow-2xs">
+        <div className="fixed inset-0 z-50 bg-[#FCFAF8] flex flex-col h-screen w-screen overflow-hidden animate-in fade-in duration-150">
+          
+          {/* 1. Command Station Header Deck */}
+          <div className="shrink-0 bg-white border-b border-zinc-200/80 px-6 py-3.5 flex items-center justify-between gap-4 z-20">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => {
+                  setActiveTableModal(null);
+                  setIsPaymentDrawerOpen(false);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+              >
+                <ChevronLeft size={15} />
+                <span>Floor</span>
+                <kbd className="ml-1 text-[10px] text-zinc-400 font-mono bg-zinc-100 px-1.5 py-0.5 rounded">Esc</kbd>
+              </button>
+
+              <div className="h-5 w-px bg-zinc-200 mx-1" />
+
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center font-bold text-sm">
                   {activeTableModal.replace(/[^0-9]/g, "") || "T"}
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-base font-bold text-zinc-900 tracking-tight">
+                    <h2 className="text-lg font-bold text-zinc-900 tracking-tight leading-none">
                       {activeTableModal}
-                    </h3>
+                    </h2>
                     {!isVacantTable ? (
-                      <span className="px-2 py-0.2 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10.5px] font-bold border border-[#E46254]/20">
-                        Occupied · {activeSession?.rounds.length} {activeSession?.rounds.length === 1 ? "Round" : "Rounds"}
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[11px] font-bold border border-[#E46254]/20">
+                        Running • {activeSession?.rounds.length} {activeSession?.rounds.length === 1 ? "Round" : "Rounds"}
                       </span>
                     ) : (
-                      <span className="px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-700 text-[10.5px] font-semibold border border-emerald-500/20">
-                        Vacant Table · Start Order
+                      <span className="px-2.5 py-0.5 rounded-full bg-zinc-100 text-zinc-700 text-[11px] font-semibold border border-zinc-200">
+                        Vacant Table
                       </span>
                     )}
                   </div>
-
-                  {/* Guest Identity Details */}
-                  <div className="flex items-center gap-3 text-xs text-zinc-500 mt-1 font-medium">
-                    <div className="flex items-center gap-1.5">
-                      <User size={12} className="text-zinc-400" />
-                      <input
-                        type="text"
-                        placeholder="Guest Name (optional)..."
-                        value={manualCustomerName}
-                        onChange={(e) => setManualCustomerName(e.target.value)}
-                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-semibold text-zinc-800 w-32 placeholder:text-zinc-400"
-                      />
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Phone size={12} className="text-zinc-400" />
-                      <input
-                        type="tel"
-                        placeholder="Phone (optional)..."
-                        value={manualCustomerPhone}
-                        onChange={(e) => setManualCustomerPhone(e.target.value)}
-                        className="bg-transparent border-b border-zinc-200 focus:border-[#E46254] outline-none text-xs font-mono text-zinc-700 w-32 placeholder:text-zinc-400"
-                      />
-                    </div>
-                  </div>
                 </div>
               </div>
+            </div>
+
+            {/* Center: Guest info, Seated time, and Table PIN */}
+            <div className="hidden md:flex items-center gap-4 text-xs font-medium text-zinc-600">
+              {!isVacantTable && activeSession?.firstOrderAt && (
+                <div className="flex items-center gap-1.5 text-zinc-500">
+                  <Clock size={13} className="text-[#E46254]" />
+                  <span>Seated {Math.max(0, Math.floor((Date.now() - new Date(activeSession.firstOrderAt).getTime()) / 60000))}m ago</span>
+                </div>
+              )}
+
+              {/* Table PIN Badge */}
+              <div className="flex items-center gap-1.5 bg-[#E46254]/5 border border-[#E46254]/20 px-3 py-1 rounded-xl">
+                <span className="text-[11px] text-[#C2410C] font-semibold">PIN:</span>
+                <span className="font-mono font-bold text-zinc-900 text-xs tracking-wider">{currentTablePin}</span>
+                <button
+                  type="button"
+                  onClick={() => handleCopyPin(currentTablePin)}
+                  className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                  title="Copy Table PIN"
+                >
+                  <Copy size={11} />
+                </button>
+              </div>
+
+              {/* Guest Name & Phone Quick Edit */}
+              <div className="flex items-center gap-2 pl-2 border-l border-zinc-200">
+                <div className="flex items-center gap-1">
+                  <User size={12} className="text-zinc-400" />
+                  <input
+                    type="text"
+                    placeholder="Guest Name..."
+                    value={manualCustomerName}
+                    onChange={(e) => setManualCustomerName(e.target.value)}
+                    className="bg-transparent border-b border-transparent hover:border-zinc-300 focus:border-[#E46254] outline-none text-xs font-semibold text-zinc-800 w-28 placeholder:text-zinc-400 transition-colors"
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  <Phone size={12} className="text-zinc-400" />
+                  <input
+                    type="tel"
+                    placeholder="Phone..."
+                    value={manualCustomerPhone}
+                    onChange={(e) => setManualCustomerPhone(e.target.value)}
+                    className="bg-transparent border-b border-transparent hover:border-zinc-300 focus:border-[#E46254] outline-none text-xs font-mono text-zinc-700 w-24 placeholder:text-zinc-400 transition-colors"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Right: Quick Switcher & Table Transfer & Close */}
+            <div className="flex items-center gap-2">
+              <select
+                value={activeTableModal}
+                onChange={(e) => setActiveTableModal(e.target.value)}
+                className="bg-white border border-zinc-200/80 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-zinc-800 outline-none hover:border-[#E46254]/40 cursor-pointer shadow-2xs"
+              >
+                {locations.map((loc) => {
+                  const s = tableSessionMap.get(loc.name);
+                  const isOcc = s && s.status !== "VACANT";
+                  return (
+                    <option key={loc.id} value={loc.name}>
+                      {loc.name} {isOcc ? "• Running" : "• Vacant"}
+                    </option>
+                  );
+                })}
+              </select>
+
+              {!isVacantTable && (
+                <button
+                  onClick={() => setIsTransferModalOpen(true)}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+                  title="Transfer orders to another table"
+                >
+                  <ArrowRightLeft size={13} className="text-[#E46254]" />
+                  <span className="hidden sm:inline">Transfer</span>
+                </button>
+              )}
 
               <button
                 onClick={() => {
                   setActiveTableModal(null);
                   setIsPaymentDrawerOpen(false);
-                  setIsAddDishOpen(false);
                 }}
-                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer transition-colors"
+                className="p-1.5 rounded-xl text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 cursor-pointer transition-colors"
+                title="Close Command Deck (Esc)"
               >
                 <X size={18} />
               </button>
             </div>
+          </div>
 
-            {/* Modal Scroll Body */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 slim-scrollbar">
-              
-              {/* CASE 1: OCCUPIED TABLE ROUNDS STREAM */}
-              {!isVacantTable && activeSession && activeSession.rounds.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between text-xs font-semibold text-zinc-600 bg-zinc-100/70 px-3 py-1.5 rounded-lg">
-                    <span>Existing Order Rounds ({activeSession.rounds.length})</span>
-                    <span>Running Total: ₹{activeSession.totalBill}</span>
+          {/* 2. Command Station Body: Two Spacious Panels */}
+          <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+            
+            {/* ── LEFT PANEL (42%): Table Orders & Bill Breakdown ── */}
+            <div className="w-full lg:w-[42%] flex flex-col border-r border-zinc-200/80 bg-white overflow-hidden">
+              <div className="flex-1 overflow-y-auto p-5 space-y-4 slim-scrollbar">
+                
+                {/* Header status bar */}
+                <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
+                  <div>
+                    <h3 className="text-sm font-bold text-zinc-900 tracking-tight">Table Orders & Rounds</h3>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      {!isVacantTable
+                        ? `${activeSession?.rounds.length} ${activeSession?.rounds.length === 1 ? 'round' : 'rounds'} fired so far`
+                        : "No active orders yet"}
+                    </p>
                   </div>
+                  {!isVacantTable && (
+                    <span className="font-mono font-bold text-sm text-zinc-900">
+                      Running: ₹{activeSession?.totalBill}
+                    </span>
+                  )}
+                </div>
 
-                  <div className="space-y-2.5">
+                {/* Stream of Rounds */}
+                {!isVacantTable && activeSession && activeSession.rounds.length > 0 ? (
+                  <div className="space-y-3">
                     {activeSession.rounds.map((round) => (
                       <div
                         key={round.orderId}
-                        className="bg-white rounded-xl border border-zinc-200/80 p-3 space-y-2 shadow-2xs"
+                        className="bg-white rounded-2xl border border-zinc-200/80 p-4 space-y-3 shadow-2xs hover:border-[#E46254]/25 transition-all"
                       >
-                        {/* Round Header */}
-                        <div className="flex items-center justify-between text-xs pb-1.5 border-b border-zinc-100">
+                        <div className="flex items-center justify-between text-xs pb-2 border-b border-zinc-100">
                           <div className="flex items-center gap-2">
-                            <span className="font-bold text-zinc-900 font-mono">
+                            <span className="font-bold text-zinc-900 font-mono text-xs">
                               Round #{round.roundNumber}
                             </span>
-                            <span className={`text-[9.5px] font-bold px-1.5 py-0.2 rounded uppercase ${
-                              round.source === "QR"
-                                ? "bg-blue-50 text-blue-700 border border-blue-200"
-                                : round.source === "CAPTAIN"
-                                ? "bg-purple-50 text-purple-700 border border-purple-200"
-                                : "bg-zinc-100 text-zinc-700 border border-zinc-200"
-                            }`}>
-                              {round.source === "QR" ? "Online QR" : round.source === "CAPTAIN" ? "Captain App" : "POS Counter"}
+                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#E46254]/5 text-[#C2410C] border border-[#E46254]/15">
+                              {round.source === "QR" ? "Customer QR" : round.source === "CAPTAIN" ? "Captain App" : "POS Counter"}
                             </span>
-                            <span className="text-[10px] text-zinc-400">
+                            <span className="text-[10.5px] text-zinc-400">
                               {new Date(round.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                             </span>
                           </div>
 
-                          {/* 1-Click KOT Reprint */}
-                          <button
-                            onClick={() => handleReprintKOT(round)}
-                            className="px-2 py-0.5 rounded-md text-[11px] font-semibold text-zinc-600 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors"
-                            title="Reprint KOT Chit"
-                          >
-                            <Printer size={12} />
-                            <span>Reprint KOT</span>
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleReprintKOT(round)}
+                              className="px-2 py-1 rounded-lg text-[11px] font-semibold text-zinc-600 bg-white hover:bg-zinc-50 border border-zinc-200 flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                              title="Reprint KOT"
+                            >
+                              <Printer size={11} />
+                              <span>KOT</span>
+                            </button>
+                            <button
+                              onClick={() => handleCancelOrder(round.orderId)}
+                              className="p-1 text-zinc-300 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
+                              title="Cancel round"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
                         </div>
 
-                        {/* Round Items List */}
                         <div className="divide-y divide-zinc-50">
                           {round.items.map((it, idx) => (
-                            <div key={idx} className="py-1.5 flex items-center justify-between text-xs">
-                              <div className="flex items-center gap-2">
-                                <span className="font-bold font-mono text-zinc-500 w-5">{it.quantity}×</span>
+                            <div key={idx} className="py-2 flex items-center justify-between text-xs">
+                              <div className="flex items-start gap-2.5">
+                                <span className="font-bold font-mono text-zinc-400 w-5 shrink-0 mt-0.5">{it.quantity}×</span>
                                 <div>
-                                  <span className="font-medium text-zinc-900">{it.name}</span>
+                                  <span className="font-medium text-zinc-900 leading-snug block">{it.name}</span>
                                   {it.notes && (
-                                    <span className="text-[10.5px] text-zinc-400 italic block">
-                                      Note: {it.notes}
+                                    <span className="text-[11px] text-[#C2410C]/80 mt-0.5 block font-medium">
+                                      {it.notes}
                                     </span>
                                   )}
                                 </div>
                               </div>
-                              <span className="font-bold font-mono tabular-nums text-zinc-800">
+                              <span className="font-bold font-mono tabular-nums text-zinc-800 ml-3 shrink-0">
                                 ₹{it.price * it.quantity}
                               </span>
                             </div>
@@ -1421,47 +1560,518 @@ export default function PosPage() {
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
+                ) : (
+                  <div className="p-8 bg-[#FAF8F7] rounded-2xl border border-dashed border-zinc-200 text-center space-y-2">
+                    <div className="w-10 h-10 rounded-2xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center mx-auto mb-1">
+                      <UtensilsCrossed size={18} />
+                    </div>
+                    <p className="text-xs font-bold text-zinc-800">Table is currently vacant</p>
+                    <p className="text-[11.5px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
+                      Select dishes from the menu catalog on the right to start this table and fire Round #1 to the kitchen.
+                    </p>
+                  </div>
+                )}
 
-              {/* MANUAL DISHES IN CURRENT STAFF BATCH (Ready to Fire) */}
+                {/* Financial Summary & Discounts */}
+                {subtotal > 0 && (
+                  <div className="bg-white rounded-2xl p-4.5 border border-zinc-200/80 space-y-3 text-xs shadow-2xs">
+                    <div className="flex justify-between text-zinc-500">
+                      <span>Subtotal</span>
+                      <span className="font-semibold text-zinc-800 font-mono">₹{subtotal}</span>
+                    </div>
+
+                    {/* Discount Selector */}
+                    <div className="space-y-1.5 pt-1.5 border-t border-zinc-100">
+                      <div className="flex items-center justify-between text-zinc-600">
+                        <span className="flex items-center gap-1 font-medium">
+                          <Tag size={12} className="text-[#E46254]" />
+                          <span>Discount</span>
+                        </span>
+                        {effectiveDiscount > 0 && (
+                          <span className="font-bold text-emerald-600 font-mono">
+                            -₹{effectiveDiscount.toFixed(1)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        {[0, 5, 10, 15, 20].map((pct) => (
+                          <button
+                            key={pct}
+                            onClick={() => {
+                              setDiscountPercent(pct);
+                              setCustomDiscountRupees("");
+                            }}
+                            className={`flex-1 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer transition-colors ${
+                              discountPercent === pct && !customDiscountRupees
+                                ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                                : "bg-white text-zinc-600 border-zinc-200 hover:bg-[#E46254]/5"
+                            }`}
+                          >
+                            {pct === 0 ? "None" : `${pct}%`}
+                          </button>
+                        ))}
+
+                        <input
+                          type="number"
+                          placeholder="₹ Off"
+                          value={customDiscountRupees}
+                          onChange={(e) => {
+                            setCustomDiscountRupees(e.target.value);
+                            setDiscountPercent(0);
+                          }}
+                          className="w-16 px-1.5 py-1 bg-white border border-zinc-200 rounded-lg text-[11px] font-mono outline-none text-center focus:border-[#E46254]"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Taxes (5% GST) */}
+                    <div className="flex justify-between text-zinc-500 pt-1.5 border-t border-zinc-100">
+                      <span>Taxes (5% GST)</span>
+                      <span className="font-semibold text-zinc-800 font-mono">₹{taxTotal.toFixed(1)}</span>
+                    </div>
+
+                    {/* Grand Total */}
+                    <div className="flex items-center justify-between pt-2 border-t border-zinc-200">
+                      <div>
+                        <span className="text-xs font-bold text-zinc-900 block">Total Due</span>
+                        <span className="text-[10.5px] text-zinc-400">Includes all taxes & discounts</span>
+                      </div>
+                      <span className="text-xl font-black text-zinc-900 font-mono tabular-nums">
+                        ₹{grandTotal}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Left Panel Action Dock (Print & Settle or Payment Drawer) */}
+              <div className="p-4 bg-[#FAF8F7] border-t border-zinc-200/80 space-y-2.5 shrink-0">
+                {isVacantTable ? (
+                  /* VACANT TABLE: START TABLE AND FIRE */
+                  <button
+                    disabled={manualCart.length === 0 || isSubmitting}
+                    onClick={handleSendManualKOT}
+                    className="w-full py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#D35546] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-2xs cursor-pointer transition-all"
+                  >
+                    <Send size={14} />
+                    <span>
+                      {manualCart.length === 0
+                        ? "Select dishes from menu on right to start"
+                        : `Fire KOT to Kitchen & Seat Table (₹${manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})`}
+                    </span>
+                  </button>
+                ) : !isPaymentDrawerOpen ? (
+                  /* OCCUPIED TABLE: PRINT BILL OR SETTLE (PLUS EXTRA ROUND IF STAGED) */
+                  <div className="space-y-2">
+                    {manualCart.length > 0 && (
+                      <button
+                        disabled={isSubmitting}
+                        onClick={handleSendManualKOT}
+                        className="w-full py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#d55345] text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
+                      >
+                        <Send size={13} />
+                        <span>Fire New KOT Round (Round #{(activeSession?.rounds.length || 0) + 1})</span>
+                      </button>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={handlePrintGuestBill}
+                        className="py-2.5 px-3 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <Printer size={14} />
+                        <span>Print Bill</span>
+                      </button>
+
+                      <button
+                        onClick={() => setIsPaymentDrawerOpen(true)}
+                        className="py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <CreditCard size={14} />
+                        <span>Settle (₹{grandTotal})</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* SETTLE VIEW: CASH / UPI / CARD / SPLIT */
+                  <div className="bg-white border border-zinc-200/80 rounded-2xl p-4 space-y-3 shadow-2xs animate-in fade-in duration-100">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-zinc-100">
+                      <span className="text-xs font-bold text-zinc-900">
+                        Settle ₹{grandTotal} • Select Payment Mode:
+                      </span>
+                      <button
+                        onClick={() => {
+                          setIsPaymentDrawerOpen(false);
+                          setIsSplitMode(false);
+                        }}
+                        className="text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+
+                    {!isSplitMode ? (
+                      <>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            disabled={isSubmitting}
+                            onClick={() => handleSettleTable("CASH")}
+                            className="py-2.5 px-2 bg-white hover:bg-[#E46254]/5 border border-zinc-200/80 hover:border-[#E46254]/30 text-zinc-900 rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <Banknote size={16} className="text-[#E46254]" />
+                            <span>Cash</span>
+                          </button>
+
+                          <button
+                            disabled={isSubmitting}
+                            onClick={() => handleSettleTable("UPI")}
+                            className="py-2.5 px-2 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/25 text-[#C2410C] rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <QrCode size={16} className="text-[#E46254]" />
+                            <span>UPI QR</span>
+                          </button>
+
+                          <button
+                            disabled={isSubmitting}
+                            onClick={() => handleSettleTable("CARD")}
+                            className="py-2.5 px-2 bg-white hover:bg-[#E46254]/5 border border-zinc-200/80 hover:border-[#E46254]/30 text-zinc-900 rounded-xl font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <CreditCard size={16} className="text-[#E46254]" />
+                            <span>Card</span>
+                          </button>
+                        </div>
+
+                        {/* Cash Tendered & Split Mode */}
+                        <div className="flex items-center justify-between pt-1 border-t border-zinc-100 text-xs">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              placeholder="Cash given..."
+                              value={cashTendered}
+                              onChange={(e) => setCashTendered(e.target.value)}
+                              className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
+                            />
+                            {parseFloat(cashTendered) > grandTotal && (
+                              <span className="text-xs font-bold text-emerald-600 font-mono">
+                                Change: ₹{changeDue}
+                              </span>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsSplitMode(true);
+                              setSplitUpiAmount(Math.floor(grandTotal / 2).toString());
+                              setSplitCashAmount(Math.ceil(grandTotal / 2).toString());
+                            }}
+                            className="text-[11px] font-semibold text-[#E46254] hover:underline cursor-pointer"
+                          >
+                            Split Tender?
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      /* SPLIT TENDER SUB-PANEL */
+                      <div className="space-y-2.5 pt-1">
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div>
+                            <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
+                              UPI Portion (₹)
+                            </label>
+                            <input
+                              type="number"
+                              value={splitUpiAmount}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setSplitUpiAmount(val);
+                                const numVal = parseFloat(val) || 0;
+                                setSplitCashAmount(Math.max(0, grandTotal - numVal).toString());
+                              }}
+                              className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
+                              placeholder="0"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
+                              Cash Portion (₹)
+                            </label>
+                            <input
+                              type="number"
+                              value={splitCashAmount}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setSplitCashAmount(val);
+                                const numVal = parseFloat(val) || 0;
+                                setSplitUpiAmount(Math.max(0, grandTotal - numVal).toString());
+                              }}
+                              className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
+                              placeholder="0"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-100">
+                          <button
+                            type="button"
+                            onClick={() => setIsSplitMode(false)}
+                            className="text-zinc-500 hover:text-zinc-800 text-[11px] font-medium cursor-pointer"
+                          >
+                            Cancel Split
+                          </button>
+
+                          <button
+                            disabled={isSubmitting || (parseFloat(splitUpiAmount || "0") + parseFloat(splitCashAmount || "0")) !== grandTotal}
+                            onClick={() =>
+                              handleSettleTable("UPI", {
+                                upi: parseFloat(splitUpiAmount || "0"),
+                                cash: parseFloat(splitCashAmount || "0"),
+                              })
+                            }
+                            className="py-1.5 px-3 bg-zinc-900 hover:bg-black disabled:opacity-40 text-white rounded-lg font-bold text-xs cursor-pointer shadow-2xs"
+                          >
+                            Confirm Split Settle
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── RIGHT PANEL (58%): High-Speed Menu & Staged Round Dock ── */}
+            <div className="w-full lg:w-[58%] flex flex-col bg-[#FAF8F7] overflow-hidden">
+              
+              {/* Search, Veg Filter, and Categories */}
+              <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
+                    <input
+                      type="text"
+                      placeholder="Search menu dishes, code, category... (press '/' to focus)"
+                      value={dishSearchQuery}
+                      onChange={(e) => setDishSearchQuery(e.target.value)}
+                      className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
+                    />
+                    {dishSearchQuery && (
+                      <button
+                        onClick={() => setDishSearchQuery("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Veg / Non-Veg Toggle */}
+                  <div className="flex items-center bg-[#FAF8F7] p-0.5 rounded-xl border border-zinc-200/80 shrink-0">
+                    <button
+                      onClick={() => setCatalogVegFilter("ALL")}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                        catalogVegFilter === "ALL"
+                          ? "bg-white text-zinc-900 shadow-2xs font-semibold"
+                          : "text-zinc-500 hover:text-zinc-800"
+                      }`}
+                    >
+                      All
+                    </button>
+                    <button
+                      onClick={() => setCatalogVegFilter("VEG")}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                        catalogVegFilter === "VEG"
+                          ? "bg-white text-emerald-800 border border-emerald-200 shadow-2xs font-semibold"
+                          : "text-zinc-500 hover:text-zinc-800"
+                      }`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      <span>Veg</span>
+                    </button>
+                    <button
+                      onClick={() => setCatalogVegFilter("NON_VEG")}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                        catalogVegFilter === "NON_VEG"
+                          ? "bg-white text-[#C2410C] border border-[#E46254]/30 shadow-2xs font-semibold"
+                          : "text-zinc-500 hover:text-zinc-800"
+                      }`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#E46254]" />
+                      <span>Non-Veg</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Categories Horizontal Pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto slim-scrollbar py-0.5">
+                  {drawerCategories.map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => setSelectedDrawerCat(cat)}
+                      className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer shrink-0 border ${
+                        selectedDrawerCat.toLowerCase() === cat.toLowerCase()
+                          ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                          : "bg-white text-zinc-600 border-zinc-200/80 hover:bg-[#E46254]/5 hover:border-[#E46254]/20"
+                      }`}
+                    >
+                      {cat === "ALL" ? "All Dishes" : cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Dish Catalog Grid */}
+              <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
+                {filteredCatalog.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-400">
+                    <UtensilsCrossed size={24} className="mb-2 text-zinc-300" />
+                    <p className="text-xs font-semibold text-zinc-600">No dishes found</p>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">Try searching or picking a different category</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {filteredCatalog.map((dish) => {
+                      const qtyInCart = manualCart
+                        .filter((c) => c.dishId === dish.id || c.id === dish.id)
+                        .reduce((s, c) => s + c.quantity, 0);
+
+                      const hasVariants = Boolean(
+                        dish.variantsConfig?.hasPortions ||
+                        dish.variantsConfig?.hasAddons ||
+                        (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
+                      );
+
+                      return (
+                        <div
+                          key={dish.id}
+                          onClick={() => handleDishClick(dish)}
+                          className="bg-white rounded-2xl border border-zinc-200/80 p-3.5 hover:border-[#E46254]/30 hover:shadow-xs transition-all flex flex-col justify-between cursor-pointer group"
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
+                                  }`}
+                                />
+                                <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">
+                                  {dish.category}
+                                </span>
+                              </div>
+                              {hasVariants && (
+                                <span className="text-[9.5px] font-bold px-1.5 py-0.2 rounded bg-[#E46254]/5 text-[#C2410C] border border-[#E46254]/15">
+                                  Variants
+                                </span>
+                              )}
+                            </div>
+
+                            <h4 className="text-xs font-bold text-zinc-900 group-hover:text-[#E46254] transition-colors line-clamp-1">
+                              {dish.name}
+                            </h4>
+                            {dish.description && (
+                              <p className="text-[10.5px] text-zinc-400 line-clamp-1 mt-0.5">
+                                {dish.description}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="mt-3 pt-2.5 border-t border-zinc-100 flex items-center justify-between" onClick={(e) => e.stopPropagation()}>
+                            <span className="font-mono font-bold text-xs text-zinc-900">
+                              ₹{dish.base_price}
+                            </span>
+
+                            {hasVariants ? (
+                              <button
+                                onClick={() => handleDishClick(dish)}
+                                className="px-2.5 py-1 bg-white hover:bg-[#E46254] text-zinc-800 hover:text-white border border-zinc-200 hover:border-[#E46254] rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                              >
+                                <span>Customize</span>
+                                {qtyInCart > 0 && (
+                                  <span className="w-4 h-4 rounded-full bg-[#E46254] group-hover:bg-white group-hover:text-[#E46254] text-white text-[9.5px] flex items-center justify-center font-mono font-bold">
+                                    {qtyInCart}
+                                  </span>
+                                )}
+                              </button>
+                            ) : qtyInCart > 0 ? (
+                              <div className="flex items-center bg-white rounded-lg border border-zinc-200">
+                                <button
+                                  onClick={() => updateManualQty(dish.id, -1)}
+                                  className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                                >
+                                  <Minus size={11} />
+                                </button>
+                                <span className="w-5 text-center font-mono font-bold text-xs">
+                                  {qtyInCart}
+                                </span>
+                                <button
+                                  onClick={() => addToManualCartDirect(dish)}
+                                  className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
+                                >
+                                  <Plus size={11} />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => addToManualCartDirect(dish)}
+                                className="px-2.5 py-1 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-lg text-[11px] font-semibold transition-all cursor-pointer"
+                              >
+                                + Add
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Staged Batch Dock (Active when manualCart.length > 0) */}
               {manualCart.length > 0 && (
-                <div className="space-y-2 bg-amber-50/50 border border-amber-200 rounded-xl p-3">
+                <div className="bg-white border-t border-zinc-200/80 p-4 space-y-3 shrink-0 shadow-lg animate-in slide-in-from-bottom-2 duration-150">
                   <div className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-1.5 font-bold text-amber-900">
-                      <ChefHat size={14} className="text-amber-600" />
-                      <span>Selected Dishes ({manualCart.length})</span>
+                    <div className="flex items-center gap-2 font-bold text-zinc-900">
+                      <ChefHat size={15} className="text-[#E46254]" />
+                      <span>
+                        Staged Round Batch ({manualCart.reduce((s, it) => s + it.quantity, 0)} items)
+                      </span>
+                      <span className="font-mono font-bold text-[#E46254]">
+                        • ₹{manualCart.reduce((s, it) => s + it.price * it.quantity, 0)}
+                      </span>
                     </div>
                     <button
                       onClick={() => setManualCart([])}
-                      className="text-[10.5px] text-zinc-400 hover:text-rose-600 font-medium"
+                      className="text-[11px] text-zinc-400 hover:text-rose-600 font-medium cursor-pointer"
                     >
-                      Clear
+                      Clear Batch
                     </button>
                   </div>
 
-                  <div className="divide-y divide-amber-100/70">
+                  {/* Staged Items List */}
+                  <div className="max-h-36 overflow-y-auto slim-scrollbar divide-y divide-zinc-100 border border-zinc-100 rounded-xl">
                     {manualCart.map((it) => (
-                      <div key={it.id} className="py-2 flex items-center justify-between text-xs">
+                      <div key={it.id} className="p-2 flex items-center justify-between text-xs bg-white">
                         <div className="flex-1 pr-2">
-                          <p className="font-bold text-zinc-900 leading-tight">{it.name}</p>
+                          <span className="font-bold text-zinc-900 leading-tight block">{it.name}</span>
                           {it.notes && (
-                            <p className="text-[10.5px] text-amber-800 font-medium leading-tight mt-0.5">
+                            <span className="text-[10.5px] text-[#C2410C] font-medium leading-tight block">
                               {it.notes}
-                            </p>
+                            </span>
                           )}
-                          <p className="text-[10px] text-zinc-400 font-mono mt-0.5">₹{it.price} each</p>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <div className="flex items-center bg-white rounded-md border border-amber-200">
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="flex items-center bg-white rounded-lg border border-zinc-200">
                             <button
                               onClick={() => updateManualQty(it.id, -1)}
                               className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
                             >
                               <Minus size={10} />
                             </button>
-                            <span className="w-4 text-center font-mono font-bold text-xs">
+                            <span className="w-5 text-center font-mono font-bold text-xs">
                               {it.quantity}
                             </span>
                             <button
@@ -1472,13 +2082,13 @@ export default function PosPage() {
                             </button>
                           </div>
 
-                          <span className="w-12 text-right font-mono font-bold text-zinc-900 tabular-nums">
+                          <span className="w-14 text-right font-mono font-bold text-zinc-900 tabular-nums">
                             ₹{it.price * it.quantity}
                           </span>
 
                           <button
                             onClick={() => setManualCart((prev) => prev.filter((i) => i.id !== it.id))}
-                            className="text-zinc-300 hover:text-rose-600 p-1"
+                            className="text-zinc-300 hover:text-rose-600 p-1 cursor-pointer"
                           >
                             <Trash2 size={12} />
                           </button>
@@ -1486,442 +2096,28 @@ export default function PosPage() {
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
 
-              {/* DISH SELECTOR & SEARCH (ALWAYS OPEN FOR VACANT TABLE, OR EXPANDABLE FOR OCCUPIED) */}
-              <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white shadow-2xs">
-                {!isVacantTable ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsAddDishOpen((v) => !v)}
-                    className="w-full p-3 bg-zinc-50/70 hover:bg-zinc-100/70 flex items-center justify-between text-xs font-bold text-zinc-800 transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <Plus size={14} className="text-[#E46254]" />
-                      <span>+ Add More Dishes to Table</span>
-                    </div>
-                    <span className="text-[11px] font-medium text-zinc-400">
-                      {isAddDishOpen ? "Hide Menu" : "Open Menu"}
-                    </span>
-                  </button>
-                ) : (
-                  <div className="p-3 bg-zinc-50/70 border-b border-zinc-200 flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-zinc-900">
-                      <UtensilsCrossed size={14} className="text-[#E46254]" />
-                      <span>Select Dishes to Start Order</span>
-                    </div>
-                    <span className="text-[10.5px] font-medium text-zinc-400">
-                      Tap dishes to add
-                    </span>
-                  </div>
-                )}
+                  {/* Cooking Instructions & Fire Button */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="Chef instructions for this round (e.g. Serve with Round 1, less spicy)..."
+                      value={batchNote}
+                      onChange={(e) => setBatchNote(e.target.value)}
+                      className="flex-1 px-3 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
+                    />
 
-                {(isVacantTable || isAddDishOpen) && (
-                  <div className="p-3 space-y-2.5">
-                    {/* Search Dishes */}
-                    <div className="relative">
-                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={13} />
-                      <input
-                        type="text"
-                        placeholder="Search menu (e.g. Naan, Chai, Burger)..."
-                        value={dishSearchQuery}
-                        onChange={(e) => setDishSearchQuery(e.target.value)}
-                        className="w-full pl-8 pr-7 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-medium outline-none focus:border-zinc-400 focus:bg-white"
-                      />
-                      {dishSearchQuery && (
-                        <button
-                          onClick={() => setDishSearchQuery("")}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
-                        >
-                          <X size={12} />
-                        </button>
-                      )}
-                    </div>
-
-                    {/* Quick Category Chips */}
-                    <div className="flex items-center gap-1 overflow-x-auto slim-scrollbar py-0.5">
-                      {drawerCategories.map((cat) => (
-                        <button
-                          key={cat}
-                          onClick={() => setSelectedDrawerCat(cat)}
-                          className={`px-2.5 py-1 rounded-md text-[10.5px] font-semibold whitespace-nowrap transition-colors cursor-pointer shrink-0 ${
-                            selectedDrawerCat.toLowerCase() === cat.toLowerCase()
-                              ? "bg-zinc-900 text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
-                        >
-                          {cat === "ALL" ? "All" : cat}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Catalog Dishes List */}
-                    <div className="max-h-56 overflow-y-auto slim-scrollbar divide-y divide-zinc-100 border border-zinc-100 rounded-lg">
-                      {filteredCatalog.length === 0 ? (
-                        <div className="py-6 text-center text-xs text-zinc-400">
-                          No dishes found. Try a different search or category.
-                        </div>
-                      ) : (
-                        filteredCatalog.map((dish) => {
-                          const qtyInCart = manualCart
-                            .filter((c) => c.dishId === dish.id || c.id === dish.id)
-                            .reduce((s, c) => s + c.quantity, 0);
-
-                          const hasVariants = Boolean(
-                            dish.variantsConfig?.hasPortions ||
-                            dish.variantsConfig?.hasAddons ||
-                            (dish.variantsConfig?.prepTags && dish.variantsConfig.prepTags.length > 0)
-                          );
-
-                          return (
-                            <div
-                              key={dish.id}
-                              onClick={() => handleDishClick(dish)}
-                              className="p-2 flex items-center justify-between hover:bg-zinc-50 text-xs transition-colors rounded-lg group cursor-pointer"
-                            >
-                              <div className="flex items-center gap-2 min-w-0 pr-2">
-                                <span
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    dish.is_veg ? "bg-emerald-500" : "bg-[#E46254]"
-                                  }`}
-                                />
-                                <div className="truncate">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="font-semibold text-zinc-800 truncate">{dish.name}</span>
-                                    {dish.variantsConfig?.hasPortions && (
-                                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-zinc-100 text-zinc-600 border border-zinc-200">
-                                        Portions
-                                      </span>
-                                    )}
-                                    {dish.variantsConfig?.hasAddons && (
-                                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                                        Add-ons
-                                      </span>
-                                    )}
-                                  </div>
-                                  <span className="text-[10px] text-zinc-400 font-mono">
-                                    ₹{dish.base_price}
-                                    {dish.variantsConfig?.hasPortions && " (Base/Full)"}
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                                {hasVariants ? (
-                                  <button
-                                    onClick={() => handleDishClick(dish)}
-                                    className="px-2.5 py-1 bg-zinc-900 hover:bg-black text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
-                                  >
-                                    <span>Customize</span>
-                                    {qtyInCart > 0 && (
-                                      <span className="w-4 h-4 rounded-full bg-[#E46254] text-white text-[9px] flex items-center justify-center font-mono font-bold">
-                                        {qtyInCart}
-                                      </span>
-                                    )}
-                                  </button>
-                                ) : qtyInCart > 0 ? (
-                                  <div className="flex items-center bg-zinc-100 rounded-md border border-zinc-200">
-                                    <button
-                                      onClick={() => updateManualQty(dish.id, -1)}
-                                      className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
-                                    >
-                                      <Minus size={10} />
-                                    </button>
-                                    <span className="w-4 text-center font-mono font-bold text-xs">
-                                      {qtyInCart}
-                                    </span>
-                                    <button
-                                      onClick={() => addToManualCartDirect(dish)}
-                                      className="w-5 h-5 flex items-center justify-center text-zinc-600 hover:text-black cursor-pointer"
-                                    >
-                                      <Plus size={10} />
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    onClick={() => addToManualCartDirect(dish)}
-                                    className="px-2.5 py-0.5 bg-[#E46254]/10 hover:bg-[#E46254] text-[#C2410C] hover:text-white rounded-md text-[11px] font-semibold transition-colors cursor-pointer"
-                                  >
-                                    + Add
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* CALCULATIONS & BILL BREAKDOWN (IF SUB-TOTAL > 0) */}
-              {subtotal > 0 && (
-                <div className="bg-zinc-50 rounded-xl p-3.5 border border-zinc-200/80 space-y-2 text-xs">
-                  <div className="flex justify-between text-zinc-500">
-                    <span>Subtotal</span>
-                    <span className="font-semibold text-zinc-800 font-mono">₹{subtotal}</span>
-                  </div>
-
-                  {/* DISCOUNT CALCULATOR */}
-                  <div className="space-y-1.5 pt-1 border-t border-zinc-200/60">
-                    <div className="flex items-center justify-between text-zinc-600">
-                      <span className="flex items-center gap-1 font-medium">
-                        <Tag size={12} className="text-[#E46254]" />
-                        <span>Discount:</span>
-                      </span>
-                      {effectiveDiscount > 0 && (
-                        <span className="font-bold text-emerald-600 font-mono">
-                          -₹{effectiveDiscount.toFixed(1)}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                      {[0, 5, 10, 15, 20].map((pct) => (
-                        <button
-                          key={pct}
-                          onClick={() => {
-                            setDiscountPercent(pct);
-                            setCustomDiscountRupees("");
-                          }}
-                          className={`flex-1 py-1 rounded-md text-[10.5px] font-semibold border cursor-pointer transition-colors ${
-                            discountPercent === pct && !customDiscountRupees
-                              ? "bg-zinc-900 text-white border-zinc-900"
-                              : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-100"
-                          }`}
-                        >
-                          {pct === 0 ? "None" : `${pct}%`}
-                        </button>
-                      ))}
-
-                      {/* Custom Rupee Discount */}
-                      <input
-                        type="number"
-                        placeholder="₹ Off"
-                        value={customDiscountRupees}
-                        onChange={(e) => {
-                          setCustomDiscountRupees(e.target.value);
-                          setDiscountPercent(0);
-                        }}
-                        className="w-16 px-1.5 py-1 bg-white border border-zinc-200 rounded-md text-[10.5px] font-mono outline-none text-center"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Taxes (5% GST) */}
-                  <div className="flex justify-between text-zinc-500 pt-1 border-t border-zinc-200/60">
-                    <span>Taxes (5% GST)</span>
-                    <span className="font-semibold text-zinc-800 font-mono">₹{taxTotal.toFixed(1)}</span>
-                  </div>
-
-                  {/* Grand Total */}
-                  <div className="flex items-center justify-between pt-2 border-t border-zinc-200">
-                    <div>
-                      <span className="text-xs font-bold text-zinc-800 block">Grand Total Due</span>
-                      <span className="text-[10px] text-zinc-400 font-medium">Includes taxes & discounts</span>
-                    </div>
-                    <span className="text-lg font-black text-zinc-900 font-mono tabular-nums">
-                      ₹{grandTotal}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Modal Bottom Actions */}
-            <div className="p-4 bg-white border-t border-zinc-200 space-y-2.5">
-              {isVacantTable ? (
-                /* VACANT TABLE ACTION: FIRE KOT & SEAT TABLE */
-                <button
-                  disabled={manualCart.length === 0 || isSubmitting}
-                  onClick={handleSendManualKOT}
-                  className="w-full py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#D35546] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-2xs cursor-pointer transition-all"
-                >
-                  <Send size={14} />
-                  <span>
-                    {manualCart.length === 0
-                      ? "Select dishes above to start order"
-                      : `Fire KOT to Kitchen & Seat Table (₹${manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})`}
-                  </span>
-                </button>
-              ) : !isPaymentDrawerOpen ? (
-                /* OCCUPIED TABLE ACTIONS: PRINT BILL OR SETTLE (PLUS EXTRA ROUND IF DISHES SELECTED) */
-                <div className="space-y-2">
-                  {manualCart.length > 0 && (
                     <button
                       disabled={isSubmitting}
                       onClick={handleSendManualKOT}
-                      className="w-full py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
+                      className="py-2.5 px-5 bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-2 cursor-pointer transition-all shrink-0"
                     >
                       <Send size={13} />
-                      <span>Fire New KOT Round (Round #{(activeSession?.rounds.length || 0) + 1})</span>
-                    </button>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={handlePrintGuestBill}
-                      className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                    >
-                      <Printer size={14} />
-                      <span>Print Guest Bill</span>
-                    </button>
-
-                    <button
-                      onClick={() => setIsPaymentDrawerOpen(true)}
-                      className="py-2.5 px-3 rounded-xl bg-[#E46254] hover:bg-[#D35546] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                    >
-                      <CreditCard size={14} />
-                      <span>Settle Bill (₹{grandTotal})</span>
+                      <span>
+                        Fire Round #{(activeSession?.rounds.length || 0) + 1} (₹{manualCart.reduce((s, it) => s + it.price * it.quantity, 0)})
+                      </span>
                     </button>
                   </div>
-                </div>
-              ) : (
-                /* SETTLE DRAWER: CASH / UPI / CARD / SPLIT */
-                <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-3 space-y-2.5 animate-in fade-in zoom-in-95 duration-100">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-900">
-                      Settle ₹{grandTotal} · Select Payment:
-                    </span>
-                    <button
-                      onClick={() => {
-                        setIsPaymentDrawerOpen(false);
-                        setIsSplitMode(false);
-                      }}
-                      className="text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-
-                  {!isSplitMode ? (
-                    <>
-                      <div className="grid grid-cols-3 gap-2">
-                        <button
-                          disabled={isSubmitting}
-                          onClick={() => handleSettleTable("CASH")}
-                          className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                        >
-                          <Banknote size={15} className="text-zinc-700" />
-                          <span>Cash</span>
-                        </button>
-
-                        <button
-                          disabled={isSubmitting}
-                          onClick={() => handleSettleTable("UPI")}
-                          className="py-2 px-1 bg-[#E46254]/10 hover:bg-[#E46254]/15 border border-[#E46254]/30 text-[#C2410C] rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                        >
-                          <QrCode size={15} className="text-[#E46254]" />
-                          <span>UPI</span>
-                        </button>
-
-                        <button
-                          disabled={isSubmitting}
-                          onClick={() => handleSettleTable("CARD")}
-                          className="py-2 px-1 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-900 rounded-lg font-semibold text-xs flex flex-col items-center gap-1 cursor-pointer transition-colors"
-                        >
-                          <CreditCard size={15} className="text-zinc-700" />
-                          <span>Card</span>
-                        </button>
-                      </div>
-
-                      {/* Cash Tendered & Split Toggle */}
-                      <div className="flex items-center justify-between pt-1 border-t border-zinc-200 text-xs">
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="number"
-                            placeholder="Cash given..."
-                            value={cashTendered}
-                            onChange={(e) => setCashTendered(e.target.value)}
-                            className="w-24 px-2 py-1 bg-white border border-zinc-200 rounded-md text-xs font-mono outline-none"
-                          />
-                          {parseFloat(cashTendered) > grandTotal && (
-                            <span className="text-xs font-bold text-emerald-600 font-mono">
-                              Change: ₹{changeDue}
-                            </span>
-                          )}
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsSplitMode(true);
-                            setSplitUpiAmount(Math.floor(grandTotal / 2).toString());
-                            setSplitCashAmount(Math.ceil(grandTotal / 2).toString());
-                          }}
-                          className="text-[11px] font-semibold text-[#E46254] hover:underline cursor-pointer"
-                        >
-                          Split Tender?
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    /* SPLIT TENDER SUB-PANEL */
-                    <div className="space-y-2.5 pt-1">
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
-                            UPI Portion (₹)
-                          </label>
-                          <input
-                            type="number"
-                            value={splitUpiAmount}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSplitUpiAmount(val);
-                              const numVal = parseFloat(val) || 0;
-                              setSplitCashAmount(Math.max(0, grandTotal - numVal).toString());
-                            }}
-                            className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
-                            placeholder="0"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="text-[10.5px] font-medium text-zinc-500 block mb-1">
-                            Cash Portion (₹)
-                          </label>
-                          <input
-                            type="number"
-                            value={splitCashAmount}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSplitCashAmount(val);
-                              const numVal = parseFloat(val) || 0;
-                              setSplitUpiAmount(Math.max(0, grandTotal - numVal).toString());
-                            }}
-                            className="w-full px-2 py-1.5 bg-white border border-zinc-200 rounded-lg font-mono font-bold text-zinc-900 outline-none focus:border-[#E46254]"
-                            placeholder="0"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs pt-1 border-t border-zinc-200">
-                        <button
-                          type="button"
-                          onClick={() => setIsSplitMode(false)}
-                          className="text-zinc-500 hover:text-zinc-800 text-[11px] font-medium cursor-pointer"
-                        >
-                          Cancel Split
-                        </button>
-
-                        <button
-                          disabled={isSubmitting || (parseFloat(splitUpiAmount || "0") + parseFloat(splitCashAmount || "0")) !== grandTotal}
-                          onClick={() =>
-                            handleSettleTable("UPI", {
-                              upi: parseFloat(splitUpiAmount || "0"),
-                              cash: parseFloat(splitCashAmount || "0"),
-                            })
-                          }
-                          className="py-1.5 px-3 bg-zinc-900 hover:bg-black disabled:opacity-40 text-white rounded-lg font-bold text-xs cursor-pointer shadow-2xs"
-                        >
-                          Confirm Split Settle
-                        </button>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -1929,12 +2125,74 @@ export default function PosPage() {
         </div>
       )}
 
+      {/* ── TRANSFER TABLE MODAL ── */}
+      {isTransferModalOpen && activeTableModal && (
+        <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-sm w-full border border-zinc-200/80 shadow-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ArrowRightLeft size={16} className="text-[#E46254]" />
+                <h3 className="font-bold text-sm text-zinc-900">Transfer {activeTableModal}</h3>
+              </div>
+              <button
+                onClick={() => setIsTransferModalOpen(false)}
+                className="text-zinc-400 hover:text-zinc-600 cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-500 leading-relaxed">
+              Move all active orders and running bill to another dining table on the floor.
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-semibold text-zinc-700 block">Select Target Table</label>
+              <select
+                value={transferTargetTable}
+                onChange={(e) => setTransferTargetTable(e.target.value)}
+                className="w-full bg-white border border-zinc-200 rounded-xl px-3 py-2 text-xs font-semibold text-zinc-800 outline-none focus:border-[#E46254]"
+              >
+                <option value="">-- Choose destination table --</option>
+                {locations
+                  .filter((loc) => loc.name !== activeTableModal)
+                  .map((loc) => {
+                    const s = tableSessionMap.get(loc.name);
+                    const isOcc = s && s.status !== "VACANT";
+                    return (
+                      <option key={loc.id} value={loc.name}>
+                        {loc.name} {isOcc ? "(Currently Occupied)" : "(Vacant)"}
+                      </option>
+                    );
+                  })}
+              </select>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-100">
+              <button
+                onClick={() => setIsTransferModalOpen(false)}
+                className="px-3 py-1.5 text-xs font-semibold text-zinc-600 hover:text-zinc-900 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!transferTargetTable || isSubmitting}
+                onClick={() => handleTransferTable(transferTargetTable)}
+                className="px-4 py-1.5 bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
+              >
+                Confirm Transfer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── DISH CUSTOMIZATION MODAL (PORTIONS, ADD-ONS, QUICK PREP TAGS) ── */}
       {customizingDish && (
-        <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl max-w-md w-full border border-zinc-200 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full border border-zinc-200/80 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
             {/* Header */}
-            <div className="p-4 border-b border-zinc-200 flex items-center justify-between bg-zinc-50/80">
+            <div className="p-5 border-b border-zinc-100 flex items-center justify-between bg-white">
               <div className="flex items-center gap-2.5 min-w-0 pr-2">
                 <span
                   className={`w-3 h-3 rounded-full shrink-0 ${
@@ -1945,7 +2203,7 @@ export default function PosPage() {
                   <h3 className="font-bold text-zinc-900 text-sm truncate">
                     {customizingDish.name}
                   </h3>
-                  <div className="flex items-center gap-2 text-[10.5px] text-zinc-500">
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-400">
                     <span>{customizingDish.category}</span>
                     <span>•</span>
                     <span className="font-mono font-semibold text-zinc-700">
@@ -1958,14 +2216,14 @@ export default function PosPage() {
               <button
                 type="button"
                 onClick={() => setCustomizingDish(null)}
-                className="w-8 h-8 rounded-full hover:bg-zinc-200/70 flex items-center justify-center text-zinc-400 hover:text-zinc-700 transition-colors cursor-pointer shrink-0"
+                className="w-8 h-8 rounded-full hover:bg-zinc-100 flex items-center justify-center text-zinc-400 hover:text-zinc-700 transition-colors cursor-pointer shrink-0"
               >
                 <X size={16} />
               </button>
             </div>
 
             {/* Content */}
-            <div className="p-4 space-y-4 overflow-y-auto slim-scrollbar text-xs">
+            <div className="p-5 space-y-4 overflow-y-auto slim-scrollbar text-xs">
               {/* Portions / Sizes */}
               {customizingDish.variantsConfig?.hasPortions &&
                 customizingDish.variantsConfig.portions &&
@@ -1983,23 +2241,23 @@ export default function PosPage() {
                             key={portion.name}
                             type="button"
                             onClick={() => setSelectedPortion(portion)}
-                            className={`p-2.5 rounded-xl border text-left transition-all flex items-center justify-between cursor-pointer ${
+                            className={`p-3 rounded-2xl border text-left transition-all flex items-center justify-between cursor-pointer ${
                               isSel
-                                ? "bg-zinc-900 border-zinc-900 text-white shadow-sm"
-                                : "bg-zinc-50 border-zinc-200/80 text-zinc-700 hover:bg-zinc-100"
+                                ? "bg-[#E46254] border-[#E46254] text-white shadow-2xs"
+                                : "bg-white border-zinc-200/80 text-zinc-700 hover:border-[#E46254]/30"
                             }`}
                           >
                             <div>
                               <p className="font-bold text-xs">{portion.name}</p>
                               {isFull && (
-                                <p className={`text-[9.5px] ${isSel ? "text-zinc-300" : "text-zinc-400"}`}>
+                                <p className={`text-[9.5px] ${isSel ? "text-white/80" : "text-zinc-400"}`}>
                                   Base Price
                                 </p>
                               )}
                             </div>
                             <span
                               className={`font-mono font-bold text-xs ${
-                                isSel ? "text-amber-300" : "text-zinc-900"
+                                isSel ? "text-white" : "text-zinc-900"
                               }`}
                             >
                               ₹{portion.price}
@@ -2039,14 +2297,14 @@ export default function PosPage() {
                             }}
                             className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between cursor-pointer ${
                               isSel
-                                ? "bg-amber-50/80 border-amber-300 text-amber-950 font-medium"
-                                : "bg-white border-zinc-200/80 text-zinc-700 hover:bg-zinc-50"
+                                ? "bg-[#E46254]/5 border-[#E46254]/30 text-zinc-900 font-medium"
+                                : "bg-white border-zinc-200/80 text-zinc-700 hover:border-[#E46254]/20"
                             }`}
                           >
                             <div className="flex items-center gap-2">
                               <div
                                 className={`w-4 h-4 rounded flex items-center justify-center text-[10px] ${
-                                  isSel ? "bg-amber-600 text-white" : "border border-zinc-300"
+                                  isSel ? "bg-[#E46254] text-white" : "border border-zinc-300"
                                 }`}
                               >
                                 {isSel && <Check size={10} strokeWidth={3} />}
@@ -2086,10 +2344,10 @@ export default function PosPage() {
                             setSelectedPrepTags((prev) => [...prev, tag]);
                           }
                         }}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                        className={`px-3 py-1 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
                           isSel
                             ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs font-semibold"
-                            : "bg-zinc-100 hover:bg-zinc-200 border-zinc-200 text-zinc-700"
+                            : "bg-white hover:border-[#E46254]/30 border-zinc-200/80 text-zinc-700"
                         }`}
                       >
                         {tag}
@@ -2109,13 +2367,13 @@ export default function PosPage() {
                   placeholder="e.g. Serve hot, no salt on fries, extra napkins..."
                   value={customDishNote}
                   onChange={(e) => setCustomDishNote(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-zinc-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-zinc-900 bg-zinc-50"
+                  className="w-full px-3 py-2 text-xs border border-zinc-200/80 rounded-xl focus:outline-none focus:border-[#E46254] bg-[#FAF8F7]"
                 />
               </div>
             </div>
 
             {/* Footer */}
-            <div className="p-4 border-t border-zinc-200 bg-zinc-50 flex items-center justify-between">
+            <div className="p-4 border-t border-zinc-100 bg-[#FAF8F7] flex items-center justify-between">
               <div>
                 <span className="text-[10px] text-zinc-400 block uppercase font-bold tracking-wider">
                   Item Total
