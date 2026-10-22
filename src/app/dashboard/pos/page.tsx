@@ -1769,107 +1769,50 @@ export default function PosPage() {
     <div className="flex flex-col h-screen bg-[#FAF8F7] text-zinc-900 select-none overflow-hidden font-sans">
       
       {/* ── TOP DECK / NAVIGATION BAR ── */}
-      <header className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0 z-30">
-        <div className="flex items-center gap-4">
-          <Link
-            href="/dashboard"
-            className="flex items-center gap-2 text-zinc-700 hover:text-black font-semibold text-xs tracking-tight transition-colors"
+      <header className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0 z-40 relative">
+        <Link
+          href="/dashboard"
+          className="flex items-center gap-2 text-zinc-700 hover:text-black font-semibold text-xs tracking-tight transition-colors shrink-0"
+        >
+          <span className="w-7 h-7 rounded-lg bg-zinc-100 flex items-center justify-center text-zinc-600">
+            <ChevronLeft size={16} />
+          </span>
+          <span className="hidden sm:inline">Back to Dashboard</span>
+        </Link>
+
+        {/* Inventory-style Tab Switcher */}
+        <div className="bg-gray-100/80 p-1 rounded-xl flex items-center gap-1 w-full max-w-xs shadow-inner border border-gray-200/50">
+          <button 
+            type="button"
+            onClick={() => setTerminalMode("DINE_IN")}
+            className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
+              terminalMode === "DINE_IN" 
+                ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
+                : "text-gray-500 hover:text-gray-700"
+            }`}
           >
-            <span className="w-7 h-7 rounded-lg bg-zinc-100 flex items-center justify-center text-zinc-600">
-              <ChevronLeft size={16} />
-            </span>
-            <span className="hidden sm:inline">Back to Dashboard</span>
-          </Link>
-
-          <div className="h-4 w-px bg-zinc-200" />
-
-          {/* Mode Switcher */}
-          <div className="flex items-center bg-[#FAF8F7] p-1 rounded-xl border border-zinc-200/80">
-            <button
-              onClick={() => setTerminalMode("DINE_IN")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                terminalMode === "DINE_IN"
-                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
-                  : "text-zinc-500 hover:text-zinc-800"
-              }`}
-            >
-              <UtensilsCrossed size={13} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : "text-zinc-400"} />
-              <span>Dine-In Tables</span>
-            </button>
-            <button
-              onClick={() => {
-                setTerminalMode("TAKEAWAY");
-                setActiveTableModal(null);
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                terminalMode === "TAKEAWAY"
-                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
-                  : "text-zinc-500 hover:text-zinc-800"
-              }`}
-            >
-              <ShoppingBag size={13} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : "text-zinc-400"} />
-              <span>Takeaway / Quick Token</span>
-            </button>
-          </div>
+            <UtensilsCrossed size={14} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : ""} />
+            Dine-In
+          </button>
+          <button 
+            type="button"
+            onClick={() => {
+              setTerminalMode("TAKEAWAY");
+              setActiveTableModal(null);
+            }}
+            className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
+              terminalMode === "TAKEAWAY" 
+                ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            <ShoppingBag size={14} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
+            Takeaway
+          </button>
         </div>
 
-        {/* Floor Health Metrics vs Takeaway Metrics */}
-        {terminalMode === "DINE_IN" ? (
-          <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
-            <div className="hidden md:flex items-center gap-3 pr-2 border-r border-zinc-200">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-[#E46254]" />
-                <span className="text-zinc-500">Occupied:</span>
-                <span className="font-bold text-zinc-800 font-mono">{floorStats.occupied}</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-zinc-300" />
-                <span className="text-zinc-500">Vacant:</span>
-                <span className="font-bold text-zinc-800 font-mono">{floorStats.vacant}</span>
-              </div>
-              {floorStats.billed > 0 && (
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-purple-500" />
-                  <span className="text-zinc-500">Billed:</span>
-                  <span className="font-bold text-purple-700 font-mono">{floorStats.billed}</span>
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
-                Live Sales
-              </span>
-              <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
-                ₹{floorStats.totalRevenue.toLocaleString("en-IN")}
-              </span>
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
-            <div className="flex items-center gap-3 pr-2 border-r border-zinc-200">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-amber-500" />
-                <span className="text-zinc-500">Waiting Pickup:</span>
-                <span className="font-bold text-zinc-800 font-mono">{activeTakeawayOrders.length}</span>
-              </div>
-              <div className="hidden sm:flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-zinc-500">Tokens Today:</span>
-                <span className="font-bold text-zinc-800 font-mono">{todayTakeawayOrders.length}</span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
-                Takeaway Sales
-              </span>
-              <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
-                ₹{todayTakeawayRevenue.toLocaleString("en-IN")}
-              </span>
-            </div>
-          </div>
-        )}
+        {/* Empty Balancer for True Center Alignment */}
+        <div className="w-7 sm:w-28 shrink-0" />
       </header>
 
       {/* ── FLOOR FILTER TOOLBAR ── */}
@@ -2094,64 +2037,13 @@ export default function PosPage() {
       </div>
       {/* ── TAKEAWAY / QUICK-BILL COMMAND STATION (FULL-SCREEN SMOOTH ANIMATED OVERLAY) ── */}
       <div
-        className={`fixed inset-0 z-40 bg-[#FAF8F7] flex flex-col transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`fixed top-14 inset-x-0 bottom-0 z-30 bg-[#FAF8F7] flex flex-col transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
           terminalMode === "TAKEAWAY"
             ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
             : "opacity-0 translate-y-4 scale-[0.99] pointer-events-none"
         }`}
       >
-        {/* 1. Takeaway Top Deck / Header */}
-        <header className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0 shadow-2xs z-10">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setTerminalMode("DINE_IN")}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#FAF8F7] hover:bg-zinc-100 text-zinc-700 hover:text-zinc-900 border border-zinc-200/80 font-bold text-xs shadow-2xs transition-all cursor-pointer"
-            >
-              <ChevronLeft size={16} />
-              <span>← Dine-In Floor</span>
-            </button>
-
-            <div className="h-4 w-px bg-zinc-200 hidden sm:block" />
-
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#E46254]" />
-              <span className="font-extrabold text-sm text-zinc-900 tracking-tight">
-                Takeaway Command Station
-              </span>
-              <span className="px-2 py-0.5 rounded-md bg-[#E46254]/10 text-[#C2410C] font-mono font-bold text-[11px] border border-[#E46254]/20">
-                Token #{String(currentToken).padStart(2, "0")}
-              </span>
-            </div>
-          </div>
-
-          {/* Quick Metrics Bar */}
-          <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
-            <div className="hidden md:flex items-center gap-3 pr-2 border-r border-zinc-200">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                <span className="text-zinc-500">Waiting Pickup:</span>
-                <span className="font-bold text-zinc-800 font-mono">{activeTakeawayOrders.length}</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-zinc-500">Tokens Today:</span>
-                <span className="font-bold text-zinc-800 font-mono">{todayTakeawayOrders.length}</span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
-                Takeaway Sales
-              </span>
-              <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
-                ₹{todayTakeawayRevenue.toLocaleString("en-IN")}
-              </span>
-            </div>
-          </div>
-        </header>
-
-        {/* 2. Pinned Live Pickups Calling Strip (Slim, never obscures active cart) */}
+        {/* Pinned Live Pickups Calling Strip (Slim, never obscures active cart) */}
         <div className="h-12 bg-white/95 backdrop-blur-xs border-b border-zinc-200/80 px-4 flex items-center gap-2.5 overflow-x-auto shrink-0 slim-scrollbar">
           <div className="flex items-center gap-1.5 pr-2.5 border-r border-zinc-200 shrink-0">
             <Clock size={13} className="text-[#E46254]" />
