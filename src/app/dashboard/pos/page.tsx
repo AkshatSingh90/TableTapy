@@ -220,12 +220,27 @@ export default function PosPage() {
     customerPhone?: string;
     items: Array<{ name: string; quantity: number; notes?: string; price?: number }>;
     subtotal?: number;
+    packaging?: number;
     discount?: number;
     tax?: number;
     roundOff?: number;
     grandTotal?: number;
     time: string;
   } | null>(null);
+
+  // Takeaway Mode State (Independent high-speed counter workflow)
+  const [takeawayCart, setTakeawayCart] = useState<NewStaffItem[]>([]);
+  const [takeawayCustomerName, setTakeawayCustomerName] = useState("");
+  const [takeawayCustomerPhone, setTakeawayCustomerPhone] = useState("");
+  const [takeawayPackagingFee, setTakeawayPackagingFee] = useState(false);
+  const [takeawayPaymentMethod, setTakeawayPaymentMethod] = useState<"CASH" | "UPI" | "CARD">("UPI");
+  const [takeawayActiveTab, setTakeawayActiveTab] = useState<"NEW_TOKEN" | "LIVE_PICKUPS">("NEW_TOKEN");
+  const [tokenOverride, setTokenOverride] = useState<number | null>(null);
+  const [takeawayShowDiscount, setTakeawayShowDiscount] = useState(false);
+  const [takeawayDiscountPercent, setTakeawayDiscountPercent] = useState<number>(0);
+  const [takeawayDiscountRupees, setTakeawayDiscountRupees] = useState<string>("");
+  const [takeawayBatchNote, setTakeawayBatchNote] = useState("");
+  const takeawaySearchInputRef = useRef<HTMLInputElement>(null);
 
   /* ─── 1. Load Floor, Catalog & Realtime Orders ─────────────────────── */
   const loadInitialData = async () => {
@@ -427,9 +442,19 @@ export default function PosPage() {
     loadInitialData();
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "/" && document.activeElement !== searchInputRef.current) {
+      if (
+        e.key === "/" &&
+        document.activeElement !== searchInputRef.current &&
+        document.activeElement !== takeawaySearchInputRef.current &&
+        document.activeElement?.tagName !== "INPUT" &&
+        document.activeElement?.tagName !== "TEXTAREA"
+      ) {
         e.preventDefault();
-        searchInputRef.current?.focus();
+        if (terminalMode === "TAKEAWAY") {
+          takeawaySearchInputRef.current?.focus();
+        } else {
+          searchInputRef.current?.focus();
+        }
       }
       if (e.key === "Escape") {
         if (editingRoundItem) {
@@ -440,14 +465,16 @@ export default function PosPage() {
           setIsTransferModalOpen(false);
         } else if (isGuestInfoModalOpen) {
           setIsGuestInfoModalOpen(false);
-        } else {
+        } else if (activeTableModal) {
           setActiveTableModal(null);
+        } else if (dishSearchQuery) {
+          setDishSearchQuery("");
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [editingRoundItem, customizingDish, isTransferModalOpen, isGuestInfoModalOpen]);
+  }, [editingRoundItem, customizingDish, isTransferModalOpen, isGuestInfoModalOpen, terminalMode, activeTableModal, dishSearchQuery]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
@@ -760,7 +787,7 @@ export default function PosPage() {
     const displayName = isFull ? dish.name : `${dish.name} (${portion.name})`;
     const cartEntryId = `${dish.id}_${portion.name}`;
 
-    setManualCart((prev) => {
+    const updateCart = (prev: NewStaffItem[]) => {
       const idx = prev.findIndex((c) => c.id === cartEntryId);
       if (idx >= 0) {
         const copy = [...prev];
@@ -781,11 +808,17 @@ export default function PosPage() {
           notes: "",
         },
       ];
-    });
+    };
+
+    if (terminalMode === "TAKEAWAY") {
+      setTakeawayCart(updateCart);
+    } else {
+      setManualCart(updateCart);
+    }
   };
 
   const handleQuickAddBase = (dish: MenuItem) => {
-    setManualCart((prev) => {
+    const updateCart = (prev: NewStaffItem[]) => {
       const idx = prev.findIndex(
         (i) => (i.dishId === dish.id || i.id === dish.id) && !i.portionName && (!i.notes || i.notes === "")
       );
@@ -807,7 +840,13 @@ export default function PosPage() {
           notes: "",
         },
       ];
-    });
+    };
+
+    if (terminalMode === "TAKEAWAY") {
+      setTakeawayCart(updateCart);
+    } else {
+      setManualCart(updateCart);
+    }
   };
 
   const handleOpenCustomizer = (dish: MenuItem) => {
@@ -852,7 +891,7 @@ export default function PosPage() {
       .sort()
       .join("_")}_${selectedPrepTags.sort().join("_")}_${customDishNote.trim()}`;
 
-    setManualCart((prev) => {
+    const updateCart = (prev: NewStaffItem[]) => {
       const idx = prev.findIndex((c) => c.id === cartEntryId);
       if (idx >= 0) {
         const copy = [...prev];
@@ -875,7 +914,13 @@ export default function PosPage() {
           prepTags: selectedPrepTags,
         },
       ];
-    });
+    };
+
+    if (terminalMode === "TAKEAWAY") {
+      setTakeawayCart(updateCart);
+    } else {
+      setManualCart(updateCart);
+    }
 
     setCustomizingDish(null);
   };
@@ -1450,6 +1495,239 @@ export default function PosPage() {
     }
   };
 
+  /* ─── 11. Takeaway Computations & Handlers ───────────────────────── */
+  const activeTakeawayOrders = useMemo(() => {
+    return activeOrders.filter((o) => {
+      const isTakeaway =
+        (o.table_no || "").toLowerCase().includes("takeaway") ||
+        (o.table_no || "").toLowerCase().includes("token");
+      return isTakeaway && o.status !== "COMPLETED" && o.status !== "CANCELLED";
+    });
+  }, [activeOrders]);
+
+  const todayTakeawayOrders = useMemo(() => {
+    const todayStr = new Date().toDateString();
+    return [...activeOrders, ...pastOrdersHistory].filter((o) => {
+      const isTakeaway =
+        (o.table_no || "").toLowerCase().includes("takeaway") ||
+        (o.table_no || "").toLowerCase().includes("token");
+      if (!isTakeaway) return false;
+      const orderDate = new Date(o.created_at).toDateString();
+      return orderDate === todayStr;
+    });
+  }, [activeOrders, pastOrdersHistory]);
+
+  const todayTakeawayRevenue = useMemo(() => {
+    return todayTakeawayOrders
+      .filter((o) => o.payment_status === "PAID" && o.status !== "CANCELLED")
+      .reduce((sum, o) => sum + (o.total || 0), 0);
+  }, [todayTakeawayOrders]);
+
+  const nextTokenNumber = useMemo(() => {
+    let maxToken = 0;
+    todayTakeawayOrders.forEach((o) => {
+      const match = (o.table_no || "").match(/\d+/);
+      if (match) {
+        const num = parseInt(match[0], 10);
+        if (!isNaN(num) && num > maxToken) maxToken = num;
+      }
+    });
+    return maxToken > 0 ? maxToken + 1 : todayTakeawayOrders.length + 1;
+  }, [todayTakeawayOrders]);
+
+  const currentToken = tokenOverride ?? nextTokenNumber;
+
+  const takeawaySubtotal = useMemo(() => {
+    return takeawayCart.reduce((sum, it) => sum + it.price * it.quantity, 0);
+  }, [takeawayCart]);
+
+  const takeawayDiscountAmount = useMemo(() => {
+    if (takeawayDiscountPercent > 0) {
+      return (takeawaySubtotal * takeawayDiscountPercent) / 100;
+    }
+    const rup = parseFloat(takeawayDiscountRupees);
+    if (!isNaN(rup) && rup > 0) {
+      return Math.min(rup, takeawaySubtotal);
+    }
+    return 0;
+  }, [takeawaySubtotal, takeawayDiscountPercent, takeawayDiscountRupees]);
+
+  const takeawayPackagingAmount = takeawayPackagingFee ? 15 : 0;
+
+  const takeawayTotal = useMemo(() => {
+    return Math.max(0, Math.round(takeawaySubtotal + takeawayPackagingAmount - takeawayDiscountAmount));
+  }, [takeawaySubtotal, takeawayPackagingAmount, takeawayDiscountAmount]);
+
+  const handleUpdateTakeawayQty = (id: string, delta: number) => {
+    setTakeawayCart((prev) => {
+      return prev
+        .map((it) => {
+          if (it.id === id) {
+            const nextQty = it.quantity + delta;
+            return nextQty > 0 ? { ...it, quantity: nextQty } : null;
+          }
+          return it;
+        })
+        .filter(Boolean) as NewStaffItem[];
+    });
+  };
+
+  const handleRemoveTakeawayItem = (id: string) => {
+    setTakeawayCart((prev) => prev.filter((it) => it.id !== id));
+  };
+
+  const handleClearTakeawayCart = () => {
+    setTakeawayCart([]);
+    setTakeawayBatchNote("");
+    setTakeawayDiscountPercent(0);
+    setTakeawayDiscountRupees("");
+    setTakeawayShowDiscount(false);
+  };
+
+  const handleCollectAndFireTakeaway = async () => {
+    if (takeawayCart.length === 0) {
+      showToast("Cannot fire empty token. Add dishes from catalog.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const tokenFormatted = `Token #${String(currentToken).padStart(2, "0")}`;
+      const tokenIdentifier = `Takeaway #${String(currentToken).padStart(2, "0")}`;
+
+      const itemsPayload = takeawayCart.map((c) => ({
+        item: {
+          id: c.dishId || c.id,
+          name: c.name,
+          basePrice: c.price,
+          category: c.category,
+          isVeg: c.isVeg,
+        },
+        price: c.price,
+        quantity: c.quantity,
+        notes: c.notes || "",
+        isReady: false,
+      }));
+
+      const noteParts: string[] = [`[${tokenFormatted}]`];
+      if (takeawayPackagingFee) noteParts.push("[Packaging: ₹15]");
+      if (takeawayDiscountAmount > 0) noteParts.push(`[Discount: ₹${takeawayDiscountAmount.toFixed(0)}]`);
+      if (takeawayBatchNote.trim()) noteParts.push(takeawayBatchNote.trim());
+
+      const { error } = await supabase.from("orders").insert({
+        restaurant_id: restaurantId,
+        table_no: tokenIdentifier,
+        total: takeawayTotal,
+        status: "PREPARING",
+        payment_status: "PAID",
+        payment_method: takeawayPaymentMethod,
+        customer_name: takeawayCustomerName.trim() || "Takeaway Guest",
+        customer_phone: takeawayCustomerPhone.trim() || null,
+        items_json: itemsPayload,
+        note: noteParts.join(" "),
+      });
+
+      if (error) throw error;
+
+      // Set Thermal Print Chit
+      setPrintChit({
+        type: "BILL",
+        mode: "TAKEAWAY",
+        tableOrToken: tokenFormatted,
+        kotNumber: currentToken,
+        customerName: takeawayCustomerName.trim() || "Takeaway Guest",
+        customerPhone: takeawayCustomerPhone.trim() || undefined,
+        items: takeawayCart.map((c) => ({
+          name: c.name,
+          quantity: c.quantity,
+          notes: c.notes,
+          price: c.price,
+        })),
+        subtotal: takeawaySubtotal,
+        packaging: takeawayPackagingAmount > 0 ? takeawayPackagingAmount : undefined,
+        discount: takeawayDiscountAmount > 0 ? takeawayDiscountAmount : undefined,
+        grandTotal: takeawayTotal,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      });
+
+      showToast(`${tokenFormatted} punched & paid (₹${takeawayTotal})`);
+
+      setTakeawayCart([]);
+      setTakeawayCustomerName("");
+      setTakeawayCustomerPhone("");
+      setTakeawayBatchNote("");
+      setTakeawayPackagingFee(false);
+      setTakeawayDiscountPercent(0);
+      setTakeawayDiscountRupees("");
+      setTakeawayShowDiscount(false);
+      setTokenOverride(currentToken + 1);
+
+      if (restaurantId) {
+        fetchActiveOrders(restaurantId);
+        fetchPastOrders(restaurantId);
+      }
+
+      setTimeout(() => {
+        window.print();
+      }, 100);
+    } catch (err: any) {
+      showToast("Failed to process token: " + (err.message || "Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleMarkTakeawayHandedOver = async (orderId: string, tokenName: string) => {
+    try {
+      const { error } = await supabase
+        .from("orders")
+        .update({
+          status: "COMPLETED",
+          payment_status: "PAID",
+        })
+        .eq("id", orderId);
+
+      if (error) throw error;
+      showToast(`${tokenName.replace("Takeaway", "Token")} handed over`);
+      if (restaurantId) {
+        fetchActiveOrders(restaurantId);
+        fetchPastOrders(restaurantId);
+      }
+    } catch (err: any) {
+      showToast("Error updating order: " + err.message);
+    }
+  };
+
+  const handleReprintTakeawayOrder = (order: OrderRecord) => {
+    let items: any[] = [];
+    if (Array.isArray(order.items_json)) {
+      items = order.items_json.map((it: any) => ({
+        name: it.item?.name || it.name || "Item",
+        quantity: it.quantity || 1,
+        notes: it.notes,
+        price: it.price || it.item?.basePrice,
+      }));
+    }
+
+    const tokenFormatted = order.table_no.replace("Takeaway", "Token");
+
+    setPrintChit({
+      type: "BILL",
+      mode: "TAKEAWAY",
+      tableOrToken: tokenFormatted,
+      customerName: order.customer_name || "Takeaway Guest",
+      customerPhone: order.customer_phone || undefined,
+      items,
+      subtotal: order.total,
+      grandTotal: order.total,
+      time: new Date(order.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    });
+
+    setTimeout(() => {
+      window.print();
+    }, 100);
+  };
+
   /* ─── Render View ────────────────────────────────────────────────── */
   return (
     <div className="flex flex-col h-screen bg-[#FAF8F7] text-zinc-900 select-none overflow-hidden font-sans">
@@ -1483,7 +1761,10 @@ export default function PosPage() {
               <span>Dine-In Tables</span>
             </button>
             <button
-              onClick={() => setTerminalMode("TAKEAWAY")}
+              onClick={() => {
+                setTerminalMode("TAKEAWAY");
+                setActiveTableModal(null);
+              }}
               className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                 terminalMode === "TAKEAWAY"
                   ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
@@ -1496,40 +1777,69 @@ export default function PosPage() {
           </div>
         </div>
 
-        {/* Floor Health Metrics */}
-        <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
-          <div className="hidden md:flex items-center gap-3 pr-2 border-r border-zinc-200">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#E46254]" />
-              <span className="text-zinc-500">Occupied:</span>
-              <span className="font-bold text-zinc-800 font-mono">{floorStats.occupied}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-zinc-300" />
-              <span className="text-zinc-500">Vacant:</span>
-              <span className="font-bold text-zinc-800 font-mono">{floorStats.vacant}</span>
-            </div>
-            {floorStats.billed > 0 && (
+        {/* Floor Health Metrics vs Takeaway Metrics */}
+        {terminalMode === "DINE_IN" ? (
+          <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
+            <div className="hidden md:flex items-center gap-3 pr-2 border-r border-zinc-200">
               <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-purple-500" />
-                <span className="text-zinc-500">Billed:</span>
-                <span className="font-bold text-purple-700 font-mono">{floorStats.billed}</span>
+                <span className="w-2 h-2 rounded-full bg-[#E46254]" />
+                <span className="text-zinc-500">Occupied:</span>
+                <span className="font-bold text-zinc-800 font-mono">{floorStats.occupied}</span>
               </div>
-            )}
-          </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-zinc-300" />
+                <span className="text-zinc-500">Vacant:</span>
+                <span className="font-bold text-zinc-800 font-mono">{floorStats.vacant}</span>
+              </div>
+              {floorStats.billed > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-purple-500" />
+                  <span className="text-zinc-500">Billed:</span>
+                  <span className="font-bold text-purple-700 font-mono">{floorStats.billed}</span>
+                </div>
+              )}
+            </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
-              Live Sales
-            </span>
-            <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
-              ₹{floorStats.totalRevenue.toLocaleString("en-IN")}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
+                Live Sales
+              </span>
+              <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
+                ₹{floorStats.totalRevenue.toLocaleString("en-IN")}
+              </span>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex items-center gap-2 sm:gap-4 text-xs font-medium">
+            <div className="flex items-center gap-3 pr-2 border-r border-zinc-200">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                <span className="text-zinc-500">Waiting Pickup:</span>
+                <span className="font-bold text-zinc-800 font-mono">{activeTakeawayOrders.length}</span>
+              </div>
+              <div className="hidden sm:flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span className="text-zinc-500">Tokens Today:</span>
+                <span className="font-bold text-zinc-800 font-mono">{todayTakeawayOrders.length}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-semibold hidden sm:inline">
+                Takeaway Sales
+              </span>
+              <span className="px-3 py-1 rounded-xl bg-[#E46254]/8 text-[#C2410C] font-mono font-bold text-xs border border-[#E46254]/20">
+                ₹{todayTakeawayRevenue.toLocaleString("en-IN")}
+              </span>
+            </div>
+          </div>
+        )}
       </header>
 
-      {/* ── FLOOR FILTER TOOLBAR ── */}
+      {/* ── CONDITIONAL TERMINAL VIEW: DINE-IN FLOOR VS TAKEAWAY STATION ── */}
+      {terminalMode === "DINE_IN" ? (
+        <>
+          {/* ── FLOOR FILTER TOOLBAR ── */}
       <div className="px-6 py-3 bg-white border-b border-zinc-200/80 flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2 flex-1 max-w-md">
           <div className="relative w-full">
@@ -1749,6 +2059,584 @@ export default function PosPage() {
           </div>
         )}
       </div>
+    </>
+  ) : (
+    /* ── TAKEAWAY / QUICK-BILL COMMAND STATION (63% CATALOG + 37% COUNTER TICKET) ── */
+    <div className="flex-1 flex flex-col lg:flex-row overflow-hidden bg-white">
+      
+      {/* ── LEFT PANEL (63%): High-Speed Menu Catalog ── */}
+      <div className="w-full lg:w-[63%] flex flex-col border-r border-zinc-200/80 bg-[#FAF8F7] overflow-hidden">
+        
+        {/* Top Search Bar & Category Tabs */}
+        <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
+            <input
+              ref={takeawaySearchInputRef}
+              type="text"
+              placeholder="Search dishes or categories (Press '/' to search)..."
+              value={dishSearchQuery}
+              onChange={(e) => setDishSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all placeholder:text-zinc-400"
+            />
+            {dishSearchQuery && (
+              <button
+                type="button"
+                onClick={() => setDishSearchQuery("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 cursor-pointer"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {/* Horizontal Category Pill Tabs */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 slim-scrollbar">
+            {drawerCategories.map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setSelectedDrawerCat(cat)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                  selectedDrawerCat === cat
+                    ? "bg-[#E46254]/10 text-[#C2410C] border border-[#E46254]/30 shadow-2xs"
+                    : "bg-[#FAF8F7] hover:bg-[#E46254]/5 text-zinc-600 border border-zinc-200/60"
+                }`}
+              >
+                {cat === "ALL" ? "All Categories" : cat}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* High-Speed Food Catalog Grid */}
+        <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
+          {filteredCatalog.length === 0 ? (
+            <div className="h-48 flex flex-col items-center justify-center text-zinc-400 text-center">
+              <UtensilsCrossed size={20} className="mb-2 opacity-50 text-zinc-400" />
+              <p className="text-xs font-medium">No dishes found matching search</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
+              {filteredCatalog.map((dish) => {
+                const hasPortions = Boolean(
+                  dish.variantsConfig?.hasPortions &&
+                  dish.variantsConfig.portions &&
+                  dish.variantsConfig.portions.length > 0
+                );
+                const portions = hasPortions ? dish.variantsConfig!.portions : [];
+                const hasAddons = Boolean(dish.variantsConfig?.hasAddons);
+
+                return (
+                  <div
+                    key={dish.id}
+                    className="bg-white rounded-2xl p-3.5 border border-zinc-200/80 hover:border-zinc-300 shadow-2xs hover:shadow-md transition-all flex flex-col justify-between group"
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-1 mb-1.5">
+                        <span className="font-bold text-xs text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2">
+                          {dish.name}
+                        </span>
+                      </div>
+
+                      <span className="text-[10.5px] text-zinc-400 font-medium block">
+                        {dish.category}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 pt-2.5 border-t border-zinc-100">
+                      {/* Inline Portions Buttons */}
+                      {hasPortions ? (
+                        <div className="space-y-1.5">
+                          <div className="grid grid-cols-2 gap-1">
+                            {portions.map((portion, pIdx) => (
+                              <button
+                                key={portion.name || pIdx}
+                                type="button"
+                                onClick={() => handleQuickAddPortion(dish, portion)}
+                                className="py-1 px-1.5 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10.5px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer"
+                              >
+                                <span className="truncate">{portion.name}</span>
+                                <span className="font-mono text-[10px] ml-1">₹{portion.price}</span>
+                              </button>
+                            ))}
+                          </div>
+
+                          {hasAddons && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCustomizer(dish)}
+                              className="w-full text-[10px] font-bold text-[#E46254] hover:underline text-center py-0.5 cursor-pointer block"
+                            >
+                              + Addons / Instructions
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        /* Standard Dish with Single Price */
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono font-bold text-xs text-zinc-900">
+                            ₹{dish.base_price}
+                          </span>
+
+                          <div className="flex items-center gap-1">
+                            {hasAddons && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenCustomizer(dish)}
+                                className="p-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-600 text-[10.5px] font-bold cursor-pointer"
+                                title="Customise addons"
+                              >
+                                Custom
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleQuickAddBase(dish)}
+                              className="w-7 h-7 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 border border-zinc-200/80 flex items-center justify-center transition-colors cursor-pointer"
+                              title="Add to Ticket"
+                            >
+                              <Plus size={13} strokeWidth={2.5} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── RIGHT PANEL (37%): Takeaway Counter Ticket & Pickups ── */}
+      <div className="w-full lg:w-[37%] flex flex-col bg-white overflow-hidden shadow-sm">
+        
+        {/* Ticket Navigation Deck */}
+        <div className="p-3.5 bg-white border-b border-zinc-200/80 flex items-center justify-between shrink-0">
+          <div className="flex items-center bg-[#FAF8F7] p-1 rounded-xl border border-zinc-200/80 w-full">
+            <button
+              type="button"
+              onClick={() => setTakeawayActiveTab("NEW_TOKEN")}
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                takeawayActiveTab === "NEW_TOKEN"
+                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
+                  : "text-zinc-500 hover:text-zinc-800"
+              }`}
+            >
+              <ShoppingBag size={13} className={takeawayActiveTab === "NEW_TOKEN" ? "text-[#E46254]" : "text-zinc-400"} />
+              <span>Token #{String(currentToken).padStart(2, "0")}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setTakeawayActiveTab("LIVE_PICKUPS")}
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                takeawayActiveTab === "LIVE_PICKUPS"
+                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
+                  : "text-zinc-500 hover:text-zinc-800"
+              }`}
+            >
+              <Clock size={13} className={takeawayActiveTab === "LIVE_PICKUPS" ? "text-[#E46254]" : "text-zinc-400"} />
+              <span>Active Pickups</span>
+              {activeTakeawayOrders.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-[#E46254] text-white text-[10px] font-bold">
+                  {activeTakeawayOrders.length}
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* TAB 1: NEW TOKEN COUNTER BILLING */}
+        {takeawayActiveTab === "NEW_TOKEN" ? (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Customer Information Strip (Optional, fast, non-blocking) */}
+            <div className="px-4 py-2.5 bg-[#FAF8F7] border-b border-zinc-200/80 flex items-center gap-2 shrink-0">
+              <div className="relative flex-1">
+                <User className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+                <input
+                  type="text"
+                  placeholder="Customer name (optional)"
+                  value={takeawayCustomerName}
+                  onChange={(e) => setTakeawayCustomerName(e.target.value)}
+                  className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                />
+              </div>
+              <div className="relative w-36">
+                <Phone className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" size={12} />
+                <input
+                  type="tel"
+                  placeholder="Phone (optional)"
+                  value={takeawayCustomerPhone}
+                  onChange={(e) => setTakeawayCustomerPhone(e.target.value)}
+                  className="w-full pl-7 pr-2.5 py-1.5 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono font-medium outline-none focus:border-[#E46254] placeholder:text-zinc-400"
+                />
+              </div>
+              {takeawayCart.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearTakeawayCart}
+                  className="p-1.5 text-zinc-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors cursor-pointer"
+                  title="Clear current cart"
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </div>
+
+            {/* Ticket Cart Items List */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-2 slim-scrollbar">
+              {takeawayCart.length === 0 ? (
+                <div className="h-full min-h-[160px] flex flex-col items-center justify-center text-center text-zinc-400 p-6">
+                  <div className="w-12 h-12 rounded-2xl bg-[#FAF8F7] border border-zinc-200/80 flex items-center justify-center text-[#E46254] mb-3">
+                    <ShoppingBag size={20} />
+                  </div>
+                  <h4 className="font-bold text-xs text-zinc-700">Ticket is empty</h4>
+                  <p className="text-[11px] text-zinc-400 mt-1 max-w-[200px]">
+                    Tap any dish from the catalog on the left to start billing Token #{String(currentToken).padStart(2, "0")}.
+                  </p>
+                </div>
+              ) : (
+                takeawayCart.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-3 bg-[#FAF8F7] rounded-xl border border-zinc-200/80 hover:border-zinc-300 transition-all flex items-start justify-between gap-3 group"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <span className="font-bold text-xs text-zinc-900 block truncate">
+                        {item.name}
+                      </span>
+                      {item.notes && (
+                        <span className="text-[10px] text-zinc-500 italic block mt-0.5 line-clamp-1">
+                          {item.notes}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="font-mono text-xs font-bold text-zinc-700">
+                          ₹{item.price * item.quantity}
+                        </span>
+                        <span className="text-[10.5px] text-zinc-400 font-mono">
+                          (₹{item.price} each)
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Quantity Stepper & Remove */}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center bg-white border border-zinc-200/80 rounded-lg p-0.5 shadow-2xs">
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateTakeawayQty(item.id, -1)}
+                          className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded cursor-pointer"
+                        >
+                          <Minus size={11} />
+                        </button>
+                        <span className="w-6 text-center font-mono font-bold text-xs text-zinc-900">
+                          {item.quantity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateTakeawayQty(item.id, 1)}
+                          className="w-6 h-6 flex items-center justify-center text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 rounded cursor-pointer"
+                        >
+                          <Plus size={11} />
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTakeawayItem(item.id)}
+                        className="w-6 h-6 flex items-center justify-center text-zinc-400 hover:text-red-500 rounded hover:bg-red-50 transition-colors cursor-pointer"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Bill Footer & Quick Checkout */}
+            <div className="p-4 bg-white border-t border-zinc-200/80 space-y-3 shrink-0">
+              {/* Packaging Fee Toggle */}
+              <div
+                onClick={() => setTakeawayPackagingFee(!takeawayPackagingFee)}
+                className={`flex items-center justify-between p-2 rounded-xl border text-xs font-medium cursor-pointer transition-all ${
+                  takeawayPackagingFee
+                    ? "bg-[#E46254]/5 border-[#E46254]/30 text-[#C2410C]"
+                    : "bg-[#FAF8F7] border-zinc-200/80 text-zinc-600 hover:bg-zinc-100"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`w-4 h-4 rounded-md border flex items-center justify-center transition-colors ${
+                      takeawayPackagingFee
+                        ? "bg-[#E46254] border-[#E46254] text-white"
+                        : "bg-white border-zinc-300"
+                    }`}
+                  >
+                    {takeawayPackagingFee && <Check size={10} strokeWidth={3} />}
+                  </div>
+                  <span>Carry Bag / Container Packaging</span>
+                </div>
+                <span className="font-mono font-bold">+₹15</span>
+              </div>
+
+              {/* Suppressed Discount Toggle */}
+              {!takeawayShowDiscount ? (
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setTakeawayShowDiscount(true)}
+                    className="text-[11px] font-bold text-[#E46254] hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Tag size={11} />
+                    <span>+ Add discount</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="p-2.5 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
+                      Discount
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTakeawayShowDiscount(false);
+                        setTakeawayDiscountPercent(0);
+                        setTakeawayDiscountRupees("");
+                      }}
+                      className="text-[10px] text-zinc-400 hover:text-zinc-600 font-bold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {[5, 10, 15].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => {
+                          setTakeawayDiscountPercent(takeawayDiscountPercent === pct ? 0 : pct);
+                          setTakeawayDiscountRupees("");
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                          takeawayDiscountPercent === pct
+                            ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40"
+                            : "bg-white text-zinc-700 border-zinc-200/80 hover:bg-zinc-50"
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                    <div className="relative flex-1">
+                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 text-xs">₹</span>
+                      <input
+                        type="number"
+                        placeholder="Custom"
+                        value={takeawayDiscountRupees}
+                        onChange={(e) => {
+                          setTakeawayDiscountRupees(e.target.value);
+                          setTakeawayDiscountPercent(0);
+                        }}
+                        className="w-full pl-5 pr-2 py-1 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Bill Calculations */}
+              <div className="space-y-1 text-xs pt-1 border-t border-zinc-100">
+                <div className="flex justify-between text-zinc-500 font-medium">
+                  <span>Items Subtotal:</span>
+                  <span className="font-mono text-zinc-800">₹{takeawaySubtotal}</span>
+                </div>
+
+                {takeawayPackagingFee && (
+                  <div className="flex justify-between text-zinc-500 font-medium">
+                    <span>Packaging:</span>
+                    <span className="font-mono text-zinc-800">+₹15</span>
+                  </div>
+                )}
+
+                {takeawayDiscountAmount > 0 && (
+                  <div className="flex justify-between text-emerald-600 font-medium">
+                    <span>Discount:</span>
+                    <span className="font-mono">-₹{takeawayDiscountAmount.toFixed(0)}</span>
+                  </div>
+                )}
+
+                <div className="flex justify-between items-baseline pt-1.5 border-t border-zinc-200">
+                  <span className="font-bold text-sm text-zinc-900">Total Payable:</span>
+                  <span className="font-mono font-black text-xl text-zinc-900">
+                    ₹{takeawayTotal}
+                  </span>
+                </div>
+              </div>
+
+              {/* Payment Method Selector */}
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
+                  Payment Mode
+                </span>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { id: "UPI", label: "📱 UPI / QR" },
+                    { id: "CASH", label: "💵 Cash" },
+                    { id: "CARD", label: "💳 Card" },
+                  ].map((pm) => (
+                    <button
+                      key={pm.id}
+                      type="button"
+                      onClick={() => setTakeawayPaymentMethod(pm.id as any)}
+                      className={`py-2 px-1 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                        takeawayPaymentMethod === pm.id
+                          ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
+                          : "bg-[#FAF8F7] text-zinc-600 border-zinc-200/80 hover:bg-zinc-100"
+                      }`}
+                    >
+                      {pm.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Big Action Button */}
+              <button
+                type="button"
+                disabled={takeawayCart.length === 0 || isSubmitting}
+                onClick={handleCollectAndFireTakeaway}
+                className={`w-full py-3 rounded-2xl font-black text-sm tracking-wide shadow-sm flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  takeawayCart.length === 0 || isSubmitting
+                    ? "bg-zinc-200 text-zinc-400 cursor-not-allowed"
+                    : "bg-[#E46254] hover:bg-[#d55345] text-white active:scale-[0.99]"
+                }`}
+              >
+                {isSubmitting ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Punching Token...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 size={16} />
+                    <span>COLLECT & FIRE TOKEN (₹{takeawayTotal})</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* TAB 2: ACTIVE PICKUPS QUEUE */
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 slim-scrollbar">
+            {activeTakeawayOrders.length === 0 ? (
+              <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-center text-zinc-400 p-6">
+                <div className="w-12 h-12 rounded-2xl bg-[#FAF8F7] border border-zinc-200/80 flex items-center justify-center text-zinc-400 mb-3">
+                  <CheckCircle2 size={20} />
+                </div>
+                <h4 className="font-bold text-xs text-zinc-700">No pending pickups</h4>
+                <p className="text-[11px] text-zinc-400 mt-1 max-w-[200px]">
+                  All takeaway orders have been collected by guests.
+                </p>
+              </div>
+            ) : (
+              activeTakeawayOrders.map((order) => {
+                const elapsed = Math.max(
+                  0,
+                  Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000)
+                );
+                const isReady = (order.status as string) === "READY" || order.status === "SERVED";
+                const itemsSummary = Array.isArray(order.items_json)
+                  ? order.items_json.map((it: any) => `${it.quantity}x ${it.item?.name || it.name}`).join(", ")
+                  : "";
+
+                return (
+                  <div
+                    key={order.id}
+                    className={`p-3.5 rounded-2xl border transition-all space-y-2.5 ${
+                      isReady
+                        ? "bg-emerald-50/60 border-emerald-300 ring-1 ring-emerald-300/40"
+                        : "bg-white border-zinc-200/80 shadow-2xs"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-black text-sm text-zinc-900">
+                            {order.table_no.replace("Takeaway", "Token")}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              isReady
+                                ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                                : "bg-amber-100 text-amber-800 border-amber-200"
+                            }`}
+                          >
+                            {isReady ? "Ready for Pickup" : "Kitchen Cooking"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-500 mt-0.5">
+                          <span className="flex items-center gap-1">
+                            <Clock size={11} /> {elapsed}m ago
+                          </span>
+                          {order.customer_name && (
+                            <span>• {order.customer_name}</span>
+                          )}
+                          {order.customer_phone && (
+                            <span className="font-mono text-zinc-400">({order.customer_phone})</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <span className="font-mono font-bold text-sm text-zinc-900 block">
+                          ₹{order.total}
+                        </span>
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200/60">
+                          Paid ({order.payment_method || "Counter"})
+                        </span>
+                      </div>
+                    </div>
+
+                    {itemsSummary && (
+                      <p className="text-[11px] text-zinc-600 line-clamp-2 bg-[#FAF8F7] p-2 rounded-lg border border-zinc-100">
+                        {itemsSummary}
+                      </p>
+                    )}
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handleMarkTakeawayHandedOver(order.id, order.table_no)}
+                        className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <CheckCircle2 size={13} />
+                        <span>Hand Over to Guest</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleReprintTakeawayOrder(order)}
+                        className="px-3 py-2 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200/80 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
+                        title="Reprint Receipt"
+                      >
+                        <Printer size={13} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )}
 
       {/* ═════════════════════════════════════════════════════════════════ */}
       {/* ── FULL-SCREEN TABLE COMMAND STATION MODAL ── */}
@@ -2938,6 +3826,12 @@ export default function PosPage() {
                   <span>Subtotal:</span>
                   <span>₹{printChit.subtotal}</span>
                 </div>
+                {printChit.packaging && printChit.packaging > 0 ? (
+                  <div className="flex justify-between">
+                    <span>Packaging:</span>
+                    <span>₹{printChit.packaging}</span>
+                  </div>
+                ) : null}
                 {printChit.discount && printChit.discount > 0 ? (
                   <div className="flex justify-between">
                     <span>Discount:</span>
@@ -2962,7 +3856,11 @@ export default function PosPage() {
             )}
 
             <div className="text-center pt-3 text-[10px] border-t mt-3">
-              {printChit.type === "KOT" ? "KITCHEN PRODUCTION ORDER" : "Thank you for dining with us! Visit again."}
+              {printChit.type === "KOT"
+                ? "KITCHEN PRODUCTION ORDER"
+                : printChit.mode === "TAKEAWAY"
+                ? "Thank you for ordering with us! Visit again."
+                : "Thank you for dining with us! Visit again."}
             </div>
           </div>
         </div>
