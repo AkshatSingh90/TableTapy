@@ -1024,7 +1024,7 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
           .eq('is_available', true)
           .order('created_at', { ascending: true });
 
-        if (!menuScopeErr && scopedMenu) {
+        if (!menuScopeErr && scopedMenu && scopedMenu.length > 0) {
           menuRows = scopedMenu;
         } else {
           const { data: allMenu } = await supabase
@@ -1042,7 +1042,10 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
                   if (ids.includes(row.id)) return true;
                 } catch {}
               }
-              return row.description && row.description.includes(`[REST:${rest.id}]`);
+              if (row.description && row.description.includes(`[REST:${rest.id}]`)) return true;
+              // Fallback for catalog/shared dishes without restaurant_id or tag (matches POS)
+              if (!row.restaurant_id && (!row.description || !row.description.includes('[REST:'))) return true;
+              return false;
             });
           }
         }

@@ -337,7 +337,7 @@ export default function CaptainAppPage() {
         setPastOrdersHistory(pastData);
       }
 
-      // 3. Load Menu Items for Quick Order (restaurant isolated)
+      // 3. Load Menu Items for Quick Order (restaurant isolated + unscoped catalog fallback)
       let menuRows: any[] | null = null;
       const { data: scopedMenu, error: scopeErr } = await supabase
         .from('menu_items_v2')
@@ -346,7 +346,7 @@ export default function CaptainAppPage() {
         .eq('is_available', true)
         .order('name');
 
-      if (!scopeErr && scopedMenu) {
+      if (!scopeErr && scopedMenu && scopedMenu.length > 0) {
         menuRows = scopedMenu;
       } else {
         const { data: allMenu } = await supabase
@@ -364,7 +364,10 @@ export default function CaptainAppPage() {
                 if (ids.includes(row.id)) return true;
               } catch {}
             }
-            return row.description && row.description.includes(`[REST:${restaurant.id}]`);
+            if (row.description && row.description.includes(`[REST:${restaurant.id}]`)) return true;
+            // Fallback for catalog/shared dishes without restaurant_id or tag (matches POS)
+            if (!row.restaurant_id && (!row.description || !row.description.includes('[REST:'))) return true;
+            return false;
           });
         }
       }
