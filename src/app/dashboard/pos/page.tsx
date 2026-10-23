@@ -178,6 +178,17 @@ export default function PosPage() {
   // Full-Screen Dine-In Modal: Active Table
   const [activeTableModal, setActiveTableModal] = useState<string | null>(null);
 
+  // Set of dismissed/acknowledged order IDs for floor card alert
+  const [acknowledgedOrderIds, setAcknowledgedOrderIds] = useState<Set<string>>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("tabletapy_pos_ack_orders");
+        return saved ? new Set(JSON.parse(saved)) : new Set();
+      } catch {}
+    }
+    return new Set();
+  });
+
   // Command Station Menu Catalog State
   const [dishSearchQuery, setDishSearchQuery] = useState("");
   const [selectedDrawerCat, setSelectedDrawerCat] = useState("ALL");
@@ -525,6 +536,36 @@ export default function PosPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editingRoundItem, customizingDish, isTransferModalOpen, isGuestInfoModalOpen, terminalMode, activeTableModal, dishSearchQuery]);
 
+  // Handle opening table command modal and acknowledging any new orders
+  const handleOpenTableCommand = (tableName: string) => {
+    setActiveTableModal(tableName);
+
+    // Acknowledge all active orders on this table so shaking stops
+    const norm = normalizeTableIdentifier(tableName);
+    const tableOrders = activeOrders.filter(
+      (o) => normalizeTableIdentifier(o.table_no) === norm
+    );
+
+    if (tableOrders.length > 0) {
+      setAcknowledgedOrderIds((prev) => {
+        const next = new Set(prev);
+        let changed = false;
+        tableOrders.forEach((o) => {
+          if (!next.has(o.id)) {
+            next.add(o.id);
+            changed = true;
+          }
+        });
+        if (changed && typeof window !== "undefined") {
+          try {
+            localStorage.setItem("tabletapy_pos_ack_orders", JSON.stringify(Array.from(next)));
+          } catch {}
+        }
+        return next;
+      });
+    }
+  };
+
   // Realtime Configuration synchronization across tabs/devices
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
@@ -621,7 +662,26 @@ export default function PosPage() {
 
       existing.orders.push(order);
 
-      if (order.status === "NEW") {
+      // Order Origin Attribution
+      let orderSource: "QR" | "STAFF" | "CAPTAIN" = "QR";
+      const noteLower = (order.note || "").toLowerCase();
+      const customerLower = (order.customer_name || "").toLowerCase();
+
+      if (noteLower.includes("pos") || noteLower.includes("counter")) {
+        orderSource = "STAFF";
+      } else if (
+        noteLower.includes("captain") ||
+        customerLower.includes("captain") ||
+        customerLower.includes("waiter")
+      ) {
+        orderSource = "CAPTAIN";
+      }
+
+      // Attention shake triggers if:
+      // 1. Explicit status === 'NEW', OR
+      // 2. It is an unacknowledged QR order (even if fired with status PREPARING direct to kitchen)
+      const isUnackQrOrder = orderSource === "QR" && !acknowledgedOrderIds.has(order.id);
+      if (order.status === "NEW" || isUnackQrOrder) {
         existing.hasNewRound = true;
       }
 
@@ -648,21 +708,6 @@ export default function PosPage() {
       }
       if (!existing.latestOrderAt || new Date(order.created_at) > new Date(existing.latestOrderAt)) {
         existing.latestOrderAt = order.created_at;
-      }
-
-      // Order Origin Attribution
-      let orderSource: "QR" | "STAFF" | "CAPTAIN" = "QR";
-      const noteLower = (order.note || "").toLowerCase();
-      const customerLower = (order.customer_name || "").toLowerCase();
-
-      if (noteLower.includes("pos") || noteLower.includes("counter")) {
-        orderSource = "STAFF";
-      } else if (
-        noteLower.includes("captain") ||
-        customerLower.includes("captain") ||
-        customerLower.includes("waiter")
-      ) {
-        orderSource = "CAPTAIN";
       }
 
       const roundIndex = existing.rounds.length + 1;
@@ -2064,7 +2109,7 @@ export default function PosPage() {
               return (
                 <div
                   key={table.id}
-                  onClick={() => setActiveTableModal(table.name)}
+                  onClick={() => handleOpenTableCommand(table.name)}
                   className={`rounded-2xl border p-4 transition-all flex flex-col justify-between cursor-pointer min-h-[175px] group shadow-2xs hover:shadow-md hover:-translate-y-0.5 ${
                     hasNewRound
                       ? "bg-rose-50/80 border-[#E46254] ring-4 ring-[#E46254]/25 table-attention-shake"

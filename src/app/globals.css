@@ -77,26 +77,33 @@ body {
 /* Floor Card Attention Animations */
 @keyframes tableAttentionShake {
   0%, 100% {
-    transform: translateY(0) rotate(0deg);
+    transform: translateY(0) rotate(0deg) scale(1);
   }
-  15% {
-    transform: translateY(-2px) rotate(-0.75deg);
+  10% {
+    transform: translateY(-3px) rotate(-1.5deg) scale(1.02);
+  }
+  20% {
+    transform: translateY(2px) rotate(1.5deg) scale(1.02);
   }
   30% {
-    transform: translateY(1px) rotate(0.75deg);
+    transform: translateY(-3px) rotate(-1deg) scale(1.015);
   }
-  45% {
-    transform: translateY(-2px) rotate(-0.5deg);
+  40% {
+    transform: translateY(2px) rotate(1deg) scale(1.015);
+  }
+  50% {
+    transform: translateY(-1px) rotate(-0.5deg) scale(1.01);
   }
   60% {
-    transform: translateY(1px) rotate(0.5deg);
+    transform: translateY(1px) rotate(0.5deg) scale(1.01);
   }
-  75% {
-    transform: translateY(-1px) rotate(-0.25deg);
+  70% {
+    transform: translateY(0) rotate(0deg) scale(1);
   }
 }
 
 .table-attention-shake {
-  animation: tableAttentionShake 1.8s ease-in-out infinite;
+  animation: tableAttentionShake 1.2s ease-in-out infinite !important;
   transform-origin: center center;
+  box-shadow: 0 0 0 4px rgba(228, 98, 84, 0.35), 0 10px 25px -5px rgba(228, 98, 84, 0.3) !important;
 }
