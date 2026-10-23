@@ -45,6 +45,7 @@ import {
   calculateBillTaxes,
   BillTaxCalculation,
 } from "@/utils/tax";
+import { playNewOrderChime } from "@/utils/audioAlerts";
 
 /* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
@@ -554,7 +555,10 @@ export default function PosPage() {
           table: "orders",
           filter: `restaurant_id=eq.${restaurantId}`,
         },
-        () => {
+        (payload: any) => {
+          if (payload.eventType === "INSERT" || (payload.new && payload.new.status === "NEW")) {
+            playNewOrderChime(true);
+          }
           fetchActiveOrders(restaurantId);
           fetchPastOrders(restaurantId);
         }
@@ -2063,7 +2067,7 @@ export default function PosPage() {
                   onClick={() => setActiveTableModal(table.name)}
                   className={`rounded-2xl border p-4 transition-all flex flex-col justify-between cursor-pointer min-h-[175px] group shadow-2xs hover:shadow-md hover:-translate-y-0.5 ${
                     hasNewRound
-                      ? "bg-amber-50/70 border-amber-400 ring-2 ring-amber-400/25"
+                      ? "bg-rose-50/80 border-[#E46254] ring-4 ring-[#E46254]/25 table-attention-shake"
                       : hasBillRequest
                       ? "bg-amber-50/60 border-amber-300 ring-2 ring-amber-400/20"
                       : hasUpiVerifyRequest
@@ -2097,8 +2101,9 @@ export default function PosPage() {
                       {/* Status Indicator */}
                       <div className="flex items-center gap-1 flex-wrap justify-end">
                         {hasNewRound ? (
-                          <span className="px-2 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold shadow-2xs animate-pulse">
-                            New QR Order
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-extrabold shadow-sm flex items-center gap-1 animate-pulse">
+                            <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                            <span>New QR Order</span>
                           </span>
                         ) : hasBillRequest ? (
                           <span className="px-2 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-bold shadow-2xs">

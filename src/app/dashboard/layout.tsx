@@ -80,7 +80,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     {
       title: "OPERATIONS",
       items: [
-        { name: "Orders", href: "/dashboard/orders", icon: ClipboardList },
         { name: "Kitchen (KDS)", href: "/dashboard/kds", icon: UtensilsCrossed },
         { name: "Staffs", href: "/dashboard/staffs", icon: Users },
         { name: "Table Orders", href: "/dashboard/locations", icon: QrCode },
