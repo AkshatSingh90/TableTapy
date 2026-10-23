@@ -30,6 +30,108 @@ export const DEFAULT_TAX_SETTINGS: TaxSettings = {
   receiptFooter: "Thank you for dining with us! Visit again.",
 };
 
+export interface RestaurantConfig {
+  taxSettings: TaxSettings;
+  qrOrderMode: 'PIN_DIRECT_FIRE' | 'OPEN_STAFF_APPROVAL';
+  billingMode: 'STAFF_ASSISTED' | 'SELF_PAY';
+  paperWidth: '80MM' | '58MM';
+  printCopies: 1 | 2;
+  autoPrintOnSettle: boolean;
+}
+
+export const DEFAULT_RESTAURANT_CONFIG: RestaurantConfig = {
+  taxSettings: DEFAULT_TAX_SETTINGS,
+  qrOrderMode: 'PIN_DIRECT_FIRE',
+  billingMode: 'STAFF_ASSISTED',
+  paperWidth: '80MM',
+  printCopies: 1,
+  autoPrintOnSettle: false,
+};
+
+export function parseConfigFromRestaurant(restaurantRecord?: any): RestaurantConfig {
+  if (restaurantRecord && restaurantRecord.bg_image) {
+    try {
+      const parsed = typeof restaurantRecord.bg_image === 'string'
+        ? JSON.parse(restaurantRecord.bg_image)
+        : restaurantRecord.bg_image;
+      if (parsed && typeof parsed === 'object') {
+        return {
+          taxSettings: { ...DEFAULT_TAX_SETTINGS, ...(parsed.taxSettings || {}) },
+          qrOrderMode: parsed.qrOrderMode === 'OPEN_STAFF_APPROVAL' ? 'OPEN_STAFF_APPROVAL' : 'PIN_DIRECT_FIRE',
+          billingMode: parsed.billingMode === 'SELF_PAY' ? 'SELF_PAY' : 'STAFF_ASSISTED',
+          paperWidth: parsed.paperWidth === '58MM' ? '58MM' : '80MM',
+          printCopies: parsed.printCopies === 2 ? 2 : 1,
+          autoPrintOnSettle: !!parsed.autoPrintOnSettle,
+        };
+      }
+    } catch {}
+  }
+  return DEFAULT_RESTAURANT_CONFIG;
+}
+
+export function getStoredRestaurantConfig(restaurantId?: string): RestaurantConfig {
+  if (typeof window === "undefined") return DEFAULT_RESTAURANT_CONFIG;
+  try {
+    const key = restaurantId
+      ? `tabletapy_full_config_${restaurantId}`
+      : "tabletapy_full_config_default";
+    const raw = localStorage.getItem(key) || localStorage.getItem("tabletapy_full_config_default");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        ...DEFAULT_RESTAURANT_CONFIG,
+        ...parsed,
+        taxSettings: { ...DEFAULT_TAX_SETTINGS, ...(parsed.taxSettings || {}) }
+      };
+    }
+  } catch {}
+  
+  // Fallback to legacy individual keys
+  const taxes = getStoredTaxSettings(restaurantId);
+  const qrMode = (localStorage.getItem(`tabletapy_qr_order_mode_${restaurantId}`) || localStorage.getItem('tabletapy_qr_order_mode_default') || 'PIN_DIRECT_FIRE') as any;
+  const billing = (localStorage.getItem(`tabletapy_billing_mode_${restaurantId}`) || localStorage.getItem('tabletapy_billing_mode_default') || 'STAFF_ASSISTED') as any;
+  const paper = (localStorage.getItem(`tabletapy_paper_width_${restaurantId}`) || localStorage.getItem('tabletapy_paper_width_default') || '80MM') as any;
+  const copies = parseInt(localStorage.getItem(`tabletapy_print_copies_${restaurantId}`) || localStorage.getItem('tabletapy_print_copies_default') || '1', 10) as any;
+  const autoPrint = (localStorage.getItem(`tabletapy_autoprint_${restaurantId}`) || localStorage.getItem('tabletapy_autoprint_default')) === 'true';
+
+  return {
+    taxSettings: taxes,
+    qrOrderMode: qrMode === 'OPEN_STAFF_APPROVAL' ? 'OPEN_STAFF_APPROVAL' : 'PIN_DIRECT_FIRE',
+    billingMode: billing === 'SELF_PAY' ? 'SELF_PAY' : 'STAFF_ASSISTED',
+    paperWidth: paper === '58MM' ? '58MM' : '80MM',
+    printCopies: copies === 2 ? 2 : 1,
+    autoPrintOnSettle: autoPrint,
+  };
+}
+
+export function saveRestaurantConfig(config: RestaurantConfig, restaurantId?: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const serialized = JSON.stringify(config);
+    if (restaurantId) {
+      localStorage.setItem(`tabletapy_full_config_${restaurantId}`, serialized);
+    }
+    localStorage.setItem("tabletapy_full_config_default", serialized);
+
+    // Also sync legacy keys for backwards-compatibility
+    saveTaxSettings(config.taxSettings, restaurantId);
+    if (restaurantId) {
+      localStorage.setItem(`tabletapy_qr_order_mode_${restaurantId}`, config.qrOrderMode);
+      localStorage.setItem(`tabletapy_billing_mode_${restaurantId}`, config.billingMode);
+      localStorage.setItem(`tabletapy_paper_width_${restaurantId}`, config.paperWidth);
+      localStorage.setItem(`tabletapy_print_copies_${restaurantId}`, String(config.printCopies));
+      localStorage.setItem(`tabletapy_autoprint_${restaurantId}`, String(config.autoPrintOnSettle));
+    }
+    localStorage.setItem('tabletapy_qr_order_mode_default', config.qrOrderMode);
+    localStorage.setItem('tabletapy_billing_mode_default', config.billingMode);
+    localStorage.setItem('tabletapy_paper_width_default', config.paperWidth);
+    localStorage.setItem('tabletapy_print_copies_default', String(config.printCopies));
+    localStorage.setItem('tabletapy_autoprint_default', String(config.autoPrintOnSettle));
+  } catch (err) {
+    console.error("Error saving restaurant config:", err);
+  }
+}
+
 export function getStoredTaxSettings(restaurantId?: string): TaxSettings {
   if (typeof window === "undefined") return DEFAULT_TAX_SETTINGS;
   try {

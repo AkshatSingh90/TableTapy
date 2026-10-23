@@ -38,7 +38,10 @@ import { resolveTablePinAndSeed, normalizeTableIdentifier } from "@/utils/tableS
 import {
   TaxSettings,
   DEFAULT_TAX_SETTINGS,
-  getStoredTaxSettings,
+  RestaurantConfig,
+  DEFAULT_RESTAURANT_CONFIG,
+  parseConfigFromRestaurant,
+  getStoredRestaurantConfig,
   calculateBillTaxes,
   BillTaxCalculation,
 } from "@/utils/tax";
@@ -217,8 +220,12 @@ export default function PosPage() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  // Tax & Billing Engine State
+  // Restaurant Configuration State (Synced via Supabase + localStorage)
   const [taxSettings, setTaxSettings] = useState<TaxSettings>(DEFAULT_TAX_SETTINGS);
+  const [qrOrderMode, setQrOrderMode] = useState<'PIN_DIRECT_FIRE' | 'OPEN_STAFF_APPROVAL'>('PIN_DIRECT_FIRE');
+  const [paperWidth, setPaperWidth] = useState<'80MM' | '58MM'>('80MM');
+  const [printCopies, setPrintCopies] = useState<1 | 2>(1);
+  const [autoPrintOnSettle, setAutoPrintOnSettle] = useState(false);
 
   // Printable Thermal Chit State
   const [printChit, setPrintChit] = useState<{
@@ -313,12 +320,20 @@ export default function PosPage() {
       if (restId) {
         const { data: restRec } = await supabase
           .from("restaurants")
-          .select("id, name, address")
+          .select("id, name, address, bg_image")
           .eq("id", restId)
           .maybeSingle();
         if (restRec) {
           setRestaurantName(restRec.name || "My Restaurant");
           setRestaurantAddress(restRec.address || "");
+          if (restRec.bg_image) {
+            const cloudCfg = parseConfigFromRestaurant(restRec);
+            setTaxSettings(cloudCfg.taxSettings);
+            setQrOrderMode(cloudCfg.qrOrderMode);
+            setPaperWidth(cloudCfg.paperWidth);
+            setPrintCopies(cloudCfg.printCopies);
+            setAutoPrintOnSettle(cloudCfg.autoPrintOnSettle);
+          }
         }
       }
 
@@ -371,9 +386,19 @@ export default function PosPage() {
 
       if (restId) {
         setRestaurantId(restId);
-        setTaxSettings(getStoredTaxSettings(restId));
+        const storedCfg = getStoredRestaurantConfig(restId);
+        setTaxSettings(storedCfg.taxSettings);
+        setQrOrderMode(storedCfg.qrOrderMode);
+        setPaperWidth(storedCfg.paperWidth);
+        setPrintCopies(storedCfg.printCopies);
+        setAutoPrintOnSettle(storedCfg.autoPrintOnSettle);
       } else {
-        setTaxSettings(getStoredTaxSettings());
+        const storedCfg = getStoredRestaurantConfig();
+        setTaxSettings(storedCfg.taxSettings);
+        setQrOrderMode(storedCfg.qrOrderMode);
+        setPaperWidth(storedCfg.paperWidth);
+        setPrintCopies(storedCfg.printCopies);
+        setAutoPrintOnSettle(storedCfg.autoPrintOnSettle);
       }
 
       if (loadedLocations.length > 0) {
@@ -499,11 +524,16 @@ export default function PosPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editingRoundItem, customizingDish, isTransferModalOpen, isGuestInfoModalOpen, terminalMode, activeTableModal, dishSearchQuery]);
 
-  // Realtime Tax Settings synchronization
+  // Realtime Configuration synchronization across tabs/devices
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key && e.key.includes("tabletapy_tax_settings")) {
-        setTaxSettings(getStoredTaxSettings(restaurantId || undefined));
+      if (e.key && (e.key.includes("tabletapy_full_config") || e.key.includes("tabletapy_tax_settings") || e.key.includes("tabletapy_paper_width") || e.key.includes("tabletapy_print_copies") || e.key.includes("tabletapy_autoprint"))) {
+        const updated = getStoredRestaurantConfig(restaurantId || undefined);
+        setTaxSettings(updated.taxSettings);
+        setQrOrderMode(updated.qrOrderMode);
+        setPaperWidth(updated.paperWidth);
+        setPrintCopies(updated.printCopies);
+        setAutoPrintOnSettle(updated.autoPrintOnSettle);
       }
     };
     window.addEventListener("storage", handleStorage);
@@ -1393,6 +1423,9 @@ export default function PosPage() {
       }
 
       showToast(`${activeTableModal}: Payment collected! Thank you page shown on customer's phone.`);
+      if (autoPrintOnSettle) {
+        setTimeout(() => handlePrintGuestBill(), 120);
+      }
       if (restaurantId) {
         fetchActiveOrders(restaurantId);
         fetchPastOrders(restaurantId);
@@ -1436,6 +1469,44 @@ export default function PosPage() {
       }
     } catch (err: any) {
       showToast("Failed to settle table: " + (err.message || "Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleApproveOrder = async (orderId: string) => {
+    setIsSubmitting(true);
+    try {
+      const { error } = await supabase
+        .from("orders")
+        .update({ status: "PREPARING" })
+        .eq("id", orderId);
+      if (error) throw error;
+      showToast("Order approved & fired to kitchen!");
+      if (restaurantId) {
+        fetchActiveOrders(restaurantId);
+      }
+    } catch (err: any) {
+      showToast("Failed to approve order: " + (err.message || "Error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRejectOrder = async (orderId: string) => {
+    setIsSubmitting(true);
+    try {
+      const { error } = await supabase
+        .from("orders")
+        .update({ status: "CANCELLED" })
+        .eq("id", orderId);
+      if (error) throw error;
+      showToast("Order rejected / voided.");
+      if (restaurantId) {
+        fetchActiveOrders(restaurantId);
+      }
+    } catch (err: any) {
+      showToast("Failed to reject order: " + (err.message || "Error"));
     } finally {
       setIsSubmitting(false);
     }
@@ -1990,7 +2061,9 @@ export default function PosPage() {
                   key={table.id}
                   onClick={() => setActiveTableModal(table.name)}
                   className={`rounded-2xl border p-4 transition-all flex flex-col justify-between cursor-pointer min-h-[175px] group shadow-2xs hover:shadow-md hover:-translate-y-0.5 ${
-                    hasBillRequest
+                    hasNewRound
+                      ? "bg-amber-50/70 border-amber-400 ring-2 ring-amber-400/25"
+                      : hasBillRequest
                       ? "bg-amber-50/60 border-amber-300 ring-2 ring-amber-400/20"
                       : hasUpiVerifyRequest
                       ? "bg-blue-50/60 border-blue-300 ring-2 ring-blue-400/20"
@@ -2022,7 +2095,11 @@ export default function PosPage() {
 
                       {/* Status Indicator */}
                       <div className="flex items-center gap-1 flex-wrap justify-end">
-                        {hasBillRequest ? (
+                        {hasNewRound ? (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold shadow-2xs animate-pulse">
+                            New QR Order
+                          </span>
+                        ) : hasBillRequest ? (
                           <span className="px-2 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-bold shadow-2xs">
                             Bill Call
                           </span>
@@ -3281,6 +3358,39 @@ export default function PosPage() {
                           </div>
                         </div>
 
+                        {/* QR Approval Banner for Pending Orders */}
+                        {round.status === "NEW" && (
+                          <div className="bg-amber-50 border border-amber-200/80 rounded-xl p-2.5 flex items-center justify-between gap-2 animate-in fade-in">
+                            <div>
+                              <div className="text-[11px] font-bold text-amber-900">
+                                Guest QR Order Pending Approval
+                              </div>
+                              <div className="text-[10px] text-amber-700">
+                                Confirm table & fire to kitchen
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() => handleApproveOrder(round.orderId)}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold shadow-2xs cursor-pointer flex items-center gap-1 transition-colors active:scale-95"
+                              >
+                                <Check size={12} strokeWidth={2.5} />
+                                <span>Accept & Fire</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() => handleRejectOrder(round.orderId)}
+                                className="px-2 py-1.5 rounded-lg bg-white hover:bg-zinc-100 text-zinc-600 text-[11px] font-medium border border-zinc-200 cursor-pointer transition-colors"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Round Items with Clean Edit & Remove controls */}
                         <div className="space-y-1.5">
                           {round.items.map((it) => (
@@ -4036,7 +4146,7 @@ export default function PosPage() {
       {/* ── THERMAL CHIT PRINT COMPONENT (Hidden from screen, visible during window.print()) ── */}
       {printChit && (
         <div id="thermal-chit" className="hidden print:block fixed inset-0 bg-white p-4 font-mono text-black text-xs">
-          <div className="max-w-[80mm] mx-auto space-y-2">
+          <div className={`${paperWidth === '58MM' ? 'max-w-[58mm] text-[10px]' : 'max-w-[80mm] text-xs'} mx-auto space-y-2`}>
             <div className="text-center border-b pb-2">
               <h2 className="text-base font-black uppercase tracking-tight">{restaurantName}</h2>
               {(taxSettings.receiptAddress || restaurantAddress) && (
@@ -4055,6 +4165,8 @@ export default function PosPage() {
                   ? `*** KOT #${printChit.kotNumber || 1} ***`
                   : printChit.isComposition
                   ? "*** BILL OF SUPPLY ***"
+                  : printCopies === 2
+                  ? "*** GUEST TAX INVOICE ***"
                   : "*** TAX INVOICE ***"}
               </p>
               {printChit.type === "BILL" && printChit.isComposition && (
@@ -4173,6 +4285,52 @@ export default function PosPage() {
                 ? "KITCHEN PRODUCTION ORDER"
                 : (taxSettings.receiptFooter || "Thank you for dining with us! Visit again.")}
             </div>
+
+            {/* Merchant / Store Audit Copy (If 2 Copies Configured) */}
+            {printCopies === 2 && printChit.type === "BILL" && (
+              <div className="pt-6 border-t-2 border-dashed border-zinc-400 mt-6">
+                <div className="text-center font-bold text-[11px] mb-2 tracking-wider">
+                  *** MERCHANT AUDIT COPY ***
+                </div>
+                <div className="text-center pb-2 border-b">
+                  <h2 className="text-sm font-black uppercase">{restaurantName}</h2>
+                  <div className="flex justify-between text-[10px] mt-1 font-bold">
+                    <span>{printChit.tableOrToken}</span>
+                    <span>{printChit.time}</span>
+                  </div>
+                  {printChit.customerName && (
+                    <div className="text-left text-[10px] mt-0.5">
+                      Guest: {printChit.customerName} {printChit.customerPhone ? `(${printChit.customerPhone})` : ""}
+                    </div>
+                  )}
+                </div>
+                <div className="py-2 space-y-1 text-[11px]">
+                  <div className="flex justify-between">
+                    <span>Items Total ({printChit.items.reduce((s, i) => s + i.quantity, 0)} items):</span>
+                    <span>₹{printChit.subtotal}</span>
+                  </div>
+                  {printChit.discount && printChit.discount > 0 ? (
+                    <div className="flex justify-between text-zinc-600">
+                      <span>Discount:</span>
+                      <span>-₹{printChit.discount.toFixed(1)}</span>
+                    </div>
+                  ) : null}
+                  {printChit.tax && printChit.tax > 0 ? (
+                    <div className="flex justify-between">
+                      <span>GST:</span>
+                      <span>₹{printChit.tax.toFixed(2)}</span>
+                    </div>
+                  ) : null}
+                  <div className="flex justify-between font-bold text-xs border-t pt-1">
+                    <span>Settled Total:</span>
+                    <span>₹{printChit.grandTotal}</span>
+                  </div>
+                </div>
+                <div className="text-center text-[9px] pt-1 text-zinc-500 uppercase tracking-widest">
+                  --- STORE RETENTION COPY ---
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

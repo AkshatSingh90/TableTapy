@@ -15,6 +15,12 @@ import { TableUnlockModal } from "@/components/TableUnlockModal";
 import { generateSessionId, extractSessionId, attachSessionToNote } from "@/utils/orderSession";
 import { generateTablePin, getTableSessionSeed, normalizeTableIdentifier, resolveTablePinAndSeed } from "@/utils/tableSessionPin";
 import { extractVariantsFromDescription } from "@/utils/menuItemVariants";
+import {
+  RestaurantConfig,
+  DEFAULT_RESTAURANT_CONFIG,
+  parseConfigFromRestaurant,
+  calculateBillTaxes,
+} from "@/utils/tax";
 
 interface LoyaltyMilestone {
   id: string;
@@ -222,6 +228,9 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
   const [activeGuestsCount, setActiveGuestsCount] = useState<number>(1);
   const [guestAlertModal, setGuestAlertModal] = useState<{ title: string; message: string } | null>(null);
   const [settlementSnapshot, setSettlementSnapshot] = useState<SettlementData | null>(null);
+
+  // Restaurant Full Configuration (Synced from Supabase)
+  const [restaurantConfig, setRestaurantConfig] = useState<RestaurantConfig>(DEFAULT_RESTAURANT_CONFIG);
 
   // Table 4-Digit Safety PIN and Customer Identity
   const [customerName, setCustomerName] = useState<string>('');
@@ -477,6 +486,13 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
         setBusinessType(bType);
         setRestData(rest);
 
+        // Parse full restaurant configuration from Supabase
+        const parsedCfg = parseConfigFromRestaurant(rest);
+        setRestaurantConfig(parsedCfg);
+        if (parsedCfg.billingMode) {
+          setBillingMode(parsedCfg.billingMode);
+        }
+
         // Load local cart cache if present
         try {
           const cached = localStorage.getItem(`tabletapy_cart_${rest.id}_${loc.name}`);
@@ -602,6 +618,11 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
               setIsTableUnlocked(false);
             }
           }
+        }
+
+        // If Open Menu mode is active, bypass PIN lock completely!
+        if (parsedCfg.qrOrderMode === 'OPEN_STAFF_APPROVAL') {
+          setIsTableUnlocked(true);
         }
 
         // 4. Setup SHARED Realtime Channel for this Table (Collaborative Cart + Orders + Presence)
@@ -1267,8 +1288,13 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
     const itemsTotal = (o.items_json || []).reduce((acc: number, curr: any) => acc + (curr.price || curr.item?.basePrice || 0) * (curr.quantity || 1), 0);
     return sum + (itemsTotal > 0 ? itemsTotal : Number(o.total) || 0);
   }, 0);
-  const runningTableGST = Number((runningTableSubtotal * 0.05).toFixed(2));
-  const runningGrandTotal = Number((runningTableSubtotal + runningTableGST).toFixed(2));
+  const runningBillCalc = calculateBillTaxes({
+    subtotal: runningTableSubtotal,
+    isDineIn: true,
+    settings: restaurantConfig.taxSettings,
+  });
+  const runningTableGST = runningBillCalc.totalGst;
+  const runningGrandTotal = runningBillCalc.grandTotal;
 
   const totalOrderedDishesCount = activeRunningOrders.reduce((sum, o) => {
     return sum + (o.items_json || []).reduce((acc: number, curr: any) => acc + (curr.quantity || 1), 0);
@@ -1467,15 +1493,27 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
         ? `${noteWithSession} [PIN:${tableSessionPin}]`.trim() 
         : noteWithSession;
 
-      const roundTotal = Number((cartTotal * 1.05).toFixed(2));
+      const cartBillCalc = calculateBillTaxes({
+        subtotal: cartTotal,
+        isDineIn: true,
+        settings: restaurantConfig.taxSettings,
+      });
+      const roundTotal = cartBillCalc.grandTotal;
+
+      const isApprovalMode = restaurantConfig.qrOrderMode === 'OPEN_STAFF_APPROVAL';
+      const orderStatus = isApprovalMode ? 'NEW' : 'PREPARING';
+      const finalNote = isApprovalMode
+        ? `${finalNoteWithPin} [QR_PENDING_APPROVAL]`.trim()
+        : finalNoteWithPin;
+
       const payload = {
         restaurant_id: theme.id,
         total: roundTotal,
-        status: 'PREPARING', // Instant Kitchen Auto-Fire verified by 4-digit physical Table PIN
-        note: finalNoteWithPin,
+        status: orderStatus,
+        note: finalNote,
         items_json: cart,
         table_no: locationName,
-        customer_name: checkoutData.name || customerName || '',
+        customer_name: checkoutData.name || customerName || 'Table Guest',
         customer_phone: checkoutData.phone || customerPhone || '',
         payment_method: checkoutData.payMethod || 'PAY_AT_END',
         payment_status: 'PENDING'
@@ -1509,7 +1547,11 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
         }).catch(() => {});
         
         // Show confirmation toast
-        setOrderToast(`Round #${tableOrders.length + 1} sent to kitchen! Preparation started.`);
+        if (isApprovalMode) {
+          setOrderToast(`Order placed! Floor captain will confirm & send to kitchen.`);
+        } else {
+          setOrderToast(`Round #${tableOrders.length + 1} sent to kitchen! Preparation started.`);
+        }
         setTimeout(() => setOrderToast(null), 4500);
 
         return insertedOrder.id;
@@ -1918,6 +1960,8 @@ function areItemListsIdentical(listA: any[], listB: any[]): boolean {
           activePaymentLock={activePaymentLock}
           onAcquireLock={handleAcquirePaymentLock}
           onReleaseLock={handleReleasePaymentLock}
+          taxRate={restaurantConfig.taxSettings.gstType === 'COMPOSITION' ? 0 : (restaurantConfig.taxSettings.cgstRate + restaurantConfig.taxSettings.sgstRate)}
+          serviceChargeRate={restaurantConfig.taxSettings.serviceChargeEnabled ? restaurantConfig.taxSettings.serviceChargeRate : 0}
           billingMode={billingMode}
           onPaymentSettled={(snapshot) => {
             if (snapshot) {

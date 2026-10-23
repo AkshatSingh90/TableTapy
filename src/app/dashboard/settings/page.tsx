@@ -25,8 +25,11 @@ import { createClient } from "@/utils/supabase/client";
 import { 
   TaxSettings, 
   DEFAULT_TAX_SETTINGS, 
-  getStoredTaxSettings, 
-  saveTaxSettings, 
+  RestaurantConfig,
+  DEFAULT_RESTAURANT_CONFIG,
+  parseConfigFromRestaurant,
+  getStoredRestaurantConfig,
+  saveRestaurantConfig,
   calculateBillTaxes 
 } from "@/utils/tax";
 
@@ -74,49 +77,36 @@ export default function SettingsPage() {
             if (rest.primary_color) setPrimaryColor(rest.primary_color);
             if (rest.upi_id || rest.upi_vpa) setUpiId(rest.upi_id || rest.upi_vpa);
             if (rest.phone) setPhone(rest.phone);
+
+            // Populate settings from Supabase if present
+            if (rest.bg_image) {
+              const cloudConfig = parseConfigFromRestaurant(rest);
+              setTaxSettings(cloudConfig.taxSettings);
+              setQrOrderMode(cloudConfig.qrOrderMode);
+              setBillingMode(cloudConfig.billingMode);
+              setPaperWidth(cloudConfig.paperWidth);
+              setPrintCopies(cloudConfig.printCopies);
+              setAutoPrintOnSettle(cloudConfig.autoPrintOnSettle);
+              return;
+            }
           }
 
-          // Load QR Order Security Mode
-          const savedQrMode = localStorage.getItem(`tabletapy_qr_order_mode_${restId}`);
-          if (savedQrMode === 'PIN_DIRECT_FIRE' || savedQrMode === 'OPEN_STAFF_APPROVAL') {
-            setQrOrderMode(savedQrMode);
-          }
-
-          // Load Billing Mode
-          const savedMode = localStorage.getItem(`tabletapy_billing_mode_${restId}`);
-          if (savedMode === 'SELF_PAY' || savedMode === 'STAFF_ASSISTED') {
-            setBillingMode(savedMode);
-          }
-
-          // Load Hardware settings
-          const savedPaper = localStorage.getItem(`tabletapy_paper_width_${restId}`);
-          if (savedPaper === '80MM' || savedPaper === '58MM') {
-            setPaperWidth(savedPaper);
-          }
-          const savedCopies = localStorage.getItem(`tabletapy_print_copies_${restId}`);
-          if (savedCopies === '2') {
-            setPrintCopies(2);
-          }
-          const savedAutoPrint = localStorage.getItem(`tabletapy_autoprint_${restId}`);
-          if (savedAutoPrint === 'true') {
-            setAutoPrintOnSettle(true);
-          }
-
-          const loadedTaxes = getStoredTaxSettings(restId);
-          setTaxSettings(loadedTaxes);
+          // Fallback to local stored config
+          const localConfig = getStoredRestaurantConfig(restId);
+          setTaxSettings(localConfig.taxSettings);
+          setQrOrderMode(localConfig.qrOrderMode);
+          setBillingMode(localConfig.billingMode);
+          setPaperWidth(localConfig.paperWidth);
+          setPrintCopies(localConfig.printCopies);
+          setAutoPrintOnSettle(localConfig.autoPrintOnSettle);
         } else {
-          const genericQrMode = localStorage.getItem('tabletapy_qr_order_mode_default');
-          if (genericQrMode === 'PIN_DIRECT_FIRE' || genericQrMode === 'OPEN_STAFF_APPROVAL') {
-            setQrOrderMode(genericQrMode);
-          }
-
-          const genericMode = localStorage.getItem('tabletapy_billing_mode_default');
-          if (genericMode === 'SELF_PAY' || genericMode === 'STAFF_ASSISTED') {
-            setBillingMode(genericMode);
-          }
-
-          const loadedTaxes = getStoredTaxSettings();
-          setTaxSettings(loadedTaxes);
+          const genericConfig = getStoredRestaurantConfig();
+          setTaxSettings(genericConfig.taxSettings);
+          setQrOrderMode(genericConfig.qrOrderMode);
+          setBillingMode(genericConfig.billingMode);
+          setPaperWidth(genericConfig.paperWidth);
+          setPrintCopies(genericConfig.printCopies);
+          setAutoPrintOnSettle(genericConfig.autoPrintOnSettle);
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
@@ -129,30 +119,26 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      // 1. Save Tax Settings locally
-      saveTaxSettings(taxSettings, restaurantId);
+      const fullConfig: RestaurantConfig = {
+        taxSettings,
+        qrOrderMode,
+        billingMode,
+        paperWidth,
+        printCopies,
+        autoPrintOnSettle,
+      };
 
-      // 2. Save QR Order Security Mode & Billing Mode
-      if (restaurantId) {
-        localStorage.setItem(`tabletapy_qr_order_mode_${restaurantId}`, qrOrderMode);
-        localStorage.setItem(`tabletapy_billing_mode_${restaurantId}`, billingMode);
-        localStorage.setItem(`tabletapy_paper_width_${restaurantId}`, paperWidth);
-        localStorage.setItem(`tabletapy_print_copies_${restaurantId}`, String(printCopies));
-        localStorage.setItem(`tabletapy_autoprint_${restaurantId}`, String(autoPrintOnSettle));
-      }
-      localStorage.setItem('tabletapy_qr_order_mode_default', qrOrderMode);
-      localStorage.setItem('tabletapy_billing_mode_default', billingMode);
-      localStorage.setItem('tabletapy_paper_width_default', paperWidth);
-      localStorage.setItem('tabletapy_print_copies_default', String(printCopies));
-      localStorage.setItem('tabletapy_autoprint_default', String(autoPrintOnSettle));
+      // 1. Save full config to localStorage & cross-tab sync
+      saveRestaurantConfig(fullConfig, restaurantId);
 
-      // 3. Update Supabase Restaurant Record
+      // 2. Update Supabase Restaurant Record (synced across all devices in real-time)
       if (restaurantId) {
         const updatePayload: Record<string, any> = {
           name: restaurantName,
           slug: restaurantSlug,
           primary_color: primaryColor,
-          upi_id: upiId
+          upi_id: upiId,
+          bg_image: JSON.stringify(fullConfig)
         };
 
         try {
