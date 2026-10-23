@@ -107,7 +107,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   ];
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-gray-50 text-gray-900 relative pb-20 md:pb-0">
+    <div className="h-screen overflow-hidden flex flex-col md:flex-row bg-gray-50 text-gray-900 relative pb-20 md:pb-0">
       
       {/* Desktop Sidebar - Sleek Apple-style Look */}
       <aside className="w-[220px] shrink-0 bg-white border-r border-zinc-200/80 flex-col hidden md:flex h-screen sticky top-0">
@@ -165,7 +165,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto bg-[#FAFAFA] relative w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto bg-[#FAFAFA] relative w-full">
         <div className="md:hidden h-16 flex items-center justify-center border-b border-zinc-200 bg-white sticky top-0 z-40 relative overflow-hidden">
           <img src="/logo.png" alt="TableTapy" className="w-[180px] max-w-none h-auto absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 mt-1.5" style={{ imageRendering: '-webkit-optimize-contrast' }} />
         </div>
