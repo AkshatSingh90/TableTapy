@@ -69,7 +69,7 @@ export default function InventoryPage() {
   const [isAddingMode, setIsAddingMode] = useState(false);
   const [dateRange, setDateRange] = useState('Last 30 Days');
   const [isDateDropdownOpen, setIsDateDropdownOpen] = useState(false);
-    const [activeTab, setActiveTab] = useState('Intelligence');
+    const [activeTab, setActiveTab] = useState('Materials');
 
   const [filterLowStockOnly, setFilterLowStockOnly] = useState(false);
 
@@ -107,10 +107,10 @@ export default function InventoryPage() {
       .select('*, ledger:inventory_ledgers(*), usedInRecipes:inventory_recipe_usage(*)')
       .eq('restaurant_id', restId);
 
-    if (!restScopedErr && restScopedData) {
+    if (!restScopedErr && restScopedData && restScopedData.length > 0) {
       invRows = restScopedData;
     } else {
-      // Fallback query + code-level metadata isolation
+      // Fallback query + code-level metadata isolation + legacy null items
       const { data: allData, error } = await supabase
         .from('inventory_items')
         .select('*, ledger:inventory_ledgers(*), usedInRecipes:inventory_recipe_usage(*)');
@@ -129,6 +129,8 @@ export default function InventoryPage() {
             } catch {}
           }
           if (row.name && row.name.startsWith(`[REST:${restId}]`)) return true;
+          // Also include legacy items if no restaurant_id attached
+          if (!row.restaurant_id && !row.name?.startsWith('[REST:')) return true;
           return false;
         });
       }

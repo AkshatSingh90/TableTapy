@@ -31,6 +31,7 @@ interface MenuItem {
   description: string;
   is_veg: boolean;
   is_available: boolean;
+  badge?: "CHEF_SIGNATURE" | "BESTSELLER" | "SPECIAL" | "MUST_TRY" | null;
   recipeUsages?: any[];
   variantsConfig?: ItemVariantsConfig;
 }
@@ -48,7 +49,7 @@ export default function MenuManagerPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Form State
-  const defaultForm = { name: '', category: 'Main Course', subcategory: '', base_price: '', description: '', is_veg: true };
+  const defaultForm = { name: '', category: 'Main Course', subcategory: '', base_price: '', description: '', is_veg: true, badge: null as ("CHEF_SIGNATURE" | "BESTSELLER" | "SPECIAL" | "MUST_TRY" | null) };
   const [form, setForm] = useState(defaultForm);
   const [variantsConfig, setVariantsConfig] = useState<ItemVariantsConfig>(getDefaultVariantsConfig(0));
   const [recipeIngredients, setRecipeIngredients] = useState<{ inventory_item_id: string; amount: string; name?: string; cost?: number }[]>([]);
@@ -129,7 +130,7 @@ export default function MenuManagerPage() {
       })));
     }
     
-    // 2. Load Menu Items (supports native restaurant_id + metadata isolation)
+    // 2. Load Menu Items (supports native restaurant_id + metadata isolation + shared catalog fallback)
     let menuRows: any[] | null = null;
     const { data: restMenu, error: menuScopeErr } = await supabase
       .from('menu_items_v2')
@@ -137,7 +138,7 @@ export default function MenuManagerPage() {
       .eq('restaurant_id', restId)
       .order('created_at', { ascending: false });
 
-    if (!menuScopeErr && restMenu) {
+    if (!menuScopeErr && restMenu && restMenu.length > 0) {
       menuRows = restMenu;
     } else {
       const { data: allMenu } = await supabase.from('menu_items_v2').select('*').order('created_at', { ascending: false });
@@ -151,7 +152,10 @@ export default function MenuManagerPage() {
               if (ids.includes(row.id)) return true;
             } catch {}
           }
-          return row.description && row.description.includes(`[REST:${restId}]`);
+          if (row.description && row.description.includes(`[REST:${restId}]`)) return true;
+          // Show general items if no restaurant_id attached (matching POS behavior)
+          if (!row.restaurant_id && (!row.description || !row.description.includes('[REST:'))) return true;
+          return false;
         });
       }
     }
@@ -167,6 +171,18 @@ export default function MenuManagerPage() {
            return { ...u, inventory_name: invMatch?.name?.replace(/^\[REST:[^\]]+\]\s*/, '') || 'Unknown Ingredient' };
          });
 
+         // Load saved badges from restaurant storage or row
+         let itemBadge = row.badge || null;
+         if (!itemBadge && restId) {
+           try {
+             const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${restId}`);
+             if (savedBadges) {
+               const parsed = JSON.parse(savedBadges);
+               itemBadge = parsed[row.id] || null;
+             }
+           } catch {}
+         }
+
          return {
            id: row.id,
            name: row.name,
@@ -176,6 +192,7 @@ export default function MenuManagerPage() {
            description: cleanDescription,
            is_veg: row.is_veg,
            is_available: row.is_available !== false,
+           badge: itemBadge,
            recipeUsages: enrichedUsages,
            variantsConfig: config,
          };
@@ -331,6 +348,20 @@ export default function MenuManagerPage() {
       }]).select().single();
       menuErr = error;
       savedMenuId = insertedMenu?.id || null;
+    }
+
+    // Persist badge to dish badges storage
+    if (savedMenuId && restaurantId) {
+      try {
+        const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${restaurantId}`);
+        const parsed = savedBadges ? JSON.parse(savedBadges) : {};
+        if (form.badge) {
+          parsed[savedMenuId] = form.badge;
+        } else {
+          delete parsed[savedMenuId];
+        }
+        localStorage.setItem(`tabletapy_dish_badges_${restaurantId}`, JSON.stringify(parsed));
+      } catch {}
     }
 
     if (savedMenuId && restaurantId) {
@@ -532,6 +563,33 @@ export default function MenuManagerPage() {
                               <span>Non-Veg</span>
                             </button>
                           </div>
+                        </div>
+                      </div>
+
+                      {/* Dish Highlight Badge Selector */}
+                      <div>
+                        <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Dish Highlight Badge (Optional)</label>
+                        <div className="flex flex-wrap gap-2">
+                          {([
+                            { key: null, label: "None" },
+                            { key: "BESTSELLER", label: "Bestseller", color: "text-amber-700 bg-amber-50 border-amber-300" },
+                            { key: "CHEF_SIGNATURE", label: "Chef's Signature", color: "text-purple-700 bg-purple-50 border-purple-300" },
+                            { key: "SPECIAL", label: "Special", color: "text-blue-700 bg-blue-50 border-blue-300" },
+                            { key: "MUST_TRY", label: "Must Try", color: "text-rose-700 bg-rose-50 border-rose-300" }
+                          ] as const).map((b) => (
+                            <button
+                              key={b.label}
+                              type="button"
+                              onClick={() => setForm({ ...form, badge: b.key as any })}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                                form.badge === b.key
+                                  ? "bg-zinc-900 text-white border-zinc-900 shadow-xs"
+                                  : "bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300"
+                              }`}
+                            >
+                              {b.label}
+                            </button>
+                          ))}
                         </div>
                       </div>
 
@@ -918,8 +976,18 @@ export default function MenuManagerPage() {
                                      <span className="text-[32px] drop-shadow-sm filter">🍽️</span>
                                   </div>
                                   <div className="flex flex-col flex-1">
-                                     <div className="flex items-center gap-1.5">
+                                     <div className="flex items-center gap-1.5 flex-wrap">
                                         <span className="text-[14px] font-semibold text-gray-900 tracking-tight">{item.name}</span>
+                                        {item.badge && (
+                                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                            item.badge === 'BESTSELLER' ? 'bg-amber-50 text-amber-700 border-amber-300' :
+                                            item.badge === 'CHEF_SIGNATURE' ? 'bg-purple-50 text-purple-700 border-purple-300' :
+                                            item.badge === 'SPECIAL' ? 'bg-blue-50 text-blue-700 border-blue-300' :
+                                            'bg-rose-50 text-rose-700 border-rose-300'
+                                          }`}>
+                                            {item.badge.replace('_', ' ')}
+                                          </span>
+                                        )}
                                         <span className="text-[14px] font-semibold text-gray-600">- {formatCurrency(item.base_price)}</span>
                                      </div>
                                      {item.recipeUsages && item.recipeUsages.length > 0 ? (
@@ -972,6 +1040,7 @@ export default function MenuManagerPage() {
                           base_price: selectedItem.base_price.toString(),
                           description: selectedItem.description || '',
                           is_veg: selectedItem.is_veg,
+                          badge: selectedItem.badge || null,
                         });
                         setVariantsConfig(selectedItem.variantsConfig || getDefaultVariantsConfig(selectedItem.base_price));
                         setRecipeIngredients(

@@ -160,6 +160,18 @@ export default function CustomersPage() {
 
       if (isStaffOrCaptain && !cleanPhone) continue;
 
+      const isTakeaway =
+        (order.table_no || "").toLowerCase().includes("takeaway") ||
+        (order.table_no || "").toLowerCase().startsWith("takeaway") ||
+        lowerName === "takeaway guest" ||
+        lowerName === "takeaway customer";
+
+      // If takeaway: ONLY add as a customer if cashier/customer provided BOTH name AND valid phone!
+      // Otherwise skip completely.
+      if (isTakeaway && (!cleanPhone || !rawName || lowerName === "takeaway guest")) {
+        continue;
+      }
+
       const isPlaceholder =
         !rawName ||
         lowerName === "dine-in guest" ||
@@ -229,6 +241,11 @@ export default function CustomersPage() {
       const totalVisits = sortedOrders.length;
       const avgOrderValue = totalVisits > 0 ? totalSpend / totalVisits : 0;
 
+      // Loyalty points are strictly for Dine-In guests. Never award loyalty points on takeaway orders!
+      const dineInSpend = sortedOrders
+        .filter((ord) => !(ord.table_no || "").toLowerCase().includes("takeaway"))
+        .reduce((acc, curr) => acc + (Number(curr.total) || 0), 0);
+
       const daysSinceLastVisit = Math.max(
         0,
         Math.floor((now - new Date(lastVisit).getTime()) / (1000 * 60 * 60 * 24))
@@ -276,7 +293,7 @@ export default function CustomersPage() {
         tablesSat: Array.from(data.tablesSet),
         orders: [...sortedOrders].reverse(),
         favoriteDishes,
-        coinsBalance: Math.floor(totalSpend / 50),
+        coinsBalance: Math.floor(dineInSpend / 50),
         segment,
         rfmScore: {
           recency: recencyScore,

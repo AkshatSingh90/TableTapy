@@ -245,6 +245,11 @@ export default function StaffsDashboardPage() {
     e.preventDefault();
     setAddError('');
 
+    if (newStaff.phone && newStaff.phone.length !== 10) {
+      setAddError('Mobile number must be exactly 10 digits.');
+      return;
+    }
+
     if (!newStaff.name.trim()) {
       setAddError('Staff name is required.');
       return;
@@ -331,10 +336,10 @@ export default function StaffsDashboardPage() {
   };
 
   return (
-    <div className="w-full min-h-screen bg-white text-zinc-900 font-sans p-6 md:p-10">
+    <div className="w-full min-h-screen bg-white text-zinc-900 font-sans">
       
       {/* ─── Full-Width Header Bar ────────────────────────── */}
-      <div className="flex items-center justify-between pb-4 border-b border-zinc-100 mb-6">
+      <div className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-zinc-200/80 px-6 md:px-10 py-4 flex items-center justify-between">
         <div>
           <h1 className="text-[18px] font-bold text-zinc-900 tracking-tight">Staff Terminal Access</h1>
           <p className="text-[13px] text-zinc-400 mt-0.5">
@@ -350,6 +355,8 @@ export default function StaffsDashboardPage() {
           <span>Add Staff</span>
         </button>
       </div>
+
+      <div className="px-6 md:px-10 pt-6 pb-20">
 
       {/* ─── 3-Step Guide Across Full Horizontal Space ────── */}
       <div className="mb-6 rounded-2xl bg-[#E46254]/5 border border-[#E46254]/15 p-5">
@@ -551,6 +558,8 @@ export default function StaffsDashboardPage() {
         </div>
       )}
 
+      </div>
+
       {/* ─── Modal: Add Staff Member ────────────────────────── */}
       {isAddModalOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-2xs flex items-center justify-center z-50 p-4">
@@ -600,9 +609,10 @@ export default function StaffsDashboardPage() {
                 <input
                   type="tel"
                   value={newStaff.phone}
-                  onChange={(e) => setNewStaff({ ...newStaff, phone: e.target.value })}
-                  placeholder="e.g. +91 98765 43210"
-                  className="w-full px-3.5 py-2 text-[13px] bg-white border border-zinc-200 rounded-xl focus:outline-hidden focus:border-[#E46254]"
+                  onChange={(e) => setNewStaff({ ...newStaff, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+                  placeholder="10-digit mobile number"
+                  maxLength={10}
+                  className="w-full px-3.5 py-2 text-[13px] bg-white border border-zinc-200 rounded-xl focus:outline-hidden focus:border-[#E46254] font-mono tracking-widest"
                 />
               </div>
 

@@ -17,9 +17,7 @@ import {
   Smartphone,
   Monitor,
   Info,
-  CheckCircle2,
-  Lock,
-  ArrowRight
+  CheckCircle2
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import { 
@@ -173,7 +171,7 @@ export default function SettingsPage() {
   }, [taxSettings]);
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] text-zinc-900 font-sans pb-24">
+    <div className="bg-[#FAFAFA] text-zinc-900 font-sans pb-24">
       
       {/* ── STICKY TOP NAVIGATION DOCK (APPLE STYLE) ── */}
       <header className="sticky top-0 z-30 bg-[#FAFAFA]/90 backdrop-blur-md border-b border-zinc-200/80 px-4 sm:px-8 py-3.5 transition-all">
@@ -199,7 +197,7 @@ export default function SettingsPage() {
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="px-5 py-2 bg-zinc-900 hover:bg-zinc-800 text-white font-medium rounded-xl text-xs sm:text-sm transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer active:scale-95 disabled:opacity-60"
+              className="px-5 py-2 bg-[#E46254] hover:bg-[#d04e41] text-white font-medium rounded-xl text-xs sm:text-sm transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer active:scale-95 disabled:opacity-60"
             >
               {saving ? (
                 <>
@@ -222,7 +220,7 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('TAXES')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'TAXES'
-                  ? 'bg-white text-zinc-900 shadow-xs'
+                  ? 'bg-white text-[#E46254] shadow-xs'
                   : 'text-zinc-600 hover:text-zinc-900'
               }`}
             >
@@ -235,7 +233,7 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('SECURITY')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'SECURITY'
-                  ? 'bg-white text-zinc-900 shadow-xs'
+                  ? 'bg-white text-[#E46254] shadow-xs'
                   : 'text-zinc-600 hover:text-zinc-900'
               }`}
             >
@@ -248,7 +246,7 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('HARDWARE')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'HARDWARE'
-                  ? 'bg-white text-zinc-900 shadow-xs'
+                  ? 'bg-white text-[#E46254] shadow-xs'
                   : 'text-zinc-600 hover:text-zinc-900'
               }`}
             >
@@ -261,7 +259,7 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('BRAND')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'BRAND'
-                  ? 'bg-white text-zinc-900 shadow-xs'
+                  ? 'bg-white text-[#E46254] shadow-xs'
                   : 'text-zinc-600 hover:text-zinc-900'
               }`}
             >
@@ -303,7 +301,7 @@ export default function SettingsPage() {
                     onClick={() => setTaxSettings(prev => ({ ...prev, gstType: 'REGULAR', cgstRate: 2.5, sgstRate: 2.5 }))}
                     className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                       taxSettings.gstType === 'REGULAR'
-                        ? 'border-zinc-900 bg-zinc-50/70'
+                        ? 'border-[#E46254] bg-[#E46254]/5'
                         : 'border-zinc-200 bg-white hover:border-zinc-300'
                     }`}
                   >
@@ -311,7 +309,7 @@ export default function SettingsPage() {
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-bold text-zinc-900">Regular GST (5%)</span>
                         {taxSettings.gstType === 'REGULAR' && (
-                          <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                          <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                             <Check size={10} className="text-white" strokeWidth={3} />
                           </div>
                         )}
@@ -330,7 +328,7 @@ export default function SettingsPage() {
                     onClick={() => setTaxSettings(prev => ({ ...prev, gstType: 'COMPOSITION', cgstRate: 0, sgstRate: 0 }))}
                     className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                       taxSettings.gstType === 'COMPOSITION'
-                        ? 'border-zinc-900 bg-zinc-50/70'
+                        ? 'border-[#E46254] bg-[#E46254]/5'
                         : 'border-zinc-200 bg-white hover:border-zinc-300'
                     }`}
                   >
@@ -338,7 +336,7 @@ export default function SettingsPage() {
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-bold text-zinc-900">Composition (0%)</span>
                         {taxSettings.gstType === 'COMPOSITION' && (
-                          <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                          <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                             <Check size={10} className="text-white" strokeWidth={3} />
                           </div>
                         )}
@@ -741,7 +739,7 @@ export default function SettingsPage() {
                   onClick={() => setQrOrderMode('PIN_DIRECT_FIRE')}
                   className={`p-5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                     qrOrderMode === 'PIN_DIRECT_FIRE'
-                      ? 'border-zinc-900 bg-zinc-50/70 shadow-xs'
+                      ? 'border-[#E46254] bg-[#E46254]/5 shadow-xs'
                       : 'border-zinc-200 bg-white hover:border-zinc-300'
                   }`}
                 >
@@ -751,7 +749,7 @@ export default function SettingsPage() {
                         <KeyRound size={16} strokeWidth={2} />
                       </div>
                       {qrOrderMode === 'PIN_DIRECT_FIRE' && (
-                        <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                           <Check size={10} className="text-white" strokeWidth={3} />
                         </div>
                       )}
@@ -779,7 +777,7 @@ export default function SettingsPage() {
                   onClick={() => setQrOrderMode('OPEN_STAFF_APPROVAL')}
                   className={`p-5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                     qrOrderMode === 'OPEN_STAFF_APPROVAL'
-                      ? 'border-zinc-900 bg-zinc-50/70 shadow-xs'
+                      ? 'border-[#E46254] bg-[#E46254]/5 shadow-xs'
                       : 'border-zinc-200 bg-white hover:border-zinc-300'
                   }`}
                 >
@@ -789,7 +787,7 @@ export default function SettingsPage() {
                         <UserCheck size={16} strokeWidth={2} />
                       </div>
                       {qrOrderMode === 'OPEN_STAFF_APPROVAL' && (
-                        <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                           <Check size={10} className="text-white" strokeWidth={3} />
                         </div>
                       )}
@@ -833,7 +831,7 @@ export default function SettingsPage() {
                   onClick={() => setBillingMode('STAFF_ASSISTED')}
                   className={`p-5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                     billingMode === 'STAFF_ASSISTED'
-                      ? 'border-zinc-900 bg-zinc-50/70 shadow-xs'
+                      ? 'border-[#E46254] bg-[#E46254]/5 shadow-xs'
                       : 'border-zinc-200 bg-white hover:border-zinc-300'
                   }`}
                 >
@@ -843,7 +841,7 @@ export default function SettingsPage() {
                         <CreditCard size={16} strokeWidth={2} />
                       </div>
                       {billingMode === 'STAFF_ASSISTED' && (
-                        <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                           <Check size={10} className="text-white" strokeWidth={3} />
                         </div>
                       )}
@@ -864,7 +862,7 @@ export default function SettingsPage() {
                   onClick={() => setBillingMode('SELF_PAY')}
                   className={`p-5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                     billingMode === 'SELF_PAY'
-                      ? 'border-zinc-900 bg-zinc-50/70 shadow-xs'
+                      ? 'border-[#E46254] bg-[#E46254]/5 shadow-xs'
                       : 'border-zinc-200 bg-white hover:border-zinc-300'
                   }`}
                 >
@@ -874,7 +872,7 @@ export default function SettingsPage() {
                         <Smartphone size={16} strokeWidth={2} />
                       </div>
                       {billingMode === 'SELF_PAY' && (
-                        <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                           <Check size={10} className="text-white" strokeWidth={3} />
                         </div>
                       )}
@@ -976,14 +974,14 @@ export default function SettingsPage() {
                   onClick={() => setPaperWidth('80MM')}
                   className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                     paperWidth === '80MM'
-                      ? 'border-zinc-900 bg-zinc-50/70'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
                       : 'border-zinc-200 bg-white hover:border-zinc-300'
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-zinc-900">80mm (3-Inch Standard)</span>
                     {paperWidth === '80MM' && (
-                      <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                         <Check size={10} className="text-white" strokeWidth={3} />
                       </div>
                     )}
@@ -998,14 +996,14 @@ export default function SettingsPage() {
                   onClick={() => setPaperWidth('58MM')}
                   className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
                     paperWidth === '58MM'
-                      ? 'border-zinc-900 bg-zinc-50/70'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
                       : 'border-zinc-200 bg-white hover:border-zinc-300'
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-zinc-900">58mm (2-Inch Mobile)</span>
                     {paperWidth === '58MM' && (
-                      <div className="w-4 h-4 rounded-full bg-zinc-900 flex items-center justify-center">
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                         <Check size={10} className="text-white" strokeWidth={3} />
                       </div>
                     )}

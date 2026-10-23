@@ -104,6 +104,16 @@ export default function TableManagerPage() {
     setIsSaving(true);
     
     if (showAddModal) {
+      // Duplicate name check (case-insensitive)
+      const isDuplicate = locations.some(
+        l => l.name.trim().toLowerCase() === formData.name.trim().toLowerCase()
+      );
+      if (isDuplicate) {
+        triggerToast(`A table named "${formData.name.trim()}" already exists`);
+        setIsSaving(false);
+        return;
+      }
+
       const code = Math.random().toString(16).substring(2, 10);
       const newLoc = {
         restaurant_id: restaurantId,
@@ -120,6 +130,9 @@ export default function TableManagerPage() {
           capacity: formData.capacity 
         }]);
         triggerToast(`${formData.name.trim()} added successfully`);
+      } else if (error) {
+        console.error('Insert error:', error);
+        triggerToast('Failed to add table. Please try again.');
       }
     } else if (showEditModal && formData.id) {
       const { error } = await supabase.from('locations').update({ name: formData.name.trim() }).eq('id', formData.id);
@@ -131,6 +144,9 @@ export default function TableManagerPage() {
           isActive: formData.isActive
         } : l));
         triggerToast(`${formData.name.trim()} updated successfully`);
+      } else {
+        console.error('Update error:', error);
+        triggerToast('Failed to update table. Please try again.');
       }
     }
     
@@ -440,7 +456,7 @@ export default function TableManagerPage() {
                 type="text" 
                 autoFocus
                 value={deleteConfirmText}
-                onChange={e => setDeleteConfirmText(e.target.value)}
+                onChange={e => setDeleteConfirmText(e.target.value.toUpperCase())}
                 placeholder="DELETE"
                 className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-center text-[13px] font-bold outline-none focus:border-red-400 focus:ring-1 focus:ring-red-400 transition-all uppercase"
               />

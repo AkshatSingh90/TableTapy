@@ -96,15 +96,8 @@ export default function PromotionsPage() {
   const [saving, setSaving] = useState(false);
   const [restaurantId, setRestaurantId] = useState<string>("");
   const [restaurantName, setRestaurantName] = useState<string>("My Restaurant");
-  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
-  const [dishBadges, setDishBadges] = useState<Record<string, MenuItem["badge"]>>({});
-
   // Active Sub-View
-  const [activeSection, setActiveSection] = useState<"LOYALTY" | "BADGES" | "HAPPY_HOURS">("LOYALTY");
-
-  // Filter & Search for dishes
-  const [dishSearch, setDishSearch] = useState("");
-  const [dishCategoryFilter, setDishCategoryFilter] = useState("ALL");
+  const [activeSection, setActiveSection] = useState<"LOYALTY" | "HAPPY_HOURS">("LOYALTY");
 
   // Configuration
   const [config, setConfig] = useState<PromotionsConfig>(DEFAULT_CONFIG);
@@ -147,14 +140,6 @@ export default function PromotionsPage() {
           } catch {}
         }
 
-        // Load Saved Dish Badges
-        const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${restId}`);
-        if (savedBadges) {
-          try {
-            setDishBadges(JSON.parse(savedBadges));
-          } catch {}
-        }
-
         // Load Menu Items (supports native column & metadata isolation)
         let menuRows: any[] | null = null;
         const { data: scopedMenu, error: scopeErr } = await supabase
@@ -189,8 +174,7 @@ export default function PromotionsPage() {
           setMenuItems(menuRows as MenuItem[]);
         } else {
           setMenuItems([]);
-        }
-      }
+        }      }
     } catch (err) {
       console.error("Error loading promotions:", err);
     } finally {
@@ -211,9 +195,6 @@ export default function PromotionsPage() {
       // 1. Save config to local storage
       localStorage.setItem(`tabletapy_promotions_config_${restaurantId}`, JSON.stringify(config));
 
-      // 2. Save dish badges
-      localStorage.setItem(`tabletapy_dish_badges_${restaurantId}`, JSON.stringify(dishBadges));
-
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event("storage"));
       }
@@ -224,25 +205,6 @@ export default function PromotionsPage() {
     } finally {
       setSaving(false);
     }
-  };
-
-  /* ─── Toggle Dish Badge ─────────────────────────────────── */
-  const handleSetDishBadge = (dishId: string, badgeType: MenuItem["badge"]) => {
-    const next = { ...dishBadges };
-    if (next[dishId] === badgeType) {
-      delete next[dishId]; // toggle off if already active
-    } else {
-      next[dishId] = badgeType;
-    }
-    setDishBadges(next);
-
-    if (restaurantId) {
-      localStorage.setItem(`tabletapy_dish_badges_${restaurantId}`, JSON.stringify(next));
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new Event("storage"));
-      }
-    }
-    showToast("Dish highlight updated!");
   };
 
   /* ─── Manage Loyalty Milestones ─────────────────────────── */
@@ -281,33 +243,6 @@ export default function PromotionsPage() {
       milestones: prev.milestones.filter((m) => m.id !== id),
     }));
   };
-
-  /* ─── Filtered Menu Items for Badging ────────────────────── */
-  const categoriesList = useMemo(() => {
-    const set = new Set<string>();
-    menuItems.forEach((m) => {
-      if (m.category) set.add(m.category);
-    });
-    return ["ALL", ...Array.from(set)];
-  }, [menuItems]);
-
-  const filteredMenuItems = useMemo(() => {
-    return menuItems.filter((m) => {
-      if (dishCategoryFilter !== "ALL" && m.category !== dishCategoryFilter) return false;
-      if (dishSearch.trim() && !m.name.toLowerCase().includes(dishSearch.toLowerCase().trim())) {
-        return false;
-      }
-      return true;
-    });
-  }, [menuItems, dishCategoryFilter, dishSearch]);
-
-  const badgedCounts = useMemo(() => {
-    let count = 0;
-    Object.values(dishBadges).forEach((b) => {
-      if (b) count++;
-    });
-    return count;
-  }, [dishBadges]);
 
   /* ─── Render Loading State ──────────────────────────────── */
   if (loading) {
@@ -381,7 +316,6 @@ export default function PromotionsPage() {
             {(
               [
                 { id: "LOYALTY", label: "TableTapy Coin Engine", icon: Coins },
-                { id: "BADGES", label: `Dish Highlights & Badges (${badgedCounts})`, icon: Tag },
                 { id: "HAPPY_HOURS", label: "Happy Hours & Cart Boosters", icon: Clock },
               ] as const
             ).map((tab) => {
@@ -639,166 +573,6 @@ export default function PromotionsPage() {
                 </div>
               </div>
             </section>
-          </div>
-        )}
-
-        {/* =========================================================================
-            VIEW 2: DISH MERCHANDISING & BADGES (Chef's Signature & Bestsellers)
-           ========================================================================= */}
-        {activeSection === "BADGES" && (
-          <div className="space-y-4 md:space-y-5">
-            {/* Header & Filter Controls */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-5 shadow-xs space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <Tag size={18} className="text-[#E46254]" />
-                    <h2 className="text-[16px] font-bold text-zinc-900 tracking-tight">
-                      Dish Highlights & Merchandising Badges
-                    </h2>
-                  </div>
-                  <p className="text-zinc-400 text-xs font-medium mt-0.5">
-                    1-Tap tag badges to elevate your hero dishes on the digital QR menu and drive 30%+ higher orders.
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-zinc-500 bg-zinc-100 px-3 py-1 rounded-xl">
-                    {badgedCounts} Highlighted Dishes
-                  </span>
-                </div>
-              </div>
-
-              {/* Search & Category Filter Pills */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-                <div className="relative flex-1 max-w-sm">
-                  <Search size={14} className="text-zinc-400 absolute left-3 top-2.5" />
-                  <input
-                    type="text"
-                    placeholder="Search dishes by name..."
-                    value={dishSearch}
-                    onChange={(e) => setDishSearch(e.target.value)}
-                    className="w-full pl-8 pr-3 py-1.5 text-xs font-semibold rounded-xl border border-zinc-200 focus:outline-none focus:border-[#E46254]"
-                  />
-                </div>
-
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
-                  {categoriesList.slice(0, 6).map((cat) => (
-                    <button
-                      key={cat}
-                      onClick={() => setDishCategoryFilter(cat)}
-                      className={`px-2.5 py-1 rounded-lg text-[11.5px] font-semibold whitespace-nowrap cursor-pointer transition-all ${
-                        dishCategoryFilter === cat
-                          ? "bg-zinc-900 text-white"
-                          : "text-zinc-500 hover:text-zinc-800 bg-zinc-100/70"
-                      }`}
-                    >
-                      {cat}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
-
-            {/* Menu Items List with 1-Tap Tag Selectors */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {filteredMenuItems.length === 0 ? (
-                <div className="col-span-2 py-12 text-center text-xs text-zinc-400">
-                  No dishes found matching search criteria.
-                </div>
-              ) : (
-                filteredMenuItems.map((dish) => {
-                  const currentBadge = dishBadges[dish.id];
-
-                  return (
-                    <div
-                      key={dish.id}
-                      className="bg-white rounded-2xl border border-zinc-200/80 p-4 md:p-5 shadow-xs flex flex-col justify-between space-y-3"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${
-                                dish.is_veg ? "bg-emerald-600" : "bg-red-700"
-                              }`}
-                            />
-                            <h4 className="font-semibold text-sm text-zinc-900 truncate">
-                              {dish.name}
-                            </h4>
-                          </div>
-                          <span className="text-[11px] text-zinc-400 font-medium block mt-0.5">
-                            {dish.category} · {formatCurrency(dish.base_price)}
-                          </span>
-                        </div>
-
-                        {/* Current Active Badge Indicator */}
-                        {currentBadge ? (
-                          <span className="text-[10.5px] font-bold bg-[#E46254]/10 text-[#E46254] px-2.5 py-0.5 rounded-full border border-[#E46254]/20 shrink-0">
-                            {currentBadge.replace("_", " ")}
-                          </span>
-                        ) : (
-                          <span className="text-[10.5px] font-medium text-zinc-300 shrink-0">
-                            No badge
-                          </span>
-                        )}
-                      </div>
-
-                      {/* 1-Tap Tag Selector Row */}
-                      <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-zinc-100 text-xs">
-                        <button
-                          onClick={() => handleSetDishBadge(dish.id, "CHEF_SIGNATURE")}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                            currentBadge === "CHEF_SIGNATURE"
-                              ? "bg-zinc-900 text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
-                        >
-                          <ChefHat size={12} />
-                          <span>Chef's Signature</span>
-                        </button>
-
-                        <button
-                          onClick={() => handleSetDishBadge(dish.id, "BESTSELLER")}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                            currentBadge === "BESTSELLER"
-                              ? "bg-zinc-900 text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
-                        >
-                          <Sparkles size={12} />
-                          <span>Bestseller</span>
-                        </button>
-
-                        <button
-                          onClick={() => handleSetDishBadge(dish.id, "SPECIAL")}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                            currentBadge === "SPECIAL"
-                              ? "bg-zinc-900 text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
-                        >
-                          <Star size={12} />
-                          <span>Special</span>
-                        </button>
-
-                        <button
-                          onClick={() => handleSetDishBadge(dish.id, "MUST_TRY")}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-                            currentBadge === "MUST_TRY"
-                              ? "bg-zinc-900 text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
-                        >
-                          <Flame size={12} />
-                          <span>Must Try</span>
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
           </div>
         )}
 
