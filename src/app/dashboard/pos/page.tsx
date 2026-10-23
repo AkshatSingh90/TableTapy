@@ -35,6 +35,13 @@ import {
   COMMON_PREP_TAGS,
 } from "@/utils/menuItemVariants";
 import { resolveTablePinAndSeed, normalizeTableIdentifier } from "@/utils/tableSessionPin";
+import {
+  TaxSettings,
+  DEFAULT_TAX_SETTINGS,
+  getStoredTaxSettings,
+  calculateBillTaxes,
+  BillTaxCalculation,
+} from "@/utils/tax";
 
 /* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
@@ -210,6 +217,9 @@ export default function PosPage() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  // Tax & Billing Engine State
+  const [taxSettings, setTaxSettings] = useState<TaxSettings>(DEFAULT_TAX_SETTINGS);
+
   // Printable Thermal Chit State
   const [printChit, setPrintChit] = useState<{
     type: "KOT" | "BILL";
@@ -222,9 +232,17 @@ export default function PosPage() {
     subtotal?: number;
     packaging?: number;
     discount?: number;
+    serviceCharge?: number;
+    serviceChargeRate?: number;
+    cgst?: number;
+    sgst?: number;
+    cgstRate?: number;
+    sgstRate?: number;
     tax?: number;
     roundOff?: number;
     grandTotal?: number;
+    isInclusive?: boolean;
+    isComposition?: boolean;
     time: string;
   } | null>(null);
 
@@ -353,6 +371,9 @@ export default function PosPage() {
 
       if (restId) {
         setRestaurantId(restId);
+        setTaxSettings(getStoredTaxSettings(restId));
+      } else {
+        setTaxSettings(getStoredTaxSettings());
       }
 
       if (loadedLocations.length > 0) {
@@ -477,6 +498,17 @@ export default function PosPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editingRoundItem, customizingDish, isTransferModalOpen, isGuestInfoModalOpen, terminalMode, activeTableModal, dishSearchQuery]);
+
+  // Realtime Tax Settings synchronization
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key && e.key.includes("tabletapy_tax_settings")) {
+        setTaxSettings(getStoredTaxSettings(restaurantId || undefined));
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [restaurantId]);
 
   // Supabase Realtime Subscription
   useEffect(() => {
@@ -1210,11 +1242,25 @@ export default function PosPage() {
     return 0;
   }, [subtotal, discountPercent, customDiscountRupees]);
 
-  const taxableAmount = Math.max(0, subtotal - effectiveDiscount);
-  const gstAmount = taxableAmount * 0.05; // 5% GST
-  const exactTotal = taxableAmount + gstAmount;
-  const grandTotal = Math.round(exactTotal);
-  const roundOff = Math.round((grandTotal - exactTotal) * 100) / 100;
+  const dineInBillCalc: BillTaxCalculation = useMemo(() => {
+    return calculateBillTaxes({
+      subtotal,
+      discountAmount: effectiveDiscount,
+      isDineIn: true,
+      settings: taxSettings,
+    });
+  }, [subtotal, effectiveDiscount, taxSettings]);
+
+  const {
+    taxableAmount,
+    cgstAmount,
+    sgstAmount,
+    totalGst: gstAmount,
+    serviceChargeAmount,
+    exactTotal,
+    grandTotal,
+    roundOff,
+  } = dineInBillCalc;
 
   /* ─── 7. Fire Round / Send KOT to Kitchen ───────────────────────── */
   const handleSendManualKOT = async () => {
@@ -1427,10 +1473,18 @@ export default function PosPage() {
       customerPhone: manualCustomerPhone || activeSession?.customerPhone,
       items: allBillItems,
       subtotal,
-      discount: effectiveDiscount,
+      discount: effectiveDiscount > 0 ? effectiveDiscount : undefined,
+      serviceCharge: serviceChargeAmount > 0 ? serviceChargeAmount : undefined,
+      serviceChargeRate: taxSettings.serviceChargeRate,
+      cgst: cgstAmount,
+      sgst: sgstAmount,
+      cgstRate: dineInBillCalc.effectiveCgstRate,
+      sgstRate: dineInBillCalc.effectiveSgstRate,
       tax: gstAmount,
       roundOff,
       grandTotal,
+      isInclusive: dineInBillCalc.isInclusive,
+      isComposition: dineInBillCalc.isComposition,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
@@ -1560,9 +1614,17 @@ export default function PosPage() {
     return 0;
   }, [takeawayPackagingTier]);
 
-  const takeawayTotal = useMemo(() => {
-    return Math.max(0, Math.round(takeawaySubtotal + takeawayPackagingAmount - takeawayDiscountAmount));
-  }, [takeawaySubtotal, takeawayPackagingAmount, takeawayDiscountAmount]);
+  const takeawayBillCalc: BillTaxCalculation = useMemo(() => {
+    return calculateBillTaxes({
+      subtotal: takeawaySubtotal,
+      discountAmount: takeawayDiscountAmount,
+      packagingAmount: takeawayPackagingAmount,
+      isDineIn: false,
+      settings: taxSettings,
+    });
+  }, [takeawaySubtotal, takeawayDiscountAmount, takeawayPackagingAmount, taxSettings]);
+
+  const takeawayTotal = takeawayBillCalc.grandTotal;
 
   const cashTenderPresets = useMemo(() => {
     if (takeawayTotal <= 0) return [];
@@ -1681,7 +1743,15 @@ export default function PosPage() {
         subtotal: takeawaySubtotal,
         packaging: takeawayPackagingAmount > 0 ? takeawayPackagingAmount : undefined,
         discount: takeawayDiscountAmount > 0 ? takeawayDiscountAmount : undefined,
+        cgst: takeawayBillCalc.cgstAmount,
+        sgst: takeawayBillCalc.sgstAmount,
+        cgstRate: takeawayBillCalc.effectiveCgstRate,
+        sgstRate: takeawayBillCalc.effectiveSgstRate,
+        tax: takeawayBillCalc.totalGst,
+        roundOff: takeawayBillCalc.roundOff,
         grandTotal: takeawayTotal,
+        isInclusive: takeawayBillCalc.isInclusive,
+        isComposition: takeawayBillCalc.isComposition,
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       });
 
@@ -1748,6 +1818,12 @@ export default function PosPage() {
 
     const tokenFormatted = order.table_no.replace("Takeaway", "Token");
 
+    const reprintCalc = calculateBillTaxes({
+      subtotal: order.total,
+      isDineIn: false,
+      settings: taxSettings,
+    });
+
     setPrintChit({
       type: "BILL",
       mode: "TAKEAWAY",
@@ -1756,7 +1832,15 @@ export default function PosPage() {
       customerPhone: order.customer_phone || undefined,
       items,
       subtotal: order.total,
+      cgst: reprintCalc.cgstAmount,
+      sgst: reprintCalc.sgstAmount,
+      cgstRate: reprintCalc.effectiveCgstRate,
+      sgstRate: reprintCalc.effectiveSgstRate,
+      tax: reprintCalc.totalGst,
+      roundOff: reprintCalc.roundOff,
       grandTotal: order.total,
+      isInclusive: reprintCalc.isInclusive,
+      isComposition: reprintCalc.isComposition,
       time: new Date(order.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     });
 
@@ -2530,6 +2614,40 @@ export default function PosPage() {
                       <div className="flex justify-between text-emerald-600 font-medium">
                         <span>Discount:</span>
                         <span className="font-mono">-₹{takeawayDiscountAmount.toFixed(0)}</span>
+                      </div>
+                    )}
+
+                    {takeawayBillCalc.isComposition ? (
+                      <div className="flex justify-between text-zinc-400 text-[11px] italic">
+                        <span>GST (Composition):</span>
+                        <span className="font-mono">₹0.00</span>
+                      </div>
+                    ) : takeawayBillCalc.isInclusive ? (
+                      <div className="flex justify-between text-zinc-500 text-[11px]">
+                        <span>GST ({takeawayBillCalc.effectiveCgstRate + takeawayBillCalc.effectiveSgstRate}%):</span>
+                        <span className="font-mono text-zinc-600">Inclusive</span>
+                      </div>
+                    ) : (
+                      takeawayBillCalc.totalGst > 0 && (
+                        <>
+                          <div className="flex justify-between text-zinc-500 text-xs">
+                            <span>CGST ({takeawayBillCalc.effectiveCgstRate}%):</span>
+                            <span className="font-mono text-zinc-800">₹{takeawayBillCalc.cgstAmount.toFixed(1)}</span>
+                          </div>
+                          <div className="flex justify-between text-zinc-500 text-xs">
+                            <span>SGST ({takeawayBillCalc.effectiveSgstRate}%):</span>
+                            <span className="font-mono text-zinc-800">₹{takeawayBillCalc.sgstAmount.toFixed(1)}</span>
+                          </div>
+                        </>
+                      )
+                    )}
+
+                    {takeawayBillCalc.roundOff !== 0 && (
+                      <div className="flex justify-between text-zinc-400 text-[10.5px]">
+                        <span>Round-off:</span>
+                        <span className="font-mono">
+                          {takeawayBillCalc.roundOff > 0 ? `+₹${takeawayBillCalc.roundOff}` : `-₹${Math.abs(takeawayBillCalc.roundOff)}`}
+                        </span>
                       </div>
                     )}
 
@@ -3316,11 +3434,36 @@ export default function PosPage() {
                       </div>
                     )}
 
-                    {gstAmount > 0 && (
+                    {serviceChargeAmount > 0 && (
                       <div className="flex justify-between text-zinc-500">
-                        <span>GST (5%)</span>
-                        <span className="font-semibold text-zinc-800 font-mono">₹{gstAmount.toFixed(1)}</span>
+                        <span>Service Charge ({taxSettings.serviceChargeRate}%)</span>
+                        <span className="font-semibold text-zinc-800 font-mono">₹{serviceChargeAmount.toFixed(1)}</span>
                       </div>
+                    )}
+
+                    {dineInBillCalc.isComposition ? (
+                      <div className="flex justify-between text-zinc-400 text-[11px] italic">
+                        <span>GST (Composition - 0%)</span>
+                        <span className="font-mono">₹0.00</span>
+                      </div>
+                    ) : dineInBillCalc.isInclusive ? (
+                      <div className="flex justify-between text-zinc-500 text-[11px]">
+                        <span>GST ({dineInBillCalc.effectiveCgstRate + dineInBillCalc.effectiveSgstRate}%)</span>
+                        <span className="font-mono text-zinc-600 font-semibold">Inclusive</span>
+                      </div>
+                    ) : (
+                      gstAmount > 0 && (
+                        <>
+                          <div className="flex justify-between text-zinc-500">
+                            <span>CGST ({dineInBillCalc.effectiveCgstRate}%)</span>
+                            <span className="font-semibold text-zinc-800 font-mono">₹{cgstAmount.toFixed(1)}</span>
+                          </div>
+                          <div className="flex justify-between text-zinc-500">
+                            <span>SGST ({dineInBillCalc.effectiveSgstRate}%)</span>
+                            <span className="font-semibold text-zinc-800 font-mono">₹{sgstAmount.toFixed(1)}</span>
+                          </div>
+                        </>
+                      )
                     )}
 
                     {roundOff !== 0 && (
@@ -3896,10 +4039,29 @@ export default function PosPage() {
           <div className="max-w-[80mm] mx-auto space-y-2">
             <div className="text-center border-b pb-2">
               <h2 className="text-base font-black uppercase tracking-tight">{restaurantName}</h2>
-              {restaurantAddress && <p className="text-[10px]">{restaurantAddress}</p>}
+              {(taxSettings.receiptAddress || restaurantAddress) && (
+                <p className="text-[10px] leading-tight whitespace-pre-line mt-0.5">
+                  {taxSettings.receiptAddress || restaurantAddress}
+                </p>
+              )}
+              {taxSettings.gstin && (
+                <p className="text-[10px] font-bold mt-0.5 tracking-wider">GSTIN: {taxSettings.gstin}</p>
+              )}
+              {taxSettings.fssai && (
+                <p className="text-[10px] text-zinc-600">FSSAI: {taxSettings.fssai}</p>
+              )}
               <p className="font-bold mt-1 text-sm tracking-wider">
-                {printChit.type === "KOT" ? `*** KOT #${printChit.kotNumber || 1} ***` : "*** TAX INVOICE ***"}
+                {printChit.type === "KOT"
+                  ? `*** KOT #${printChit.kotNumber || 1} ***`
+                  : printChit.isComposition
+                  ? "*** BILL OF SUPPLY ***"
+                  : "*** TAX INVOICE ***"}
               </p>
+              {printChit.type === "BILL" && printChit.isComposition && (
+                <p className="text-[8.5px] leading-tight uppercase font-medium mt-0.5">
+                  Composition Taxable Person, Not Eligible To Collect Tax On Supplies
+                </p>
+              )}
               <div className="flex justify-between text-[11px] mt-1 font-bold">
                 <span>{printChit.tableOrToken}</span>
                 <span>{printChit.time}</span>
@@ -3955,14 +4117,48 @@ export default function PosPage() {
                     <span>-₹{printChit.discount.toFixed(1)}</span>
                   </div>
                 ) : null}
-                <div className="flex justify-between">
-                  <span>GST (5%):</span>
-                  <span>₹{printChit.tax?.toFixed(2)}</span>
-                </div>
-                {printChit.roundOff !== 0 && (
+                {printChit.serviceCharge && printChit.serviceCharge > 0 ? (
+                  <div className="flex justify-between">
+                    <span>Service Charge ({printChit.serviceChargeRate || 5}%):</span>
+                    <span>₹{printChit.serviceCharge.toFixed(2)}</span>
+                  </div>
+                ) : null}
+
+                {/* Dynamic Tax Lines */}
+                {printChit.isComposition ? (
+                  <div className="flex justify-between text-[10px] italic text-zinc-600">
+                    <span>GST (Composition):</span>
+                    <span>₹0.00</span>
+                  </div>
+                ) : printChit.isInclusive ? (
+                  <>
+                    <div className="flex justify-between text-[10px] text-zinc-600">
+                      <span>Taxes:</span>
+                      <span>Included in Price</span>
+                    </div>
+                    <div className="text-[9.5px] text-zinc-500 pl-2">
+                      (CGST {printChit.cgstRate}%: ₹{printChit.cgst?.toFixed(2)} + SGST {printChit.sgstRate}%: ₹{printChit.sgst?.toFixed(2)})
+                    </div>
+                  </>
+                ) : (
+                  (printChit.cgst !== undefined || printChit.sgst !== undefined) && (
+                    <>
+                      <div className="flex justify-between">
+                        <span>CGST ({printChit.cgstRate || 2.5}%):</span>
+                        <span>₹{printChit.cgst?.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>SGST ({printChit.sgstRate || 2.5}%):</span>
+                        <span>₹{printChit.sgst?.toFixed(2)}</span>
+                      </div>
+                    </>
+                  )
+                )}
+
+                {printChit.roundOff !== undefined && printChit.roundOff !== 0 && (
                   <div className="flex justify-between text-[10px]">
                     <span>Round-off:</span>
-                    <span>{printChit.roundOff! > 0 ? `+₹${printChit.roundOff}` : `-₹${Math.abs(printChit.roundOff!)}`}</span>
+                    <span>{printChit.roundOff > 0 ? `+₹${printChit.roundOff}` : `-₹${Math.abs(printChit.roundOff)}`}</span>
                   </div>
                 )}
                 <div className="flex justify-between font-bold text-sm border-t pt-1">
@@ -3972,12 +4168,10 @@ export default function PosPage() {
               </div>
             )}
 
-            <div className="text-center pt-3 text-[10px] border-t mt-3">
+            <div className="text-center pt-3 text-[10px] border-t mt-3 whitespace-pre-line leading-tight">
               {printChit.type === "KOT"
                 ? "KITCHEN PRODUCTION ORDER"
-                : printChit.mode === "TAKEAWAY"
-                ? "Thank you for ordering with us! Visit again."
-                : "Thank you for dining with us! Visit again."}
+                : (taxSettings.receiptFooter || "Thank you for dining with us! Visit again.")}
             </div>
           </div>
         </div>
