@@ -2039,6 +2039,7 @@ export default function PosPage() {
             {filteredTables.map((table) => {
               const session = tableSessionMap.get(table.name);
               const isOccupied = session && session.status !== "VACANT";
+              const hasNewRound = session?.hasNewRound;
               const hasBillRequest = session?.hasBillRequest;
               const hasUpiVerifyRequest = session?.hasUpiVerifyRequest;
               const isPaid = session?.isPaid;
