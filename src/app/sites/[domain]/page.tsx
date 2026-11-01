@@ -14,7 +14,11 @@ export default function RootMenuPage({ params }: { params: Promise<{ domain: str
 
   useEffect(() => {
     async function load() {
-      const slug = domain.replace('.localhost:3000', '').replace('.tabletapy.com', '');
+      const slug = domain
+        .replace('.localhost:3000', '')
+        .replace('.tabletapy.in', '')
+        .replace('.tabletapy.online', '')
+        .replace('.tabletapy.com', '');
       const { data, error } = await supabase.from('restaurants').select('name').eq('slug', slug).single();
       
       if (error || !data) {

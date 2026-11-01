@@ -188,8 +188,8 @@ export default function DashboardOverview() {
               <label className="block text-xs font-bold text-zinc-400 mb-1">Subdomain (URL)</label>
               <div className="flex">
                 <input required type="text" value={storeSlug} onChange={e => setStoreSlug(e.target.value)} className="flex-1 bg-zinc-950 border border-r-0 border-zinc-800 rounded-l-lg p-3 text-sm outline-none focus:border-[#E46254] text-white transition-colors text-right" placeholder={businessType === 'HOTEL' ? "grand-plaza" : "burger-palace"} />
-                <div className="bg-zinc-900 border border-zinc-800 rounded-r-lg p-3 text-sm text-zinc-500 flex items-center">
-                  .localhost:3000
+                <div className="bg-zinc-900 border border-zinc-800 rounded-r-lg p-3 text-sm text-zinc-500 flex items-center font-mono">
+                  .tabletapy.in
                 </div>
               </div>
               <p className="text-[10px] text-zinc-500 mt-1">This will be your customers' link.</p>
@@ -216,7 +216,7 @@ export default function DashboardOverview() {
             Managing <strong className="text-zinc-300">{restaurantData?.name}</strong> as {email}
           </p>
         </div>
-        <a href={`http://${restaurantData?.slug}.localhost:3000`} target="_blank" rel="noreferrer" className="px-5 py-2.5 bg-zinc-800 text-white text-sm font-semibold rounded-lg hover:bg-zinc-700 transition-colors flex items-center gap-2 border border-zinc-700">
+        <a href={`https://${restaurantData?.slug}.tabletapy.in`} target="_blank" rel="noreferrer" className="px-5 py-2.5 bg-zinc-800 text-white text-sm font-semibold rounded-lg hover:bg-zinc-700 transition-colors flex items-center gap-2 border border-zinc-700">
           View Live Site <ArrowRight size={16} />
         </a>
       </div>
@@ -241,7 +241,7 @@ export default function DashboardOverview() {
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-zinc-400 text-sm font-medium">Store URL</h3>
           </div>
-          <p className="text-lg font-semibold text-[#E46254] truncate">{restaurantData?.slug}.localhost</p>
+          <p className="text-lg font-semibold text-[#E46254] truncate">{restaurantData?.slug}.tabletapy.in</p>
         </div>
       </div>
 
@@ -255,10 +255,10 @@ export default function DashboardOverview() {
           <p className="text-zinc-400 text-sm leading-relaxed max-w-sm mb-6">
             Access your real-time Kitchen Display System (KDS) on a dedicated, full-screen subdomain designed for kitchen tablets.
           </p>
-          <a href={typeof window !== 'undefined' && window.location.hostname.includes('localhost') ? '/orders_app' : 'https://orders.tabletapy.com'} target="_blank" rel="noreferrer" className="px-6 py-3 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-500 transition-colors flex items-center gap-2">
+          <a href={typeof window !== 'undefined' && window.location.hostname.includes('localhost') ? '/orders_app' : 'https://orders.tabletapy.in'} target="_blank" rel="noreferrer" className="px-6 py-3 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-500 transition-colors flex items-center gap-2">
             Open Orders App <ExternalLink size={16} />
           </a>
-          <p className="text-xs text-zinc-600 mt-4 font-mono">orders.tabletapy.com</p>
+          <p className="text-xs text-zinc-600 mt-4 font-mono">orders.tabletapy.in</p>
         </section>
         
         {/* Upsell Card */}

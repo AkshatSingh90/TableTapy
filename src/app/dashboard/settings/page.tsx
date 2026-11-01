@@ -1188,8 +1188,8 @@ export default function SettingsPage() {
                   Digital Menu Slug URL
                 </label>
                 <div className="flex items-center">
-                  <span className="px-3.5 py-2.5 bg-zinc-100 border border-r-0 border-zinc-200 rounded-l-xl text-xs text-zinc-500 dark:text-zinc-400 select-none">
-                    tabletapy.com/r/
+                  <span className="px-3.5 py-2.5 bg-zinc-100 border border-r-0 border-zinc-200 rounded-l-xl text-xs text-zinc-500 dark:text-zinc-400 select-none font-mono">
+                    tabletapy.in/r/
                   </span>
                   <input
                     type="text"

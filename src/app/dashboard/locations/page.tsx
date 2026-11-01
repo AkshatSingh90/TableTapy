@@ -517,7 +517,10 @@ export default function TableManagerPage() {
     img.src = "data:image/svg+xml;base64," + btoa(svgData);
   };
 
-  const getPortalUrl = (code: string) => `http://${restaurantSlug}.localhost:3000/r/${code}?scan=true`;
+  const getPortalUrl = (code: string) => {
+    const slug = restaurantSlug || 'menu';
+    return `https://${slug}.tabletapy.in/r/${code}?scan=true`;
+  };
 
   const filteredLocations = locations.filter(loc => {
     const matchesSearch = loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -673,7 +676,7 @@ export default function TableManagerPage() {
                     className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[#E46254] hover:text-[#D35546] hover:underline transition-colors"
                   >
                     <LinkIcon size={14} /> 
-                    {getPortalUrl(loc.secure_code).replace('http://', '')}
+                    {getPortalUrl(loc.secure_code).replace(/^https?:\/\//, '')}
                   </a>
                 </div>
 

@@ -1046,7 +1046,12 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
 
 
 
-        const cleanDomain = (domain || '').replace('.localhost:3000', '').replace('.tabletapy.com', '').trim();
+        const cleanDomain = (domain || '')
+          .replace('.localhost:3000', '')
+          .replace('.tabletapy.in', '')
+          .replace('.tabletapy.online', '')
+          .replace('.tabletapy.com', '')
+          .trim();
 
         
 

@@ -8,8 +8,10 @@ export async function createClient() {
   const cookieStore = await cookies()
   const headerList = await headers()
   const host = headerList.get('host') || ''
-  const isCustomDomain = host.includes('tabletapy.com') || host.includes('tabletapy.online')
-  const domain = isCustomDomain ? (host.includes('tabletapy.online') ? '.tabletapy.online' : '.tabletapy.com') : undefined
+  const isCustomDomain = host.includes('tabletapy.in') || host.includes('tabletapy.online') || host.includes('tabletapy.com')
+  const domain = isCustomDomain 
+    ? (host.includes('tabletapy.in') ? '.tabletapy.in' : (host.includes('tabletapy.online') ? '.tabletapy.online' : '.tabletapy.com'))
+    : undefined
 
   return createServerClient(
     supabaseUrl,
