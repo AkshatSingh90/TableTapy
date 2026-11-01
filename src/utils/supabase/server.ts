@@ -1,16 +1,19 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { cookies, headers } from 'next/headers'
 
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://letangcabkdqhhjqbdyj.supabase.co'
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxldGFuZ2NhYmtkcWhoanFiZHlqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwNzk5MDQsImV4cCI6MjEwNTY1NTkwNH0.EwebCq_p8lPanvHbskSKOwyzi1b8EDMisft_fFFINcE'
+
 export async function createClient() {
   const cookieStore = await cookies()
   const headerList = await headers()
   const host = headerList.get('host') || ''
-  const isCustomDomain = host.includes('tabletapy.com')
-  const domain = isCustomDomain ? '.tabletapy.com' : undefined
+  const isCustomDomain = host.includes('tabletapy.com') || host.includes('tabletapy.online')
+  const domain = isCustomDomain ? (host.includes('tabletapy.online') ? '.tabletapy.online' : '.tabletapy.com') : undefined
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    supabaseUrl,
+    supabaseAnonKey,
     {
       cookieOptions: {
         ...(domain ? { domain } : {}),

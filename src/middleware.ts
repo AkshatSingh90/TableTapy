@@ -22,8 +22,9 @@ export async function middleware(request: NextRequest) {
       subdomain = domainParts[0];
     }
   } else {
-    // For production (e.g., designer.tabletapy.com)
-    const domainParts = hostname.replace('.tabletapy.com', '').split('.');
+    // For production (e.g., designer.tabletapy.online or designer.tabletapy.com)
+    const cleanHost = hostname.replace('.tabletapy.online', '').replace('.tabletapy.com', '');
+    const domainParts = cleanHost.split('.');
     if (domainParts.length === 1 && domainParts[0] !== 'tabletapy' && domainParts[0] !== 'www') {
       subdomain = domainParts[0];
     }
