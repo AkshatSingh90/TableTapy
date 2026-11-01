@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import { ThemeProvider, ThemeScript } from "@/components/ThemeProvider";
+import { ThemeProvider, ThemeScript } from "../components/ThemeProvider";
 
 // Injecting a crisp, enterprise-grade sans-serif font
 const inter = Inter({ 
