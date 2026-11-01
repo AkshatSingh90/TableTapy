@@ -2,8 +2,11 @@
 
 import { useState, useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
-import { Loader2, Plus, Trash2, Edit2, Download, Users, AlertTriangle, Link as LinkIcon, Search, CheckCircle2, QrCode } from "lucide-react";
+import { LocalSqliteStore, getCanonicalRestaurantId } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
+import { Loader2, Plus, Trash2, Edit2, Download, Users, AlertTriangle, Link as LinkIcon, Search, CheckCircle2, QrCode, Layers } from "lucide-react";
 import QRCode from "react-qr-code";
+import { normalizeTableIdentifier } from "@/utils/tableSessionPin";
 
 interface Location {
   id: string;
@@ -13,6 +16,7 @@ interface Location {
   secure_code: string;
   isActive?: boolean;
   capacity?: number;
+  zone?: string;
 }
 
 export default function TableManagerPage() {
@@ -24,6 +28,12 @@ export default function TableManagerPage() {
   const [locations, setLocations] = useState<Location[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   
+  // Zone State
+  const [zones, setZones] = useState<string[]>([]);
+  const [tableZones, setTableZones] = useState<Record<string, string>>({});
+  const [selectedZoneFilter, setSelectedZoneFilter] = useState<string>('ALL');
+  const [isCreatingNewZone, setIsCreatingNewZone] = useState<boolean>(false);
+
   // Modals & Feedback State
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -39,36 +49,145 @@ export default function TableManagerPage() {
 
   const [toast, setToast] = useState<{ visible: boolean; message: string }>({ visible: false, message: '' });
 
-  // Form State
-  const [formData, setFormData] = useState({ id: '', name: '', capacity: 4, isActive: true });
+  // Form State - Zone is mandatory
+  const [formData, setFormData] = useState({ id: '', name: '', capacity: 4, isActive: true, zone: '' });
 
   useEffect(() => {
     loadLocations();
+    const handleSyncCompleted = () => {
+      loadLocations();
+    };
+    window.addEventListener("tabletapy_sync_completed", handleSyncCompleted);
+    return () => window.removeEventListener("tabletapy_sync_completed", handleSyncCompleted);
   }, []);
+
+  // Sync zones with localStorage and cloud configuration
+  const syncZones = async (restId: string, updatedTableZones: Record<string, string>, updatedZonesList: string[]) => {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(`tabletapy_table_zones_${restId}`, JSON.stringify(updatedTableZones));
+        localStorage.setItem(`tabletapy_restaurant_zones_${restId}`, JSON.stringify(updatedZonesList));
+        window.dispatchEvent(new CustomEvent('tabletapy_locations_updated'));
+      } catch {}
+    }
+    try {
+      const { data: r } = await supabase.from('restaurants').select('bg_image').eq('id', restId).maybeSingle();
+      let cfg: any = {};
+      if (r?.bg_image) {
+        try {
+          cfg = typeof r.bg_image === 'string' ? JSON.parse(r.bg_image) : r.bg_image;
+        } catch {}
+      }
+      cfg.tableZones = updatedTableZones;
+      cfg.zones = updatedZonesList;
+      await supabase.from('restaurants').update({ bg_image: JSON.stringify(cfg) }).eq('id', restId);
+    } catch (e) {
+      console.error('Failed to sync zones to Supabase:', e);
+    }
+  };
 
   async function loadLocations() {
     try {
       setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user || !user.user_metadata?.restaurant_id) return;
-      
-      const restId = user.user_metadata.restaurant_id;
+      let restId = await getCanonicalRestaurantId(supabase);
+      if (!restId) return;
       setRestaurantId(restId);
 
-      const { data: restData } = await supabase.from('restaurants').select('slug, business_type').eq('id', restId).single();
+      // Instant 0ms hydration from local SQLite
+      const localTables = await LocalSqliteStore.getTables(restId);
+      if (localTables && localTables.length > 0) {
+        setLocations(localTables as any);
+        setLoading(false);
+      }
+
+      // Load zones from localStorage & cloud config
+      let loadedTableZones: Record<string, string> = {};
+      let loadedZonesList: string[] = [];
+
+      if (typeof window !== 'undefined') {
+        try {
+          const rawTableZones = localStorage.getItem(`tabletapy_table_zones_${restId}`);
+          if (rawTableZones) loadedTableZones = JSON.parse(rawTableZones);
+          const rawZonesList = localStorage.getItem(`tabletapy_restaurant_zones_${restId}`);
+          if (rawZonesList) loadedZonesList = JSON.parse(rawZonesList);
+        } catch {}
+      }
+
+      const { data: restData } = await supabase.from('restaurants').select('slug, business_type, bg_image').eq('id', restId).single();
       if (restData) {
         setRestaurantSlug(restData.slug);
         setBusinessType(restData.business_type || 'RESTAURANT');
+        if (restData.bg_image) {
+          try {
+            const parsed = typeof restData.bg_image === 'string' ? JSON.parse(restData.bg_image) : restData.bg_image;
+            if (parsed?.tableZones && Object.keys(loadedTableZones).length === 0) {
+              loadedTableZones = parsed.tableZones;
+            }
+            if (Array.isArray(parsed?.zones) && loadedZonesList.length === 0) {
+              loadedZonesList = parsed.zones;
+            }
+          } catch {}
+        }
       }
 
       const { data: locData } = await supabase.from('locations').select('*').eq('restaurant_id', restId).order('name', { ascending: true });
       
       if (locData) {
-        setLocations(locData.map(loc => ({ 
+        const extractedZones = new Set<string>(loadedZonesList);
+        locData.forEach(loc => {
+          const z = loadedTableZones[loc.id] || (loc as any).zone;
+          if (z && z.trim()) {
+            extractedZones.add(z.trim());
+            loadedTableZones[loc.id] = z.trim();
+          }
+        });
+
+        const finalZones = Array.from(extractedZones);
+        if (finalZones.length === 0) {
+          finalZones.push('Main Floor');
+        }
+
+        setZones(finalZones);
+        setTableZones(loadedTableZones);
+
+        const localTables = await LocalSqliteStore.getTables(restId);
+        const mappedCloud = locData.map(loc => ({ 
           ...loc, 
           isActive: true,
-          capacity: 4
-        })));
+          capacity: 4,
+          zone: loadedTableZones[loc.id] || (loc as any).zone || finalZones[0] || 'Main Floor'
+        }));
+
+        // Merge local tables not yet in cloud so they never vanish
+        const combined = [...mappedCloud];
+        for (const lt of localTables) {
+          if (!combined.some(c => c.id === lt.id || c.name.trim().toLowerCase() === lt.name.trim().toLowerCase())) {
+            combined.push({
+              id: lt.id,
+              restaurant_id: restId,
+              name: lt.name,
+              type: lt.type || 'TABLE',
+              isActive: lt.is_active !== false,
+              capacity: lt.capacity || 4,
+              zone: lt.zone || finalZones[0] || 'Main Floor'
+            } as any);
+          }
+        }
+
+        setLocations(combined);
+        LocalSqliteStore.saveTables(
+          restId,
+          combined.map((l: any) => ({
+            id: l.id,
+            restaurant_id: restId,
+            name: l.name,
+            type: l.type,
+            capacity: l.capacity,
+            zone: l.zone || 'Main Floor',
+            is_active: l.isActive !== false
+          })),
+          false
+        ).catch(() => {});
       }
     } catch (err) {
       console.error(err);
@@ -83,70 +202,220 @@ export default function TableManagerPage() {
   };
 
   const openAddModal = () => {
-    setFormData({ id: '', name: '', capacity: 4, isActive: true });
+    const defaultZone = zones.length > 0 ? zones[0] : '';
+    setFormData({ id: '', name: '', capacity: 4, isActive: true, zone: defaultZone });
+    setIsCreatingNewZone(zones.length === 0);
     setShowAddModal(true);
   };
 
   const openEditModal = (loc: Location) => {
+    const currentZone = loc.zone || tableZones[loc.id] || (zones.length > 0 ? zones[0] : '');
     setFormData({ 
       id: loc.id, 
       name: loc.name, 
       capacity: loc.capacity || 4,
-      isActive: loc.isActive ?? true 
+      isActive: loc.isActive ?? true,
+      zone: currentZone
     });
+    setIsCreatingNewZone(!zones.includes(currentZone) && !!currentZone);
     setShowEditModal(true);
   };
 
   const handleSaveLocation = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!restaurantId || !formData.name.trim()) return;
+
+    const trimmedName = formData.name.trim().toUpperCase();
+    const trimmedZone = (formData.zone || '').trim();
+
+    // 1. Mandatory Zone Validation
+    if (!trimmedZone) {
+      triggerToast('Zone is mandatory for each table');
+      return;
+    }
     
     setIsSaving(true);
+
+    // Update zones list if new zone
+    let nextZones = [...zones];
+    if (!nextZones.includes(trimmedZone)) {
+      nextZones.push(trimmedZone);
+      setZones(nextZones);
+    }
     
     if (showAddModal) {
       // Duplicate name check (case-insensitive)
       const isDuplicate = locations.some(
-        l => l.name.trim().toLowerCase() === formData.name.trim().toLowerCase()
+        l => l.name.trim().toLowerCase() === trimmedName.toLowerCase()
       );
       if (isDuplicate) {
-        triggerToast(`A table named "${formData.name.trim()}" already exists`);
+        triggerToast(`A table named "${trimmedName}" already exists`);
         setIsSaving(false);
         return;
       }
 
       const code = Math.random().toString(16).substring(2, 10);
-      const newLoc = {
+      const tableId = 'loc_' + Date.now();
+      const newLocObj = {
+        id: tableId,
         restaurant_id: restaurantId,
-        name: formData.name.trim(),
+        name: trimmedName,
         type: businessType === 'HOTEL' ? 'ROOM' : 'TABLE',
-        secure_code: code
+        secure_code: code,
+        zone: trimmedZone,
+        capacity: formData.capacity,
+        isActive: formData.isActive
       };
 
-      const { data, error } = await supabase.from('locations').insert(newLoc).select();
-      if (!error && data) {
-        setLocations([...locations, { 
-          ...data[0], 
-          isActive: formData.isActive, 
-          capacity: formData.capacity 
-        }]);
-        triggerToast(`${formData.name.trim()} added successfully`);
-      } else if (error) {
-        console.error('Insert error:', error);
-        triggerToast('Failed to add table. Please try again.');
+      // 1. Instant 0ms SQLite Save
+      await LocalSqliteStore.saveSingleTable({
+        id: tableId,
+        restaurant_id: restaurantId,
+        name: trimmedName,
+        type: newLocObj.type,
+        capacity: formData.capacity,
+        zone: trimmedZone,
+        is_active: formData.isActive
+      });
+
+      // 2. Instant UI update & modal close (0ms)
+      const nextTableZones = { ...tableZones, [tableId]: trimmedZone };
+      setTableZones(nextTableZones);
+      setLocations([...locations, newLocObj as any]);
+      setShowAddModal(false);
+      setIsSaving(false);
+      triggerToast(`${trimmedName} added in zone "${trimmedZone}"`);
+
+      // 3. Background cloud sync
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        LocalSqliteStore.queueMutation({
+          id: 'mut_' + Date.now(),
+          restaurant_id: restaurantId,
+          entity: 'TABLE',
+          action: 'INSERT',
+          payload: newLocObj,
+          created_at: new Date().toISOString()
+        });
+        OfflineSyncEngine.triggerSync();
+      } else {
+        (async () => {
+          try {
+            const { data, error } = await supabase.from('locations').insert({
+              restaurant_id: restaurantId,
+              name: trimmedName,
+              type: newLocObj.type,
+              secure_code: code
+            }).select();
+            if (error) {
+              LocalSqliteStore.queueMutation({
+                id: 'mut_' + Date.now(),
+                restaurant_id: restaurantId,
+                entity: 'TABLE',
+                action: 'INSERT',
+                payload: newLocObj,
+                created_at: new Date().toISOString()
+              });
+            } else if (data && data[0]) {
+              const cloudId = data[0].id;
+              const updatedZones = { ...tableZones, [cloudId]: trimmedZone };
+              setTableZones(updatedZones);
+              syncZones(restaurantId, updatedZones, nextZones);
+            }
+          } catch (e: any) {
+            console.warn('[Locations] Cloud insert deferred:', e);
+            LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now(),
+              restaurant_id: restaurantId,
+              entity: 'TABLE',
+              action: 'INSERT',
+              payload: newLocObj,
+              created_at: new Date().toISOString()
+            }).catch(() => {});
+          } finally {
+            OfflineSyncEngine.triggerSync();
+          }
+        })();
       }
     } else if (showEditModal && formData.id) {
-      const { error } = await supabase.from('locations').update({ name: formData.name.trim() }).eq('id', formData.id);
-      if (!error) {
+      // Duplicate name check excluding this table
+      const isDuplicate = locations.some(
+        l => l.id !== formData.id && l.name.trim().toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (isDuplicate) {
+        triggerToast(`A table named "${trimmedName}" already exists`);
+        setIsSaving(false);
+        return;
+      }
+
+      const oldLoc = locations.find(l => l.id === formData.id);
+      const oldName = oldLoc?.name.trim() || '';
+
+      // Direct update
+      let updateOk = false;
+      const { data: uData, error: uErr } = await supabase
+        .from('locations')
+        .update({ name: trimmedName })
+        .eq('id', formData.id)
+        .select();
+
+      if (!uErr && uData && uData.length > 0) {
+        updateOk = true;
+      } else if (oldLoc) {
+        // Fallback for missing RLS UPDATE policy: delete & re-insert with identical ID and secure_code
+        const { error: dErr } = await supabase.from('locations').delete().eq('id', formData.id);
+        if (!dErr) {
+          const { data: iData, error: iErr } = await supabase.from('locations').insert({
+            id: formData.id,
+            restaurant_id: restaurantId,
+            type: oldLoc.type || (businessType === 'HOTEL' ? 'ROOM' : 'TABLE'),
+            name: trimmedName,
+            secure_code: oldLoc.secure_code
+          }).select();
+          if (!iErr && iData && iData.length > 0) {
+            updateOk = true;
+          }
+        }
+      }
+
+      if (updateOk) {
+        // Reflect rename across active orders in database so POS & Orders update
+        if (oldName && oldName.toLowerCase() !== trimmedName.toLowerCase()) {
+          try {
+            await supabase
+              .from('orders')
+              .update({ table_no: trimmedName })
+              .eq('restaurant_id', restaurantId)
+              .ilike('table_no', oldName);
+
+            const oldNorm = normalizeTableIdentifier(oldName);
+            if (oldNorm && oldNorm !== oldName) {
+              await supabase
+                .from('orders')
+                .update({ table_no: trimmedName })
+                .eq('restaurant_id', restaurantId)
+                .eq('table_no', oldNorm);
+            }
+          } catch (ordErr) {
+            console.error('Order migration error:', ordErr);
+          }
+        }
+
+        // Sync table zone
+        const nextTableZones = { ...tableZones, [formData.id]: trimmedZone };
+        setTableZones(nextTableZones);
+        await syncZones(restaurantId, nextTableZones, nextZones);
+
         setLocations(locs => locs.map(l => l.id === formData.id ? {
           ...l,
-          name: formData.name.trim(),
+          name: trimmedName,
           capacity: formData.capacity,
-          isActive: formData.isActive
+          isActive: formData.isActive,
+          zone: trimmedZone
         } : l));
-        triggerToast(`${formData.name.trim()} updated successfully`);
+
+        triggerToast(`${trimmedName} updated successfully`);
       } else {
-        console.error('Update error:', error);
-        triggerToast('Failed to update table. Please try again.');
+        triggerToast('Failed to update table in database.');
       }
     }
     
@@ -157,15 +426,68 @@ export default function TableManagerPage() {
 
   const handleDelete = async () => {
     if (!locToDelete || deleteConfirmText !== 'DELETE') return;
-    setIsDeleting(true);
-    const { error } = await supabase.from('locations').delete().eq('id', locToDelete.id);
-    if (!error) {
-      setLocations(locations.filter(loc => loc.id !== locToDelete.id));
-      triggerToast(`${locToDelete.name} deleted`);
-      setLocToDelete(null);
-      setDeleteConfirmText('');
+    const toDel = locToDelete;
+
+    // 1. Instant 0ms SQLite Deletion
+    if (restaurantId) {
+      LocalSqliteStore.deleteTable(restaurantId, toDel.id);
     }
+
+    // 2. Instant UI update
+    const nextTableZones = { ...tableZones };
+    delete nextTableZones[toDel.id];
+    setTableZones(nextTableZones);
+    setLocations(locations.filter(loc => loc.id !== toDel.id));
+    triggerToast(`${toDel.name} deleted`);
+    setLocToDelete(null);
+    setDeleteConfirmText('');
     setIsDeleting(false);
+
+    // 3. Background cloud sync
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (restaurantId) {
+        LocalSqliteStore.queueMutation({
+          id: 'mut_' + Date.now(),
+          restaurant_id: restaurantId,
+          entity: 'TABLE',
+          action: 'DELETE',
+          payload: { id: toDel.id, name: toDel.name },
+          created_at: new Date().toISOString()
+        });
+      }
+      OfflineSyncEngine.triggerSync();
+    } else {
+      (async () => {
+        try {
+          const { error } = await supabase.from('locations').delete().eq('id', toDel.id);
+          if (error && restaurantId) {
+            LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now(),
+              restaurant_id: restaurantId,
+              entity: 'TABLE',
+              action: 'DELETE',
+              payload: { id: toDel.id, name: toDel.name },
+              created_at: new Date().toISOString()
+            });
+          }
+          if (restaurantId) syncZones(restaurantId, nextTableZones, zones);
+        } catch (e: any) {
+          console.warn('[Locations] Cloud delete deferred:', e);
+          if (restaurantId) {
+            LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now(),
+              restaurant_id: restaurantId,
+              entity: 'TABLE',
+              action: 'DELETE',
+              payload: { id: toDel.id, name: toDel.name },
+              created_at: new Date().toISOString()
+            }).catch(() => {});
+          }
+        } finally {
+          OfflineSyncEngine.triggerSync();
+        }
+      })();
+    }
   };
 
   const toggleActive = (id: string, currentStatus: boolean | undefined) => {
@@ -197,10 +519,16 @@ export default function TableManagerPage() {
 
   const getPortalUrl = (code: string) => `http://${restaurantSlug}.localhost:3000/r/${code}?scan=true`;
 
-  const filteredLocations = locations.filter(loc => loc.name.toLowerCase().includes(searchQuery.toLowerCase()));
+  const filteredLocations = locations.filter(loc => {
+    const matchesSearch = loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (loc.zone && loc.zone.toLowerCase().includes(searchQuery.toLowerCase()));
+    if (!matchesSearch) return false;
+    if (selectedZoneFilter !== 'ALL' && loc.zone !== selectedZoneFilter) return false;
+    return true;
+  });
 
   return (
-    <div className="flex h-screen flex-col bg-white overflow-hidden text-gray-900 font-sans relative">
+    <div className="flex h-screen flex-col bg-white dark:bg-transparent overflow-hidden text-gray-900 dark:text-zinc-100 font-sans relative">
       
       {/* BRAND TOAST NOTIFICATION */}
       <div className={`absolute bottom-8 right-8 z-50 transition-all duration-300 ease-out ${toast.visible ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0 pointer-events-none'}`}>
@@ -213,24 +541,60 @@ export default function TableManagerPage() {
       <div className="flex-1 overflow-y-auto slim-scrollbar px-6 md:px-12 w-full relative">
         
         {/* COMPACT FLOATING SEARCH & ADD BAR */}
-        <div className="sticky top-0 z-30 pt-6 pb-4 bg-white/90 backdrop-blur-md flex flex-col md:flex-row items-center justify-between gap-4 border-b border-gray-100">
-          
-          <div className="relative w-full max-w-sm">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-            <input 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={`Search ${locations.length} tables...`}
-              className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-10 pr-4 py-2.5 text-[13px] font-medium text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all"
-            />
+        <div className="sticky top-0 z-30 pt-6 pb-4 bg-white/90 dark:bg-zinc-950/75 backdrop-blur-2xl flex flex-col gap-3 border-b border-gray-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08)]">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="relative w-full max-w-sm">
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+              <input 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={`Search ${locations.length} tables...`}
+                className="w-full bg-gray-50 dark:bg-[#1C1D26] border border-gray-200 dark:border-white/[0.08] rounded-lg pl-10 pr-4 py-2.5 text-[13px] font-medium text-gray-900 dark:text-white placeholder:text-gray-400 dark:placeholder-[#5E5D72] outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all"
+              />
+            </div>
+
+            <button 
+              onClick={openAddModal}
+              className="w-full md:w-auto bg-[#E46254] hover:bg-[#D35546] text-white px-5 py-2.5 rounded-lg shadow-sm active:scale-95 transition-all font-semibold text-[13px] flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Plus size={16} strokeWidth={3}/> Add {businessType === 'HOTEL' ? 'Room' : 'Table'}
+            </button>
           </div>
 
-          <button 
-            onClick={openAddModal}
-            className="w-full md:w-auto bg-[#E46254] hover:bg-[#D35546] text-white px-5 py-2.5 rounded-lg shadow-sm active:scale-95 transition-all font-semibold text-[13px] flex items-center justify-center gap-2"
-          >
-            <Plus size={16} strokeWidth={3}/> Add {businessType === 'HOTEL' ? 'Room' : 'Table'}
-          </button>
+          {/* Zone Filter Chips */}
+          {zones.length > 0 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mr-1 shrink-0 flex items-center gap-1">
+                <Layers size={12} /> Zones:
+              </span>
+              <button
+                onClick={() => setSelectedZoneFilter('ALL')}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                  selectedZoneFilter === 'ALL'
+                    ? 'bg-zinc-900 dark:bg-[#E46254] text-white shadow-xs'
+                    : 'bg-gray-100 dark:bg-[#1C1D26] text-gray-600 dark:text-[#8B8A9E] hover:text-gray-900 dark:hover:text-[#F0EEF4] border border-transparent dark:border-white/[0.06] hover:bg-gray-200 dark:hover:bg-[#22232E]'
+                }`}
+              >
+                All Zones ({locations.length})
+              </button>
+              {zones.map(z => {
+                const count = locations.filter(l => (l.zone || 'Main Floor') === z).length;
+                return (
+                  <button
+                    key={z}
+                    onClick={() => setSelectedZoneFilter(z)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      selectedZoneFilter === z
+                        ? 'bg-zinc-900 dark:bg-[#E46254] text-white shadow-xs'
+                        : 'bg-gray-100 dark:bg-[#1C1D26] text-gray-600 dark:text-[#8B8A9E] hover:text-gray-900 dark:hover:text-[#F0EEF4] border border-transparent dark:border-white/[0.06] hover:bg-gray-200 dark:hover:bg-[#22232E]'
+                    }`}
+                  >
+                    {z} ({count})
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* MAIN CONTENT - COMPACT WHITE CARDS */}
@@ -264,7 +628,7 @@ export default function TableManagerPage() {
             filteredLocations.map((loc) => (
               <div 
                 key={loc.id} 
-                className={`bg-white rounded-xl p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-6 border shadow-sm hover:shadow-md transition-all duration-300 ${loc.isActive ? 'border-gray-200' : 'border-gray-100 opacity-70'} group`}
+                className={`rounded-2xl p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-6 border transition-all duration-300 ${loc.isActive ? 'bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl border-gray-200 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_8px_24px_rgba(0,0,0,0.4)] hover:shadow-md dark:hover:border-white/[0.18]' : 'border-gray-100 dark:border-white/[0.05] bg-white/60 dark:bg-white/[0.01] opacity-70'} group`}
               >
                 
                 {/* 1. Left: Explicit Toggle & Name */}
@@ -285,7 +649,14 @@ export default function TableManagerPage() {
                   </div>
 
                   <div>
-                    <h3 className="text-lg font-bold text-gray-900 tracking-tight leading-none mb-1.5">{loc.name}</h3>
+                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                      <h3 className="text-lg font-bold text-gray-900 dark:text-white tracking-tight leading-none">{loc.name}</h3>
+                      {loc.zone && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#E46254]/10 text-[#E46254] border border-[#E46254]/20">
+                          {loc.zone}
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5 text-[12px] font-semibold text-gray-500">
                       <Users size={14} className="text-gray-400"/> {loc.capacity} Seats
                     </div>
@@ -384,14 +755,14 @@ export default function TableManagerPage() {
       {/* REUSABLE ADD/EDIT DIALOG */}
       {(showAddModal || showEditModal) && (
         <div className="fixed inset-0 z-50 bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full overflow-hidden">
-            <div className="px-6 py-5 border-b border-gray-100">
-              <h2 className="text-lg font-bold text-gray-900">
+          <div className="bg-white dark:bg-[#1C1D26] border border-transparent dark:border-white/[0.08] rounded-2xl shadow-xl max-w-sm w-full overflow-hidden text-gray-900 dark:text-white">
+            <div className="px-6 py-5 border-b border-gray-100 dark:border-white/[0.07]">
+              <h2 className="text-lg font-bold text-gray-900 dark:text-white">
                 {showAddModal ? `Add New ${businessType === 'HOTEL' ? 'Room' : 'Table'}` : `Edit Settings`}
               </h2>
             </div>
             
-            <form onSubmit={handleSaveLocation} className="p-6 space-y-5">
+            <form onSubmit={handleSaveLocation} className="p-6 space-y-4">
               <div>
                 <label className="block text-[12px] font-bold text-gray-700 mb-1.5">Table Name / Identifier</label>
                 <input 
@@ -400,8 +771,70 @@ export default function TableManagerPage() {
                   value={formData.name} 
                   onChange={e => setFormData({...formData, name: e.target.value.toUpperCase()})} 
                   placeholder="e.g. TABLE 12"
-                  className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-[13px] font-medium outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all" 
+                  className="w-full bg-white dark:bg-[#22232E] border border-gray-300 dark:border-white/[0.08] rounded-lg px-3 py-2.5 text-[13px] font-medium text-gray-900 dark:text-white outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all font-mono" 
                 />
+              </div>
+
+              {/* Dining Zone - Mandatory with Dropdown & Create Option */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-[12px] font-bold text-gray-700">
+                    Dining Zone <span className="text-[#E46254]">*</span>
+                  </label>
+                  {zones.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isCreatingNewZone) {
+                          setIsCreatingNewZone(false);
+                          setFormData({ ...formData, zone: zones[0] });
+                        } else {
+                          setIsCreatingNewZone(true);
+                          setFormData({ ...formData, zone: '' });
+                        }
+                      }}
+                      className="text-[11px] font-bold text-[#E46254] hover:underline cursor-pointer"
+                    >
+                      {isCreatingNewZone ? "← Choose existing zone" : "+ Add New Zone"}
+                    </button>
+                  )}
+                </div>
+
+                {!isCreatingNewZone && zones.length > 0 ? (
+                  <select 
+                    required
+                    value={formData.zone}
+                    onChange={(e) => {
+                      if (e.target.value === '__CREATE_NEW__') {
+                        setIsCreatingNewZone(true);
+                        setFormData({ ...formData, zone: '' });
+                      } else {
+                        setFormData({ ...formData, zone: e.target.value });
+                      }
+                    }}
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-[13px] font-medium outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all cursor-pointer"
+                  >
+                    <option value="" disabled>Select a zone</option>
+                    {zones.map((z) => (
+                      <option key={z} value={z}>{z}</option>
+                    ))}
+                    <option value="__CREATE_NEW__">+ Create another zone...</option>
+                  </select>
+                ) : (
+                  <div>
+                    <input 
+                      required
+                      type="text" 
+                      value={formData.zone} 
+                      onChange={e => setFormData({...formData, zone: e.target.value})} 
+                      placeholder="e.g. Ground Floor, Balcony, Rooftop"
+                      className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-[13px] font-medium outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all" 
+                    />
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Once added, this zone becomes available in the dropdown for other tables.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -410,7 +843,7 @@ export default function TableManagerPage() {
                   required 
                   type="number" min="1" max="20"
                   value={formData.capacity} 
-                  onChange={e => setFormData({...formData, capacity: parseInt(e.target.value)})} 
+                  onChange={e => setFormData({...formData, capacity: parseInt(e.target.value) || 1})} 
                   className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-[13px] font-medium outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all" 
                 />
               </div>
@@ -419,14 +852,14 @@ export default function TableManagerPage() {
                 <button 
                   type="submit" 
                   disabled={isSaving} 
-                  className="w-full bg-[#E46254] hover:bg-[#D35546] text-white px-4 py-2.5 rounded-lg text-[13px] font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-2"
+                  className="w-full bg-[#E46254] hover:bg-[#D35546] text-white px-4 py-2.5 rounded-lg text-[13px] font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                 >
                   {isSaving ? <Loader2 size={16} className="animate-spin" /> : "Save Details"}
                 </button>
                 <button 
                   type="button" 
                   onClick={() => { setShowAddModal(false); setShowEditModal(false); }}
-                  className="w-full px-4 py-2.5 text-[13px] font-semibold text-gray-600 hover:bg-gray-50 rounded-lg transition-colors border border-gray-200"
+                  className="w-full px-4 py-2.5 text-[13px] font-semibold text-gray-600 hover:bg-gray-50 rounded-lg transition-colors border border-gray-200 cursor-pointer"
                 >
                   Cancel
                 </button>

@@ -27,14 +27,28 @@ export default function DashboardOverview() {
 
   useEffect(() => {
     async function init() {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
+      // Check session locally first without network call
+      let activeUser: any = null;
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        activeUser = sessionData?.session?.user;
+      } catch {}
+
+      if (!activeUser && typeof navigator !== "undefined" && navigator.onLine) {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          activeUser = user;
+        } catch {}
+      }
+
+      const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
+      if (!activeUser && !isOffline) {
         router.push('/login');
         return;
       }
-      setEmail(user.email ?? "");
+      setEmail(activeUser?.email ?? "");
 
-      const restId = user.user_metadata?.restaurant_id;
+      const restId = activeUser?.user_metadata?.restaurant_id || (typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") : null);
       if (restId) {
         // Fetch their specific restaurant
         const { data: rData } = await supabase.from('restaurants').select('*').eq('id', restId).single();

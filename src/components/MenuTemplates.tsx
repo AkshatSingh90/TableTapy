@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { 
+  ShoppingBag,
+  MessageSquarePlus,
+  SlidersHorizontal,
   X, 
   Check, 
   LayoutList, 
@@ -22,7 +25,8 @@ import {
   Bell,
   CheckCircle2,
   ExternalLink,
-  Loader2
+  Loader2,
+  Users
 } from "lucide-react";
 
 import { 
@@ -32,6 +36,8 @@ import {
   PortionOption, 
   AddonOption 
 } from "@/utils/menuItemVariants";
+import { TaxSettings, DEFAULT_TAX_SETTINGS, calculateBillTaxes } from "@/utils/tax";
+import { isDarkColor, getAdaptiveThemeTokens } from "@/utils/colorExtractor";
 
 export function DishBadgePill({ 
   badge, 
@@ -124,15 +130,23 @@ export const findPalette = (palettes: any, colorKey: string, fallbackKey: string
   return palettes[fallbackKey];
 };
 
-export function VegSymbol({ isVeg }: { isVeg?: boolean }) {
+export function VegSymbol({ isVeg, className = "" }: { isVeg?: boolean; className?: string }) {
   if (isVeg === undefined) return null;
   return isVeg ? (
-    <span title="Vegetarian" className="inline-flex items-center justify-center w-3.5 h-3.5 border-2 border-emerald-600 p-[1px] bg-white shrink-0 rounded-sm">
-      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+    <span 
+      title="Vegetarian" 
+      aria-label="Vegetarian"
+      className={`inline-flex items-center justify-center w-[15px] h-[15px] border-[1.5px] border-emerald-600 dark:border-emerald-500 bg-emerald-50/80 dark:bg-emerald-950/40 p-[1.5px] shrink-0 rounded-[3.5px] shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${className}`}
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-emerald-400 shadow-2xs" />
     </span>
   ) : (
-    <span title="Non-Vegetarian" className="inline-flex items-center justify-center w-3.5 h-3.5 border-2 border-amber-800 p-[1px] bg-white shrink-0 rounded-sm">
-      <span className="w-0 h-0 border-x-[3px] border-x-transparent border-b-[5px] border-b-amber-800" />
+    <span 
+      title="Non-Vegetarian" 
+      aria-label="Non-Vegetarian"
+      className={`inline-flex items-center justify-center w-[15px] h-[15px] border-[1.5px] border-rose-600 dark:border-rose-500 bg-rose-50/80 dark:bg-rose-950/40 p-[1.5px] shrink-0 rounded-[3.5px] shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${className}`}
+    >
+      <span className="w-0 h-0 border-x-[3px] border-x-transparent border-b-[5.5px] border-b-rose-600 dark:border-b-rose-400" />
     </span>
   );
 }
@@ -227,11 +241,17 @@ export function MenuTemplate({
   onUpdateQuantity,
   promotionsConfig,
   happyHourInfo,
-  customerCoins
+  customerCoins,
+  onCallWaiter,
+  isWaiterCalled,
+  activeGuestsCount,
+  showDishImages = true,
+  onOpenCart
 }: any) {
   const [activeCategory, setActiveCategory] = useState('ALL');
   const [searchTerm, setSearchTerm] = useState('');
   const [dietFilter, setDietFilter] = useState('ALL');
+  const [showFilterModal, setShowFilterModal] = useState(false);
 
   const hasBadgedItems = useMemo(() => items.some((i: any) => i.badge), [items]);
   const displayCategories = useMemo(() => {
@@ -314,84 +334,70 @@ export function MenuTemplate({
   const radSmClass = cardStyle === 'brutalist' ? 'rounded-none' : radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-full' : 'rounded-lg';
   const radBtnClass = cardStyle === 'brutalist' ? 'rounded-none' : radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-full' : 'rounded-xl';
 
+  const isDarkBg = isDarkColor(bgColor);
+  const adaptiveTokens = getAdaptiveThemeTokens(bgColor);
+  const textColor = isDarkBg ? 'text-zinc-50' : 'text-zinc-900';
+  const subTextColor = isDarkBg ? 'text-zinc-400' : 'text-zinc-500';
+  const cleanTableDisplay = (tableNo || '').toString().toLowerCase().startsWith('table')
+    ? tableNo
+    : `Table ${tableNo || '1'}`;
+
+  // Normalized Card Style & Photo Display
+  const rawCardStyle = cardStyle || 'solid';
+  const effectiveCardStyle = rawCardStyle.split(':')[0];
+  const shouldShowImages = showDishImages !== undefined 
+    ? showDishImages 
+    : !rawCardStyle.includes('no-image');
+
   // Card Theme Logic
   const getCardClasses = () => {
-    let base = cardStyle === 'glass' ? 'bg-white/50 backdrop-blur-md border border-white/60 shadow-lg ' :
-               cardStyle === 'minimal' ? 'bg-transparent border-b border-gray-200 shadow-none rounded-none pb-4 ' :
-               cardStyle === 'brutalist' ? 'bg-white border-4 border-black shadow-[6px_6px_0_0_rgba(0,0,0,1)] ' :
-               'bg-white border border-gray-100 shadow-sm ';
+    let base = '';
+    if (effectiveCardStyle === 'glass') {
+      base = isDarkBg 
+        ? 'bg-zinc-900/60 backdrop-blur-xl border border-white/10 shadow-xl text-zinc-100 '
+        : 'bg-white/60 backdrop-blur-md border border-white/70 shadow-md text-zinc-900 ';
+    } else if (effectiveCardStyle === 'minimal') {
+      base = isDarkBg
+        ? 'bg-transparent border-b border-zinc-800 shadow-none rounded-none pb-4 text-zinc-100 '
+        : 'bg-transparent border-b border-zinc-200 shadow-none rounded-none pb-4 text-zinc-900 ';
+    } else if (effectiveCardStyle === 'brutalist') {
+      base = 'bg-white border-4 border-black shadow-[6px_6px_0_0_rgba(0,0,0,1)] text-black ';
+    } else {
+      // Solid / Default: 2026 Ambient Culinary Card (Soft glass glow, zero harsh flat white borders)
+      base = isDarkBg 
+        ? 'bg-gradient-to-b from-zinc-900/90 to-zinc-950/90 backdrop-blur-md border border-white/10 shadow-[0_8px_30px_rgb(0,0,0,0.4)] text-zinc-100 ' 
+        : 'bg-gradient-to-b from-white/95 via-white/90 to-white/80 backdrop-blur-md border border-black/[0.04] shadow-[0_8px_28px_-6px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-[0_16px_36px_-6px_rgba(0,0,0,0.1)] text-zinc-900 ';
+    }
     
-    if (cardStyle !== 'minimal' && cardStyle !== 'brutalist') {
+    if (effectiveCardStyle !== 'minimal' && effectiveCardStyle !== 'brutalist') {
       base += (radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-[2rem]' : 'rounded-2xl');
     }
     return base;
   };
 
   const getImgClasses = () => {
-    if (cardStyle === 'minimal') return radClass;
+    if (effectiveCardStyle === 'minimal') return radClass;
     return 'rounded-none'; // takes parent's overflow-hidden
   };
 
-  const isDarkBg = bgColor === '#0f172a';
-  const textColor = isDarkBg ? 'text-white' : 'text-gray-900';
-  const subTextColor = isDarkBg ? 'text-gray-300' : 'text-gray-500';
-
-  const activePalette = cardStyle === 'brutalist' 
+  const activePalette = effectiveCardStyle === 'brutalist' 
     ? findPalette(NEO_PALETTES, primaryColor, '#CC3333')
-    : cardStyle === 'cafe'
+    : effectiveCardStyle === 'cafe'
     ? findPalette(CAFE_PALETTES, primaryColor, '#4A3B32')
-    : cardStyle === 'qsr'
+    : effectiveCardStyle === 'qsr'
     ? findPalette(QSR_PALETTES, primaryColor, '#E53935')
     : null;
 
-  if (cardStyle === 'brutalist' && bgPattern !== 'brutalist-grid' && !bgImage) {
+  if (effectiveCardStyle === 'brutalist' && bgPattern !== 'brutalist-grid' && !bgImage) {
     rootStyle.backgroundColor = activePalette.bg;
-  } else if (cardStyle === 'cafe' && !bgImage) {
+  } else if (effectiveCardStyle === 'cafe' && !bgImage) {
     rootStyle.backgroundColor = activePalette.bg;
-  } else if (cardStyle === 'qsr' && !bgImage) {
+  } else if (effectiveCardStyle === 'qsr' && !bgImage) {
     rootStyle.backgroundColor = activePalette.bg;
   }
 
   return (
     <div className={`flex-1 w-full p-5 pb-36 transition-colors duration-300 relative ${textColor}`} style={rootStyle}>
-      
-      {/* ── TOP LUXURY PRIVILEGE RIBBON (Sleek, hairline, non-intrusive) ── */}
-      {happyHourInfo?.isEnabled && (
-        <div className="-mx-5 -mt-5 mb-5 overflow-hidden">
-          {happyHourInfo.isActive ? (
-            <div className="bg-zinc-950 text-white px-4 py-2 flex items-center justify-between text-[11px] font-medium tracking-wide shadow-sm border-b border-zinc-800">
-              <div className="flex items-center gap-2 truncate">
-                <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
-                <span className="font-semibold tracking-[0.16em] uppercase text-zinc-100 shrink-0">Happy Hour Active</span>
-                <span className="text-zinc-400 truncate">
-                  · Flat {happyHourInfo.discountPct}% OFF drinks & appetizers until {happyHourInfo.endTimeDisplay}
-                </span>
-              </div>
-              {promotionsConfig?.loyaltyEnabled && customerCoins?.balance > 0 && (
-                <div className="shrink-0 flex items-center gap-1.5 text-amber-300 text-[10.5px] font-medium pl-3">
-                  <Sparkles size={11} className="text-amber-400" />
-                  <span>{customerCoins.balance} Coins</span>
-                </div>
-              )}
-            </div>
-          ) : happyHourInfo.isTodayScheduled ? (
-            <div className="bg-zinc-900/95 text-zinc-300 px-4 py-1.5 flex items-center justify-between text-[10.5px] font-medium tracking-wide border-b border-zinc-800/60">
-              <div className="flex items-center gap-2 truncate">
-                <Clock size={11} className="text-zinc-400 shrink-0" />
-                <span className="truncate">
-                  <strong className="text-zinc-200 font-semibold">Happy Hour Today:</strong> {happyHourInfo.startTimeDisplay} – {happyHourInfo.endTimeDisplay} · Flat {happyHourInfo.discountPct}% OFF
-                </span>
-              </div>
-              {promotionsConfig?.loyaltyEnabled && customerCoins?.balance > 0 && (
-                <div className="shrink-0 flex items-center gap-1.5 text-zinc-400 text-[10.5px] font-medium pl-3">
-                  <Coins size={11} className="text-amber-400" />
-                  <span>{customerCoins.balance} Coins</span>
-                </div>
-              )}
-            </div>
-          ) : null}
-        </div>
-      )}
 
       {/* Paper Texture Overlay */}
       {cardStyle === 'cafe' && !bgImage && (
@@ -401,177 +407,332 @@ export function MenuTemplate({
         ></div>
       )}
 
-      {/* Header */}
-      {cardStyle === 'brutalist' ? (
-        <>
-          <style>{`
-            @import url('https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&display=swap');
-            @keyframes marquee {
-              0% { transform: translateX(0); }
-              100% { transform: translateX(-50%); }
-            }
-            .animate-marquee {
-              animation: marquee 15s linear infinite;
-              display: flex;
-              width: max-content;
-            }
-            .font-stencil { font-family: 'Bebas Neue', cursive; }
-            .font-display { font-family: 'Anton', sans-serif; }
-          `}</style>
-          
-          <div className="mt-2 mb-8 flex items-stretch justify-between">
-            <div className="flex-1 overflow-hidden border-[4px] p-4 shadow-[6px_6px_0_0_#000] mr-4 flex items-center" style={{ backgroundColor: activePalette.card, borderColor: activePalette.border }}>
-              {logoUrl ? (
-                <img src={logoUrl} alt="Logo" className="h-14 max-w-full object-contain" />
-              ) : (
-                <h1 className="text-5xl font-display uppercase tracking-wider truncate" style={{ color: activePalette.text }}>
-                  {restaurantName || 'MENU'}
-                </h1>
-              )}
-            </div>
-            <div className="shrink-0 w-20 border-[4px] shadow-[4px_4px_0_0_#000] flex flex-col items-center justify-center rotate-3" style={{ backgroundColor: activePalette.alt, borderColor: activePalette.border, color: activePalette.text }}>
-              <span className="font-stencil text-sm tracking-widest">TABLE</span>
-              <span className="font-display text-3xl leading-none mt-1">{tableNo}</span>
-            </div>
-          </div>
-        </>
-      ) : cardStyle === 'cafe' ? (
-        <div className="mb-10 pt-4 flex flex-col items-center justify-center text-center relative z-10">
-          <div className="text-xs font-cafe-sans tracking-[0.3em] uppercase mb-2 opacity-70 flex items-center justify-center gap-2" style={{ color: activePalette.text }}>
-            <span>Table {tableNo}</span>
-            {promotionsConfig?.loyaltyEnabled && customerCoins?.balance > 0 && (
-              <>
-                <span className="opacity-40">•</span>
-                <span className="text-amber-700 font-semibold flex items-center gap-1">
-                  <Sparkles size={10} />
-                  {customerCoins.balance} Coins
-                </span>
-              </>
-            )}
-          </div>
+      {/* ── LEVEL 2: PROUD BRAND HERO HEADER ── */}
+      <div className="pt-3 pb-3 mb-2 relative z-10 flex items-center justify-between gap-3 sm:gap-4">
+        {/* Left Section: Emblem Squircle + Cafe Name */}
+        <div className="flex items-center gap-3.5 sm:gap-4 min-w-0 flex-1">
           {logoUrl ? (
-            <img src={logoUrl} alt="Logo" className="h-20 max-w-[240px] w-auto object-contain" />
+            <div className="relative shrink-0 flex items-center justify-center">
+              {/* Subtle ambient luxury halo */}
+              <div 
+                className="absolute -inset-2.5 rounded-3xl opacity-20 blur-xl pointer-events-none transition-all"
+                style={{ backgroundColor: primaryColor || '#E46254' }}
+              />
+              <div className={`relative w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12)] ring-1 ring-black/[0.08] dark:ring-white/10 flex items-center justify-center transition-transform duration-300 hover:scale-102 ${
+                isDarkBg ? 'bg-zinc-900' : 'bg-white'
+              }`}>
+                <img 
+                  src={logoUrl} 
+                  alt={restaurantName || 'Logo'} 
+                  className="w-full h-full object-cover" 
+                />
+              </div>
+            </div>
           ) : (
-            <h1 className="text-4xl font-cafe-serif font-semibold tracking-wide" style={{ color: activePalette.text }}>
+            <div className="relative shrink-0 flex items-center justify-center">
+              <div 
+                className="absolute -inset-2.5 rounded-3xl opacity-20 blur-xl pointer-events-none"
+                style={{ backgroundColor: primaryColor || '#E46254' }}
+              />
+              <div className={`relative w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12)] ring-1 ring-black/10 dark:ring-white/10 flex items-center justify-center font-black text-2xl uppercase ${
+                isDarkBg ? 'bg-zinc-900 text-white' : 'bg-zinc-950 text-white'
+              }`}>
+                {(restaurantName || 'M').charAt(0)}
+              </div>
+            </div>
+          )}
+
+          <div className="min-w-0 flex-1 flex flex-col justify-center">
+            <h1 className={`font-black text-xl sm:text-2xl md:text-[26px] tracking-[-0.03em] leading-tight truncate ${
+              isDarkBg ? 'text-zinc-50' : 'text-zinc-950'
+            }`}>
               {restaurantName || 'Menu'}
             </h1>
-          )}
-          <div className="w-12 h-[1px] mt-6" style={{ backgroundColor: activePalette.line }}></div>
-        </div>
-      ) : cardStyle === 'qsr' ? (
-        <div className="mb-6 pt-2 flex items-center justify-between bg-white/90 backdrop-blur-md p-4 rounded-2xl border shadow-sm relative z-10" style={{ borderColor: activePalette.border }}>
-          <div className="flex items-center gap-3">
-            {logoUrl ? (
-              <img src={logoUrl} alt="Logo" className="h-12 max-w-[150px] object-contain" />
-            ) : (
-              <div>
-                <h1 className="text-2xl font-black tracking-tight uppercase" style={{ color: activePalette.text }}>
-                  {restaurantName || 'EXPRESS MENU'}
-                </h1>
-                <span className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-1" style={{ color: activePalette.accent }}>
-                  ● Express Kitchen Live
-                </span>
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {promotionsConfig?.loyaltyEnabled && customerCoins?.balance > 0 && (
-              <div className="px-2.5 py-1.5 rounded-xl bg-amber-50 border border-amber-200/80 text-amber-800 text-[10px] font-bold flex items-center gap-1">
-                <Sparkles size={11} className="text-amber-600" />
-                <span>{customerCoins.balance} Coins</span>
-              </div>
-            )}
-            <div className="px-3.5 py-1.5 rounded-xl font-black text-xs tracking-wider text-white shadow-sm uppercase flex flex-col items-center justify-center" style={{ backgroundColor: activePalette.accent }}>
-              <span className="text-[9px] opacity-80 leading-none">TABLE</span>
-              <span className="text-sm font-extrabold leading-none mt-0.5">{tableNo}</span>
-            </div>
+            <p className="text-[11px] font-bold tracking-[0.2em] uppercase text-zinc-400 dark:text-zinc-500 mt-1">
+              Dine-In
+            </p>
           </div>
         </div>
-      ) : (
-        <div className="mb-6 pt-3 space-y-6">
-          <div className={`flex justify-between items-center ${bgImage ? `bg-white/90 backdrop-blur-md p-4 shadow-sm ${radClass}` : ''}`}>
-            <div className="flex items-center">
-              {logoUrl ? (
-                <img src={logoUrl} alt="Logo" className="h-16 md:h-20 max-w-[200px] object-contain drop-shadow-sm" />
-              ) : (
-                <h1 className={`text-3xl md:text-4xl font-black tracking-tighter ${bgImage ? 'text-gray-900' : textColor}`}>
-                  {restaurantName || 'Menu'}
-                </h1>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              {promotionsConfig?.loyaltyEnabled && customerCoins?.balance > 0 && (
-                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-[11px] font-medium border border-zinc-200/70 bg-white/80 backdrop-blur-xs shadow-2xs text-zinc-800">
-                  <Sparkles size={11} className="text-amber-500" />
-                  <span className="font-semibold">{customerCoins.balance} Coins</span>
-                  <span className="text-zinc-400 text-[10px]">· ₹{customerCoins.balance}</span>
-                </div>
-              )}
-              <div className={`flex flex-col items-center justify-center px-4 py-2 ${bgImage ? 'bg-white shadow-sm' : 'bg-black/5'} backdrop-blur-md rounded-2xl`}>
-                <span className={`text-[10px] font-black uppercase tracking-[0.2em] ${bgImage ? 'text-gray-400' : subTextColor}`}>Table</span>
-                <span className={`text-2xl md:text-3xl font-black leading-none mt-1 ${bgImage ? 'text-gray-900' : textColor}`}>
-                  {tableNo}
-                </span>
-              </div>
-            </div>
-          </div>
 
-          <div className="flex flex-col gap-3">
-            <div className="relative flex items-center w-full bg-white shadow-sm border border-gray-100 rounded-2xl overflow-hidden">
-              <Search size={18} className="absolute left-4 text-gray-400" />
-              <input 
-                type="text" 
-                placeholder="Search menu..." 
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                className="w-full py-4 pl-12 pr-4 bg-transparent outline-none text-sm font-bold text-gray-900 placeholder-gray-400"
-              />
-            </div>
+        {/* Right Section: Sleek Luxury Glass Cart Bag Button */}
+        {onOpenCart && (
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic();
+              onOpenCart();
+            }}
+            className={`relative shrink-0 w-12 h-12 rounded-2xl flex items-center justify-center transition-all duration-200 active:scale-95 cursor-pointer shadow-sm ${
+              cart && cart.length > 0
+                ? isDarkBg
+                  ? 'bg-zinc-900/90 text-white border border-white/15 shadow-md'
+                  : 'bg-white text-zinc-900 border border-black/10 shadow-[0_4px_16px_rgba(0,0,0,0.06)]'
+                : isDarkBg
+                ? 'bg-zinc-900/60 text-zinc-400 border border-white/5 hover:text-white'
+                : 'bg-white/70 text-zinc-500 border border-black/5 hover:text-zinc-900'
+            }`}
+            title="View Order"
+          >
+            <ShoppingBag size={20} strokeWidth={2.2} />
             
-            <div className="flex w-full bg-gray-200/60 p-1.5 rounded-2xl border border-gray-100/50 relative backdrop-blur-sm">
-              <div 
-                className="absolute top-1.5 bottom-1.5 bg-white rounded-xl shadow-sm transition-all duration-300 ease-out"
+            {/* Active Cart Counter Badge */}
+            {cart && cart.length > 0 && (
+              <span 
+                className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 px-1 rounded-full text-white font-black text-[10.5px] flex items-center justify-center shadow-md animate-in zoom-in-75 duration-150 tabular-nums"
                 style={{ 
-                  width: 'calc(33.333% - 4px)', 
-                  left: dietFilter === 'ALL' ? '6px' : dietFilter === 'VEG' ? 'calc(33.333% + 2px)' : 'calc(66.666% - 2px)'
+                  backgroundColor: primaryColor || '#E46254',
+                  boxShadow: `0 2px 8px ${primaryColor || '#E46254'}60`
                 }}
+              >
+                {cart.length}
+              </span>
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* ── LEVEL 3: UNIFIED LUXURY DISCOVERY & FILTER BAR ── */}
+      <div className={`sticky top-0 z-30 -mx-5 px-5 py-2.5 backdrop-blur-xl border-b transition-all duration-300 ${
+        isDarkBg 
+          ? 'bg-zinc-950/85 border-white/10 shadow-[0_4px_20px_rgba(0,0,0,0.4)]' 
+          : 'bg-white/85 border-black/5 shadow-[0_4px_24px_rgba(0,0,0,0.04)]'
+      }`}>
+        {/* Row 1: Unified Sleek Search Capsule + Dedicated Glass Filter Button */}
+        <div className="flex items-center gap-2 mb-2">
+          {/* Frosted Glass Search Capsule */}
+          <div className={`group relative flex-1 flex items-center h-10 rounded-full border transition-all duration-300 ${
+            isDarkBg 
+              ? 'bg-zinc-900/70 border-white/10 focus-within:border-white/30 focus-within:bg-zinc-900/95 focus-within:shadow-[0_0_20px_rgba(255,255,255,0.08)] text-zinc-100' 
+              : 'bg-zinc-100/80 border-black/5 focus-within:border-black/20 focus-within:bg-white focus-within:shadow-[0_4px_20px_rgba(0,0,0,0.06)] text-zinc-900'
+          }`}>
+            <Search 
+              size={15} 
+              className={`absolute left-3.5 transition-colors duration-200 pointer-events-none ${
+                isDarkBg ? 'text-zinc-500 group-focus-within:text-zinc-200' : 'text-zinc-400 group-focus-within:text-zinc-800'
+              }`} 
+            />
+            <input 
+              type="text" 
+              placeholder="Search dishes, drinks, desserts..." 
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="w-full h-full pl-9 pr-8 bg-transparent outline-none text-xs sm:text-[13px] font-medium tracking-tight placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+            />
+            {searchTerm && (
+              <button 
+                type="button" 
+                onClick={() => setSearchTerm('')} 
+                className="absolute right-2.5 w-5 h-5 rounded-full bg-zinc-300/80 dark:bg-zinc-700/80 text-zinc-600 dark:text-zinc-200 hover:scale-105 flex items-center justify-center transition-all cursor-pointer"
+                aria-label="Clear search"
+              >
+                <X size={10} strokeWidth={3} />
+              </button>
+            )}
+          </div>
+
+          {/* Dedicated Glass Filter Trigger Button */}
+          <button
+            type="button"
+            onClick={() => { triggerHaptic(); setShowFilterModal(true); }}
+            aria-label="Open dietary and menu filters"
+            className={`relative flex items-center justify-center w-10 h-10 rounded-full border transition-all duration-200 active:scale-95 cursor-pointer shrink-0 ${
+              dietFilter !== 'ALL'
+                ? 'bg-zinc-900 text-white border-zinc-900 shadow-sm'
+                : isDarkBg
+                ? 'bg-zinc-900/70 border-white/10 text-zinc-300 hover:text-white hover:bg-zinc-800/80'
+                : 'bg-zinc-100/80 border-black/5 text-zinc-600 hover:text-zinc-950 hover:bg-zinc-200/80 shadow-xs'
+            }`}
+          >
+            <SlidersHorizontal size={15} strokeWidth={2.2} />
+            {dietFilter !== 'ALL' && (
+              <span 
+                className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-zinc-950 shadow-xs"
+                style={{ backgroundColor: dietFilter === 'VEG' ? '#16A34A' : '#E11D48' }}
               />
-              {['ALL', 'VEG', 'NON-VEG'].map((opt) => (
-                <button
-                  key={opt}
-                  onClick={() => { triggerHaptic(); setDietFilter(opt); }}
-                  className={`flex-1 py-3 text-[11px] sm:text-xs font-black tracking-wider uppercase z-10 transition-colors duration-300 ${dietFilter === opt ? 'text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
+            )}
+          </button>
+        </div>
+
+        {/* Row 2: Clean, Minimalist Text Category Navigation Tabs (Zero Clutter, No Numbers) */}
+        <div className="relative -mx-1 px-1">
+          <div 
+            className="flex items-center overflow-x-auto gap-2 py-1 no-scrollbar [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
+            style={{
+              maskImage: 'linear-gradient(to right, black calc(100% - 24px), transparent 100%)',
+              WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 24px), transparent 100%)'
+            }}
+          >
+            {displayCategories.map((cat: string, i: number) => {
+              const isActive = activeCategory === cat;
+              const isHighlights = cat === 'HIGHLIGHTS';
+
+              return (
+                <button 
+                  key={i} 
+                  onClick={() => { triggerHaptic(); setActiveCategory(cat); }} 
+                  className={`group relative px-3.5 py-1.5 rounded-full font-bold text-xs tracking-tight whitespace-nowrap transition-all duration-200 flex items-center gap-1.5 cursor-pointer select-none ${
+                    isActive 
+                      ? 'text-white shadow-xs scale-[1.02]'
+                      : isDarkBg 
+                      ? 'bg-zinc-900/50 hover:bg-zinc-800/80 text-zinc-400 hover:text-zinc-100 border border-white/5' 
+                      : 'bg-zinc-100/70 hover:bg-zinc-200/70 text-zinc-600 hover:text-zinc-900 border border-black/5'
+                  }`}
+                  style={isActive ? { 
+                    backgroundColor: primaryColor || '#E46254',
+                    boxShadow: `0 3px 12px -2px ${primaryColor || '#E46254'}45`
+                  } : {}}
                 >
-                  {opt}
+                  {isHighlights && (
+                    <Sparkles size={12} className={isActive ? 'text-white' : 'text-amber-500'} />
+                  )}
+                  <span>{isHighlights ? "Chef's Picks" : cat}</span>
                 </button>
-              ))}
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* ── LUXURY FILTER BOTTOM SHEET / MODAL ── */}
+      {showFilterModal && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-200"
+          onClick={() => setShowFilterModal(false)}
+        >
+          <div 
+            onClick={e => e.stopPropagation()}
+            className={`w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl transition-all duration-300 border ${
+              isDarkBg 
+                ? 'bg-zinc-900 border-zinc-800 text-zinc-100' 
+                : 'bg-white border-zinc-100 text-zinc-900'
+            }`}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-zinc-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-zinc-700 dark:text-zinc-300">
+                  <SlidersHorizontal size={15} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold tracking-tight">Filter Menu</h3>
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500">Refine by dietary preferences</p>
+                </div>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowFilterModal(false)}
+                className="w-8 h-8 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            {/* Dietary Preference Selector */}
+            <div className="py-5 space-y-2">
+              <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                Dietary Preference
+              </label>
+
+              {/* ALL */}
+              <button
+                type="button"
+                onClick={() => { triggerHaptic(); setDietFilter('ALL'); }}
+                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                  dietFilter === 'ALL'
+                    ? 'border-zinc-900 dark:border-white bg-zinc-50 dark:bg-zinc-800/70 shadow-xs'
+                    : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-4 h-4 rounded-full border-2 border-zinc-400 dark:border-zinc-500 flex items-center justify-center">
+                    {dietFilter === 'ALL' && <div className="w-2 h-2 rounded-full bg-zinc-900 dark:bg-white" />}
+                  </div>
+                  <div className="text-left">
+                    <span className="text-sm font-bold block">All Dishes</span>
+                    <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Show complete dining menu</span>
+                  </div>
+                </div>
+                <span className="text-xs font-semibold text-zinc-400 font-mono">
+                  {items.length}
+                </span>
+              </button>
+
+              {/* VEG */}
+              <button
+                type="button"
+                onClick={() => { triggerHaptic(); setDietFilter('VEG'); }}
+                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                  dietFilter === 'VEG'
+                    ? 'border-emerald-600 bg-emerald-500/5 dark:bg-emerald-500/10 shadow-xs'
+                    : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex items-center justify-center w-4 h-4 border border-emerald-600 p-[1px] rounded-xs shrink-0">
+                    <span className="w-2 h-2 rounded-full bg-emerald-600" />
+                  </span>
+                  <div className="text-left">
+                    <span className="text-sm font-bold block text-emerald-700 dark:text-emerald-400">Pure Veg Only</span>
+                    <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Vegetarian culinary selections</span>
+                  </div>
+                </div>
+                <span className="text-xs font-semibold text-emerald-600 font-mono">
+                  {items.filter((i: any) => i.isVeg).length}
+                </span>
+              </button>
+
+              {/* NON-VEG */}
+              <button
+                type="button"
+                onClick={() => { triggerHaptic(); setDietFilter('NON-VEG'); }}
+                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                  dietFilter === 'NON-VEG'
+                    ? 'border-rose-600 bg-rose-500/5 dark:bg-rose-500/10 shadow-xs'
+                    : 'border-zinc-200/80 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex items-center justify-center w-4 h-4 border border-rose-600 p-[1px] rounded-xs shrink-0">
+                    <span className="w-0 h-0 border-x-[3px] border-x-transparent border-b-[5px] border-b-rose-600" />
+                  </span>
+                  <div className="text-left">
+                    <span className="text-sm font-bold block text-rose-700 dark:text-rose-400">Non-Veg Only</span>
+                    <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Meat, poultry & seafood dishes</span>
+                  </div>
+                </div>
+                <span className="text-xs font-semibold text-rose-600 font-mono">
+                  {items.filter((i: any) => !i.isVeg).length}
+                </span>
+              </button>
+            </div>
+
+            {/* Modal Action Buttons */}
+            <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => { triggerHaptic(); setDietFilter('ALL'); setShowFilterModal(false); }}
+                className="flex-1 py-3 px-4 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-bold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                Reset Filters
+              </button>
+              <button
+                type="button"
+                onClick={() => { triggerHaptic(); setShowFilterModal(false); }}
+                className="flex-1 py-3 px-4 rounded-xl text-xs font-bold text-white shadow-md hover:opacity-90 transition-opacity cursor-pointer text-center"
+                style={{ backgroundColor: primaryColor || '#E46254' }}
+              >
+                Apply Filters
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {cardStyle === 'cafe' && (
-        <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Lato:wght@300;400;700&display=swap');
-          .font-cafe-serif { font-family: 'Playfair Display', serif; }
-          .font-cafe-sans { font-family: 'Lato', sans-serif; }
-          @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-          .animate-fade-up {
-            animation: fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
-          }
-        `}</style>
-      )}
-
-
-        
-      {/* ── HOTEL AMENITIES & SERVICES DOCK ── */}
+      {/* ── HOTEL AMENITIES & SERVICES DOCK (Optional) ── */}
       {serviceItems.length > 0 && (
-        <div className="px-5 mt-4 mb-2">
-          <h3 className={`text-sm font-bold mb-3 ${cardStyle === 'brutalist' ? 'uppercase tracking-widest text-black' : 'text-gray-500'}`}>Guest Services</h3>
-          <div className="flex gap-3 overflow-x-auto hide-scrollbar pb-2">
+        <div className="mt-3 mb-2">
+          <h3 className={`text-xs font-bold mb-2 uppercase tracking-wider ${isDarkBg ? 'text-zinc-400' : 'text-gray-500'}`}>Guest Services</h3>
+          <div className="flex gap-2 overflow-x-auto hide-scrollbar pb-1">
             {serviceItems.map((item: any) => (
               <button
                 key={item.id}
@@ -584,96 +745,20 @@ export function MenuTemplate({
                   }
                   triggerHaptic();
                 }}
-                className={`shrink-0 flex flex-col items-center justify-center w-[84px] h-[84px] transition-transform active:scale-95 ${cardStyle === 'brutalist' ? 'bg-white border-[3px] border-black rounded-none shadow-[2px_2px_0_0_#000]' : 'bg-white border border-gray-100 rounded-2xl shadow-sm'}`}
+                className={`shrink-0 flex flex-col items-center justify-center w-[74px] h-[74px] transition-transform active:scale-95 ${
+                  isDarkBg ? 'bg-zinc-900 border border-zinc-800 rounded-xl text-zinc-200' : 'bg-white border border-gray-100 rounded-xl shadow-xs text-gray-700'
+                }`}
               >
-                <span className="text-2xl mb-1">{getServiceIcon(item.name)}</span>
-                <span className="text-[10px] font-bold text-center leading-tight px-1 text-gray-700">{item.name}</span>
+                <span className="text-xl mb-1">{getServiceIcon(item.name)}</span>
+                <span className="text-[9.5px] font-bold text-center leading-tight px-1">{item.name}</span>
               </button>
             ))}
           </div>
         </div>
       )}
 
-      {/* Category Pills */}
-      <div className={`flex overflow-x-auto gap-2 pb-4 mb-4 -mx-1 px-1 relative z-10 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] ${cardStyle === 'cafe' ? 'justify-start md:justify-center border-b pb-6 gap-6' : ''}`} style={cardStyle === 'cafe' ? { borderColor: activePalette.line } : {}}>
-          {displayCategories.map((cat: string, i: number) => {
-            const isActive = activeCategory === cat;
-            
-            if (cardStyle === 'cafe') {
-              return (
-                <button 
-                  key={i} 
-                  onClick={() => { triggerHaptic(); setActiveCategory(cat); }} 
-                  className={`relative font-cafe-sans tracking-[0.2em] text-xs uppercase whitespace-nowrap transition-colors pb-1 ${
-                    isActive ? 'font-bold' : 'opacity-60 hover:opacity-100'
-                  }`}
-                  style={{ color: isActive ? activePalette.text : activePalette.text }}
-                >
-                  {cat}
-                  {isActive && (
-                    <span className="absolute bottom-[-8px] left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activePalette.accent }} />
-                  )}
-                </button>
-              );
-            }
-            
-            if (cardStyle === 'brutalist') {
-              return (
-                <button 
-                  key={i} 
-                  onClick={() => { triggerHaptic(); setActiveCategory(cat); }} 
-                  className={`px-5 py-2 font-display text-2xl uppercase tracking-wide whitespace-nowrap transition-transform border-[4px] active:translate-y-0 ${
-                    isActive 
-                      ? 'translate-y-[4px] shadow-[0_0_0_0_#000]'
-                      : 'hover:-translate-y-[2px]'
-                  }`}
-                  style={{
-                    backgroundColor: isActive ? activePalette.accent : activePalette.card,
-                    borderColor: activePalette.border,
-                    color: activePalette.text,
-                    boxShadow: isActive ? 'none' : `6px 6px 0 0 ${activePalette.border}`
-                  }}
-                >
-                  {cat}
-                </button>
-              );
-            }
-
-            if (cardStyle === 'qsr') {
-              return (
-                <button 
-                  key={i} 
-                  onClick={() => { triggerHaptic(); setActiveCategory(cat); }} 
-                  className={`px-6 py-2.5 rounded-full font-black text-xs uppercase tracking-wider whitespace-nowrap transition-all shadow-sm ${
-                    isActive 
-                      ? 'text-white shadow-md scale-105' 
-                      : 'bg-white border text-zinc-700 hover:bg-zinc-50'
-                  }`}
-                  style={isActive ? { backgroundColor: activePalette.accent, borderColor: activePalette.accent } : { borderColor: activePalette.border }}
-                >
-                  {cat}
-                </button>
-              );
-            }
-
-            return (
-              <button 
-                key={i} 
-                onClick={() => { triggerHaptic(); setActiveCategory(cat); }} 
-                className={`px-5 py-2 font-semibold capitalize text-sm whitespace-nowrap transition-all shadow-sm ${radClass} ${
-                  isActive 
-                    ? 'text-white'
-                    : (isDarkBg ? 'bg-gray-800 border-gray-700 text-gray-300' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50')
-                }`}
-                style={isActive ? { backgroundColor: primaryColor, borderColor: primaryColor } : {}}
-              >
-                {cat.toLowerCase()}
-              </button>
-            );
-        })}
-      </div>
-      {/* Clean List/Grid Layout */}
-      <div className={layoutMode === 'grid' ? "grid grid-cols-2 gap-4 relative z-10" : "flex flex-col gap-6 relative z-10"}>
+      {/* Clean List/Grid Layout with Luxury Spacing */}
+      <div className={layoutMode === 'grid' ? "grid grid-cols-2 gap-3.5 sm:gap-4 relative z-10 pt-4 pb-6" : "flex flex-col gap-3.5 sm:gap-4 relative z-10 pt-4 pb-6"}>
         {filteredItems.map((item: MenuItem, i: number) => {
           const qty = getItemQuantity(item.id);
           const isGrid = layoutMode === 'grid';
@@ -692,248 +777,248 @@ export function MenuTemplate({
             ? { ...item, basePrice: effectivePrice, originalPrice: item.basePrice }
             : item;
 
-          if (cardStyle === 'brutalist') {
-            return (
-              <div 
-                key={item.id} 
-                onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
-                className="relative cursor-pointer border-[4px] hover:-translate-y-[4px] transition-transform group flex flex-col w-full"
-                style={{ 
-                  backgroundColor: activePalette.card,
-                  borderColor: activePalette.border,
-                  boxShadow: `8px 8px 0 0 ${activePalette.border}`
-                }}
-              >
-                {/* Tape Badge */}
-                {item.badge && (
-                  <div className="absolute top-2 -right-3 z-20 rotate-6 border-[3px] px-3 py-1 font-display text-lg tracking-wide uppercase whitespace-nowrap shadow-[4px_4px_0_0_#000]"
-                       style={{ 
-                         backgroundColor: activePalette.alt, 
-                         color: activePalette.text, 
-                         borderColor: activePalette.border
-                       }}>
-                    {item.badge}
-                  </div>
-                )}
-                
-                {/* Header Image Block */}
-                <div className="w-full h-32 border-b-[4px] relative overflow-hidden bg-black/5 flex items-center justify-center" style={{ borderColor: activePalette.border }}>
-                  {item.img ? (
-                    <img src={item.img} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-                  ) : (
-                    <div className="flex items-center justify-center w-full h-full">
-                      <Utensils size={36} className="text-stone-300 stroke-[1.5]" />
+          // ══════════════════════════════════════════════════════════════════
+          // MODE A: NO IMAGES / TEXT-ONLY (Clean Editorial Cards)
+          // ══════════════════════════════════════════════════════════════════
+          if (!shouldShowImages) {
+            if (isGrid) {
+              // 2x2 Grid Text Only: Well-proportioned tile
+              return (
+                <div 
+                  key={item.id} 
+                  onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
+                  className={`group cursor-pointer w-full flex flex-col justify-between p-3.5 sm:p-4 rounded-2xl transition-all duration-200 active:scale-[0.98] hover:shadow-md ${getCardClasses()}`}
+                >
+                  <div>
+                    {/* Top: Veg Hallmark + Badge */}
+                    <div className="flex items-center justify-between mb-2 gap-1.5">
+                      <VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} />
+                      {item.badge ? (
+                        <DishBadgePill badge={item.badge} mode="inline" />
+                      ) : (
+                        <span className="text-[9px] font-bold tracking-wider uppercase text-zinc-400 dark:text-zinc-500 opacity-70 truncate">
+                          {item.category}
+                        </span>
+                      )}
                     </div>
-                  )}
-                </div>
-                
-                {/* Content Block */}
-                <div className="flex flex-col p-3 flex-1">
-                   <div className="flex items-start gap-2 mb-1">
-                     <div className="mt-1">
-                       {item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS') ? (
-                         <span className="inline-block border-[2px] border-black bg-green-400 text-black px-1.5 py-0.5 text-[9px] font-black uppercase shadow-[2px_2px_0_0_#000] -rotate-2">VEG</span>
-                       ) : (
-                         <span className="inline-block border-[2px] border-black bg-red-400 text-black px-1.5 py-0.5 text-[9px] font-black uppercase shadow-[2px_2px_0_0_#000] -rotate-2">NON-VEG</span>
-                       )}
-                     </div>
-                     <h3 className="font-display text-2xl uppercase leading-[1] tracking-wide line-clamp-2" style={{ color: activePalette.text }}>{item.name}</h3>
-                   </div>
-                   <p className="text-[11px] font-bold leading-snug line-clamp-2 mb-3 opacity-90" style={{ color: activePalette.text }}>{item.desc}</p>
-                   
-                   <div className="mt-auto flex justify-between items-center pt-3 border-t-[4px]" style={{ borderColor: activePalette.border }}>
-                     <div className="flex items-baseline gap-1.5">
-                       <span className="font-display text-2xl" style={{ color: activePalette.text }}>₹{effectivePrice.toFixed(0)}</span>
-                       {isItemHappyHour && (
-                         <span className="text-xs text-stone-400 line-through">₹{item.basePrice.toFixed(0)}</span>
-                       )}
-                     </div>
-                     {qty === 0 ? (
-                       <button 
-                         onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }} 
-                         className="px-4 py-1.5 border-[3px] font-display text-xl uppercase tracking-wider hover:-translate-y-[2px] active:translate-y-0 transition-transform shadow-[3px_3px_0_0_#000]"
-                         style={{ 
-                           backgroundColor: activePalette.accent, 
-                           color: activePalette.text, 
-                           borderColor: activePalette.border,
-                         }}
-                       >
-                         Add
-                       </button>
-                     ) : (
-                       <div className="flex items-center border-[3px] border-black bg-white shadow-[3px_3px_0_0_#000] overflow-hidden shrink-0">
-                         <button 
-                           onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, -1); }} 
-                           className="px-3 py-1 font-display text-xl font-black bg-yellow-400 hover:bg-yellow-300 border-r-[3px] border-black text-black active:scale-95 transition-transform flex items-center justify-center min-w-[36px] min-h-[36px]"
-                         >
-                           -
-                         </button>
-                         <span className="px-3 text-sm font-black font-display text-black select-none">{qty}</span>
-                         <button 
-                           onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); }} 
-                           className="px-3 py-1 font-display text-xl font-black bg-yellow-400 hover:bg-yellow-300 border-l-[3px] border-black text-black active:scale-95 transition-transform flex items-center justify-center min-w-[36px] min-h-[36px]"
-                         >
-                           +
-                         </button>
-                       </div>
-                     )}
-                   </div>
-                </div>
-              </div>
-            );
-          }
-          
-          if (cardStyle === 'cafe') {
-            return (
-              <div 
-                key={item.id} 
-                onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
-                className={`flex gap-4 py-4 border-b last:border-0 transition-colors cursor-pointer group animate-fade-up w-full ${isGrid ? '' : 'h-full'}`}
-                style={{ borderColor: activePalette.line, backgroundColor: activePalette.card, padding: '16px', borderRadius: '16px', marginBottom: '12px', animationDelay: `${i * 80}ms` }}
-              >
-                <div className="w-20 h-24 shrink-0 rounded-t-full rounded-b-xl overflow-hidden shadow-sm border relative bg-zinc-100/50 flex items-center justify-center" style={{ borderColor: activePalette.border }}>
-                  <div className="absolute inset-0 group-hover:bg-transparent transition-colors z-10 opacity-[0.08]" style={{ backgroundColor: activePalette.accent }} />
-                  {item.img ? (
-                    <img src={item.img} className="w-full h-full object-cover sepia-[0.3] group-hover:scale-105 transition-transform duration-700" />
-                  ) : (
-                    <div className="flex items-center justify-center w-full h-full">
-                      <Utensils size={28} className="text-stone-300 stroke-[1.5]" />
-                    </div>
-                  )}
-                </div>
-                <div className="flex-1 py-1 flex flex-col justify-center">
-                   {item.badge && (
-                     <div className="flex items-center gap-1.5 mb-1">
-                       <Sparkles size={10} style={{ color: activePalette.accent }} />
-                       <span className="text-[9.5px] font-cafe-sans tracking-[0.2em] uppercase font-bold opacity-80" style={{ color: activePalette.accent }}>
-                         {item.badge}
-                       </span>
-                     </div>
-                   )}
-                   <div className="flex justify-between items-baseline gap-2 mb-1">
-                       <div className="flex items-center gap-1.5">
-                         <div className="translate-y-0.5"><VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} /></div>
-                         <h3 className="font-cafe-serif text-lg font-bold" style={{ color: activePalette.text }}>
-                           {item.name}
-                         {item.dietary?.map(d => (                            <span key={d} className="ml-1 text-[8px] font-cafe-serif border px-1 rounded-sm opacity-60 align-middle" style={{ color: activePalette.text, borderColor: activePalette.text }}>{d}</span>
-                         ))}
-                       </h3>
-                       </div>
-                       <div className="flex-1 border-b-[2px] border-dotted mx-2 relative top-[-4px] opacity-40" style={{ borderColor: activePalette.text }}></div>
-                       <div className="flex items-baseline gap-1.5">
-                         <span className="font-cafe-sans font-bold text-base tracking-wider" style={{ color: activePalette.accent }}>₹{effectivePrice.toFixed(0)}</span>
-                         {isItemHappyHour && (
-                           <span className="text-[11px] text-stone-400 line-through">₹{item.basePrice.toFixed(0)}</span>
-                         )}
-                       </div>
-                   </div>
-                   <p className="text-xs font-cafe-sans line-clamp-2 leading-relaxed tracking-wide mb-3 opacity-70" style={{ color: activePalette.text }}>{item.desc}</p>
-                   {qty === 0 ? (
-                     <button 
-                       onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }}
-                       className="mt-auto self-start text-[10px] font-bold tracking-[0.2em] uppercase transition-colors flex items-center gap-1" 
-                       style={{ color: activePalette.accent }}
-                     >
-                        <span>Add to Order</span>
-                        <span className="text-lg leading-none mb-0.5">+</span>
-                     </button>
-                   ) : (
-                     <div className="mt-auto self-start flex items-center gap-1 rounded-full p-0.5 border bg-white/90 shadow-sm" style={{ borderColor: activePalette.border }}>
-                       <button 
-                         onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, -1); }} 
-                         className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-transform active:scale-90"
-                         style={{ backgroundColor: activePalette.card, color: activePalette.text }}
-                       >
-                         -
-                       </button>
-                       <span className="w-5 text-center font-cafe-serif text-xs font-bold select-none" style={{ color: activePalette.text }}>{qty}</span>
-                       <button 
-                         onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); }} 
-                         className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white transition-transform active:scale-90"
-                         style={{ backgroundColor: activePalette.accent }}
-                       >
-                         +
-                       </button>
-                     </div>
-                   )}
-                </div>
-              </div>
-            );
-          }
 
-          if (cardStyle === 'qsr') {
-            return (
-              <div 
-                key={item.id} 
-                onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
-                className="relative cursor-pointer rounded-2xl overflow-hidden shadow-md hover:shadow-xl transition-all duration-300 flex flex-col group border bg-white animate-fade-up w-full h-full"
-                style={{ 
-                  backgroundColor: activePalette.card,
-                  borderColor: activePalette.border,
-                  animationDelay: `${i * 80}ms`
-                }}
-              >
-                {/* Deal / Badge Pill */}
-                {item.badge && (
-                  <div className="absolute top-2 left-2 z-20">
-                    <DishBadgePill badge={item.badge} />
-                  </div>
-                )}
-
-                {/* Big Food Image */}
-                <div className="w-full h-36 relative overflow-hidden bg-black/5 flex items-center justify-center">
-                  {item.img ? (
-                    <img src={item.img} alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-                  ) : (
-                    <div className="flex items-center justify-center w-full h-full">
-                      <Utensils size={36} className="text-zinc-300 stroke-[1.5]" />
-                    </div>
-                  )}
-                </div>
-
-                {/* Content & Ordering Section */}
-                <div className="p-3 flex flex-col flex-1">
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} />
-                    <h3 className="font-extrabold text-sm line-clamp-1 leading-snug" style={{ color: activePalette.text }}>
+                    {/* Dish Title: Full wrap (no cutoffs) */}
+                    <h3 className={`font-black text-xs sm:text-[13px] md:text-sm tracking-tight leading-snug break-words ${isDarkBg ? 'text-zinc-100' : 'text-zinc-900'} group-hover:text-primary transition-colors`}>
                       {item.name}
                     </h3>
                   </div>
 
-                  <p className="text-[11px] text-zinc-500 line-clamp-2 leading-tight mb-3 flex-1 font-medium">
-                    {item.desc}
-                  </p>
-
-                  <div className="mt-auto pt-2 border-t flex items-center justify-between gap-2" style={{ borderColor: activePalette.border }}>
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="font-black text-base tracking-tight" style={{ color: activePalette.accent }}>
+                  {/* Bottom Line: Price & Tactile Add/Stepper */}
+                  <div className="mt-3 pt-2.5 border-t border-black/[0.04] dark:border-white/5 flex items-center justify-between gap-1.5">
+                    <div className="flex flex-col">
+                      <span className={`font-black text-sm sm:text-base tracking-tight font-mono ${isDarkBg ? 'text-zinc-50' : 'text-zinc-950'}`}>
                         ₹{effectivePrice.toFixed(0)}
                       </span>
                       {isItemHappyHour && (
-                        <span className="text-[11px] text-zinc-400 line-through">₹{item.basePrice.toFixed(0)}</span>
+                        <span className="text-[10px] text-zinc-400 line-through font-mono">₹{item.basePrice.toFixed(0)}</span>
                       )}
                     </div>
+
                     {qty === 0 ? (
                       <button 
-                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }}
-                        className="px-4 py-1.5 rounded-xl font-extrabold text-xs tracking-wider uppercase transition-all shadow-sm active:scale-95 text-white flex items-center gap-1"
-                        style={{ backgroundColor: activePalette.accent }}
+                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }} 
+                        className="px-3.5 py-1.5 rounded-full text-[11px] font-black text-white transition-all duration-150 hover:brightness-110 active:scale-90 shadow-sm flex items-center gap-1 cursor-pointer shrink-0"
+                        style={{ 
+                          backgroundColor: primaryColor || '#E46254',
+                          boxShadow: `0 2px 10px ${primaryColor || '#E46254'}40`
+                        }}
                       >
-                        ADD <span className="text-sm leading-none">+</span>
+                        <span>ADD</span>
+                        <span className="text-xs font-black leading-none">+</span>
                       </button>
                     ) : (
-                      <div className="flex items-center gap-1.5 p-0.5 rounded-xl shadow-sm border bg-white" style={{ borderColor: activePalette.border }}>
+                      <div 
+                        className={`flex items-center gap-1 p-0.5 rounded-full border shadow-2xs transition-all shrink-0 ${
+                          isDarkBg 
+                            ? 'bg-zinc-900/90 border-white/10' 
+                            : 'bg-white/95 border-black/10'
+                        }`}
+                      >
                         <button 
                           onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, -1); }} 
-                          className="w-7 h-7 rounded-lg flex items-center justify-center text-sm font-black transition-all active:scale-90 bg-zinc-100 text-zinc-800 hover:bg-zinc-200"
+                          className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-black active:scale-90 transition-all cursor-pointer ${
+                            isDarkBg ? 'text-zinc-200 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-800 bg-zinc-100 hover:bg-zinc-200'
+                          }`}
                         >
                           -
                         </button>
-                        <span className="w-5 text-center font-black text-xs select-none" style={{ color: activePalette.accent }}>{qty}</span>
+                        <span className={`w-4 text-center font-black text-xs select-none tabular-nums ${isDarkBg ? 'text-zinc-100' : 'text-zinc-950'}`}>{qty}</span>
                         <button 
                           onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); }} 
-                          className="w-7 h-7 rounded-lg flex items-center justify-center text-sm font-black transition-all active:scale-90 text-white"
-                          style={{ backgroundColor: activePalette.accent }}
+                          className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-black text-white active:scale-90 transition-all shadow-xs cursor-pointer"
+                          style={{ backgroundColor: primaryColor || '#E46254' }}
+                        >
+                          +
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
+            // 1x1 List Text Only: Elegant single row with natural wrapping title
+            return (
+              <div 
+                key={item.id} 
+                onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
+                className={`group cursor-pointer w-full flex items-center justify-between p-3.5 sm:p-4 rounded-2xl transition-all duration-200 active:scale-[0.99] hover:shadow-md ${getCardClasses()}`}
+              >
+                <div className="flex items-start gap-2.5 flex-1 min-w-0 pr-3">
+                  <div className="mt-0.5 shrink-0">
+                    <VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5 mb-0.5">
+                      <h3 className={`font-black text-sm sm:text-base tracking-tight break-words ${isDarkBg ? 'text-zinc-100' : 'text-zinc-900'} group-hover:text-primary transition-colors`}>
+                        {item.name}
+                      </h3>
+                      {item.badge && (
+                        <DishBadgePill badge={item.badge} mode="inline" />
+                      )}
+                    </div>
+                    <span className="text-[10px] font-bold tracking-wider uppercase text-zinc-400 dark:text-zinc-500">
+                      {item.category}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 shrink-0">
+                  <div className="flex flex-col items-end">
+                    <span className={`font-black text-sm sm:text-base tracking-tight font-mono ${isDarkBg ? 'text-zinc-50' : 'text-zinc-950'}`}>
+                      ₹{effectivePrice.toFixed(0)}
+                    </span>
+                    {isItemHappyHour && (
+                      <span className="text-[10px] text-zinc-400 line-through font-mono">₹{item.basePrice.toFixed(0)}</span>
+                    )}
+                  </div>
+
+                  {qty === 0 ? (
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }} 
+                      className="px-3.5 py-1.5 rounded-full text-xs font-black text-white transition-all duration-150 hover:brightness-110 active:scale-95 shadow-sm flex items-center gap-1 cursor-pointer shrink-0"
+                      style={{ 
+                        backgroundColor: primaryColor || '#E46254',
+                        boxShadow: `0 2px 10px ${primaryColor || '#E46254'}40`
+                      }}
+                    >
+                      <span>ADD</span>
+                      <span className="text-xs font-black leading-none">+</span>
+                    </button>
+                  ) : (
+                    <div 
+                      className={`flex items-center gap-1 p-0.5 rounded-full border shadow-2xs transition-all shrink-0 ${
+                        isDarkBg 
+                          ? 'bg-zinc-900/90 border-white/10' 
+                          : 'bg-white/95 border-black/10'
+                      }`}
+                    >
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, -1); }} 
+                        className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-black active:scale-90 transition-all cursor-pointer ${
+                          isDarkBg ? 'text-zinc-200 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-800 bg-zinc-100 hover:bg-zinc-200'
+                        }`}
+                      >
+                        -
+                      </button>
+                      <span className={`w-5 text-center font-black text-xs select-none tabular-nums ${isDarkBg ? 'text-zinc-100' : 'text-zinc-950'}`}>{qty}</span>
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); }} 
+                        className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-black text-white active:scale-90 transition-all shadow-xs cursor-pointer"
+                        style={{ backgroundColor: primaryColor || '#E46254' }}
+                      >
+                        +
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          }
+
+          // ══════════════════════════════════════════════════════════════════
+          // MODE B: SHOW WITH IMAGES (Luxury Presentation)
+          // ══════════════════════════════════════════════════════════════════
+          if (isGrid) {
+            // 2x2 Grid Mode With Image: Well balanced card with full title readability
+            return (
+              <div 
+                key={item.id} 
+                onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
+                className={`group cursor-pointer w-full flex flex-col rounded-2xl overflow-hidden transition-all duration-200 active:scale-[0.98] hover:shadow-md ${getCardClasses()}`}
+              >
+                {/* Photo Stage */}
+                <div className="relative w-full h-32 sm:h-36 bg-stone-100 dark:bg-zinc-900 flex items-center justify-center overflow-hidden">
+                  {item.badge && (
+                    <div className="absolute top-2 left-2 z-10">
+                      <DishBadgePill badge={item.badge} mode="glass" />
+                    </div>
+                  )}
+                  {item.img ? (
+                    <img 
+                      src={item.img} 
+                      alt={item.name}
+                      className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-106 pointer-events-none" 
+                    />
+                  ) : (
+                    <div className="relative w-full h-full flex flex-col items-center justify-center p-2 text-center bg-gradient-to-br from-stone-100 via-stone-50 to-stone-200/80 dark:from-zinc-900 dark:via-zinc-900/90 dark:to-zinc-950">
+                      <div className="w-9 h-9 rounded-full border border-black/[0.08] dark:border-white/10 bg-white/60 dark:bg-zinc-800/60 backdrop-blur-xs flex items-center justify-center mb-1 shadow-2xs">
+                        <ChefHat size={16} className="text-zinc-600 dark:text-zinc-300" strokeWidth={1.5} />
+                      </div>
+                      <span className="text-[7.5px] font-bold tracking-[0.2em] text-zinc-400 dark:text-zinc-500 uppercase">Chef's Selection</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Content Box */}
+                <div className="p-3 sm:p-3.5 flex flex-col justify-between flex-1">
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} />
+                      <span className="text-[9px] font-bold tracking-wider uppercase text-zinc-400 dark:text-zinc-500 truncate">
+                        {item.category}
+                      </span>
+                    </div>
+                    {/* Item Name: Clean, never abruptly truncated, readable wrap */}
+                    <h3 className={`font-black text-xs sm:text-[13px] tracking-tight leading-snug break-words ${isDarkBg ? 'text-zinc-100' : 'text-zinc-900'} group-hover:text-primary transition-colors`}>
+                      {item.name}
+                    </h3>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-1 pt-2.5 mt-2 border-t border-black/[0.04] dark:border-white/5">
+                    <span className={`font-black text-xs sm:text-sm tracking-tight font-mono ${isDarkBg ? 'text-zinc-50' : 'text-zinc-950'}`}>
+                      ₹{effectivePrice.toFixed(0)}
+                    </span>
+
+                    {qty === 0 ? (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }} 
+                        className="px-2.5 py-1.5 rounded-full text-[10.5px] font-black text-white transition-all duration-150 hover:brightness-110 active:scale-90 shadow-xs flex items-center gap-0.5 cursor-pointer shrink-0"
+                        style={{ backgroundColor: primaryColor || '#E46254' }}
+                      >
+                        <span>ADD</span>
+                        <span className="text-xs font-black leading-none">+</span>
+                      </button>
+                    ) : (
+                      <div className={`flex items-center gap-0.5 p-0.5 rounded-full border shadow-2xs shrink-0 ${isDarkBg ? 'bg-zinc-900/90 border-white/10' : 'bg-white/95 border-black/10'}`}>
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, -1); }} 
+                          className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black active:scale-90 cursor-pointer ${
+                            isDarkBg ? 'text-zinc-200 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-800 bg-zinc-100 hover:bg-zinc-200'
+                          }`}
+                        >
+                          -
+                        </button>
+                        <span className={`w-3.5 text-center font-black text-[11px] tabular-nums ${isDarkBg ? 'text-zinc-100' : 'text-zinc-950'}`}>{qty}</span>
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); }} 
+                          className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-black text-white active:scale-90 cursor-pointer shadow-xs"
+                          style={{ backgroundColor: primaryColor || '#E46254' }}
                         >
                           +
                         </button>
@@ -945,86 +1030,80 @@ export function MenuTemplate({
             );
           }
 
-          const innerLayout = isGrid ? 'flex-col' : 'flex-row';
-          const genericSpanClass = 'col-span-1';
-
+          // 1x1 List Mode With Image: Spacious thumbnail card with natural wrapping title & properly positioned ADD button
           return (
             <div 
               key={item.id} 
               onClick={() => { triggerHaptic(); onSelectItem(itemWithPromo); }} 
-              className={`cursor-pointer w-full flex h-full ${innerLayout} ${genericSpanClass} ${cardStyle !== 'minimal' ? 'rounded-2xl overflow-hidden' : ''} transition-transform active:scale-[0.98] hover:shadow-md ${getCardClasses()}`}
+              className={`group cursor-pointer w-full flex items-center p-3 sm:p-3.5 rounded-2xl overflow-hidden transition-all duration-200 active:scale-[0.99] hover:shadow-md ${getCardClasses()}`}
             >
-              {/* Simple Image */}
-              <div className={`relative ${isGrid ? 'w-full h-28 border-b border-zinc-100' : 'w-[110px] shrink-0'} bg-black/5 flex items-center justify-center overflow-hidden ${getImgClasses()}`}>
+              {/* Food Thumbnail with subtle rounded squircle */}
+              <div className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden shrink-0 bg-stone-100 dark:bg-zinc-900 flex items-center justify-center mr-3.5">
                 {item.badge && (
-                  <div className="absolute top-2 left-2 z-10">
+                  <div className="absolute top-1 left-1 z-10">
                     <DishBadgePill badge={item.badge} mode="glass" />
                   </div>
                 )}
                 {item.img ? (
-                  <img src={item.img} className="w-full h-full object-cover pointer-events-none" />
+                  <img 
+                    src={item.img} 
+                    alt={item.name}
+                    className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-106 pointer-events-none" 
+                  />
                 ) : (
-                  <div className="flex items-center justify-center w-full h-full">
-                    <Utensils size={32} className="text-zinc-300 stroke-[1.5]" />
+                  <div className="flex flex-col items-center justify-center w-full h-full p-1 text-center bg-gradient-to-br from-stone-100 via-stone-50 to-stone-200/80 dark:from-zinc-900 dark:to-zinc-950">
+                    <div className="w-8 h-8 rounded-full border border-black/[0.08] dark:border-white/10 bg-white/60 dark:bg-zinc-800/60 flex items-center justify-center mb-0.5">
+                      <ChefHat size={14} className="text-zinc-600 dark:text-zinc-300" strokeWidth={1.5} />
+                    </div>
                   </div>
                 )}
               </div>
-              
-              {/* Content Area */}
-              <div className="flex-1 p-3.5 flex flex-col justify-between">
-                <div>
-                  <div className={`flex justify-between items-start mb-1 ${isGrid ? 'flex-col gap-1' : ''}`}>
-                    <div className="flex items-start gap-1.5 pr-2">
-                      <div className="mt-1"><VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} /></div>
-                      <div>
-                        {item.badge && !item.img && (
-                          <div className="mb-0.5">
-                            <DishBadgePill badge={item.badge} mode="inline" />
-                          </div>
-                        )}
-                        <h3 className={`font-bold leading-tight ${isGrid ? 'text-[15px]' : 'text-base'}`}>{item.name}</h3>
-                      </div>
-                    </div>
-                    <div className="flex flex-col items-end shrink-0">
-                      <div className="flex items-baseline gap-1.5">
-                        <span className={`font-bold ${isGrid ? 'text-[15px]' : 'text-base'}`}>₹{effectivePrice.toFixed(0)}</span>
-                        {isItemHappyHour && (
-                          <span className="text-[11.5px] text-zinc-400 line-through">₹{item.basePrice.toFixed(0)}</span>
-                        )}
-                      </div>
-                      {isItemHappyHour && (
-                        <span className="text-[9.5px] font-semibold text-rose-600 dark:text-rose-400 tracking-wider uppercase mt-0.5">
-                          Happy Hour
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <p className={`text-[13px] leading-snug mb-3 pr-2 line-clamp-2 ${subTextColor}`}>
-                    {item.desc}
-                  </p>
+
+              {/* Title, Category & Price with Natural Non-Cutoff Wrapping */}
+              <div className="flex-1 min-w-0 pr-2.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <VegSymbol isVeg={item.isVeg ?? (item.category === 'BURGERS' || item.category === 'SNACKS')} />
+                  <span className="text-[9.5px] font-bold tracking-wider uppercase text-zinc-400 dark:text-zinc-500 truncate">
+                    {item.category}
+                  </span>
                 </div>
-                
+                <h3 className={`font-black text-sm sm:text-base tracking-tight leading-snug break-words ${isDarkBg ? 'text-zinc-100' : 'text-zinc-900'} group-hover:text-primary transition-colors`}>
+                  {item.name}
+                </h3>
+                <span className={`font-black text-sm sm:text-base tracking-tight font-mono mt-1 block ${isDarkBg ? 'text-zinc-50' : 'text-zinc-950'}`}>
+                  ₹{effectivePrice.toFixed(0)}
+                </span>
+              </div>
+
+              {/* Action Stepper / ADD Button (Properly Anchored) */}
+              <div className="shrink-0 pl-1">
                 {qty === 0 ? (
                   <button 
-                    onClick={(e) => { e.stopPropagation(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }} 
-                    className={`self-end px-4 py-1.5 text-xs font-bold text-white transition-all hover:opacity-90 active:scale-95 shadow-sm ${radBtnClass}`}
-                    style={{ backgroundColor: primaryColor }}
+                    onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); else onSelectItem(itemWithPromo); }} 
+                    className="px-3.5 py-1.5 rounded-full text-xs font-black text-white transition-all duration-150 hover:brightness-110 active:scale-95 shadow-sm flex items-center gap-1 cursor-pointer shrink-0"
+                    style={{ 
+                      backgroundColor: primaryColor || '#E46254',
+                      boxShadow: `0 2px 10px ${primaryColor || '#E46254'}40`
+                    }}
                   >
-                    Add
+                    <span>ADD</span>
+                    <span className="text-xs font-black leading-none">+</span>
                   </button>
                 ) : (
-                  <div className={`self-end flex items-center gap-1 p-0.5 border shadow-sm ${radBtnClass} ${cardStyle === 'glass' ? 'bg-white/70 backdrop-blur-md' : 'bg-white'}`}>
+                  <div className={`flex items-center gap-1 p-0.5 rounded-full border shadow-2xs shrink-0 ${isDarkBg ? 'bg-zinc-900/90 border-white/10' : 'bg-white/95 border-black/10'}`}>
                     <button 
                       onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, -1); }} 
-                      className="w-7 h-7 rounded-md flex items-center justify-center text-sm font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 active:scale-90 transition-all"
+                      className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-black active:scale-90 cursor-pointer ${
+                        isDarkBg ? 'text-zinc-200 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-800 bg-zinc-100 hover:bg-zinc-200'
+                      }`}
                     >
                       -
                     </button>
-                    <span className="w-5 text-center font-bold text-xs text-gray-900 select-none">{qty}</span>
+                    <span className={`w-5 text-center font-black text-xs select-none tabular-nums ${isDarkBg ? 'text-zinc-100' : 'text-zinc-950'}`}>{qty}</span>
                     <button 
                       onClick={(e) => { e.stopPropagation(); triggerHaptic(); if (onUpdateQuantity) onUpdateQuantity(itemWithPromo, 1); }} 
-                      className="w-7 h-7 rounded-md flex items-center justify-center text-sm font-bold text-white active:scale-90 transition-all"
-                      style={{ backgroundColor: primaryColor }}
+                      className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-black text-white active:scale-90 cursor-pointer shadow-xs"
+                      style={{ backgroundColor: primaryColor || '#E46254' }}
                     >
                       +
                     </button>
@@ -1036,8 +1115,14 @@ export function MenuTemplate({
         })}
       </div>
       {filteredItems.length === 0 && (
-        <div className={`text-center py-12 px-6 bg-white flex flex-col items-center gap-3 ${radClass} ${cardStyle === 'brutalist' ? 'border-4 border-black' : 'border border-gray-100'}`}>
-          <span className="text-gray-400 font-medium text-sm">No items in {activeCategory}</span>
+        <div className={`text-center py-12 px-6 flex flex-col items-center gap-3 ${radClass} ${
+          cardStyle === 'brutalist' 
+            ? 'border-4 border-black bg-white text-black' 
+            : isDarkBg 
+            ? 'bg-zinc-900/90 border border-zinc-800 text-zinc-400' 
+            : 'bg-white border border-gray-100 text-gray-400'
+        }`}>
+          <span className="font-medium text-sm">No items in {activeCategory}</span>
         </div>
       )}
     </div>
@@ -1345,7 +1430,9 @@ export function CartSheet({
   onOpenBill,
   onUpdateQuantity,
   runningGrandTotal = 0,
-  activeRoundsCount = 0
+  runningTableSubtotal = 0,
+  activeRoundsCount = 0,
+  taxSettings
 }: any) {
   const [name, setName] = useState(savedCustomerName || '');
   const [phone, setPhone] = useState(savedCustomerPhone || '');
@@ -1353,6 +1440,7 @@ export function CartSheet({
   const [payMethod, setPayMethod] = useState<'ROOM_CHARGE' | 'UPI' | 'CASH'>('UPI');
   const [inputError, setInputError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [showNoteInput, setShowNoteInput] = useState<boolean>(false);
 
   useEffect(() => {
     if (savedCustomerName) setName(savedCustomerName);
@@ -1394,13 +1482,31 @@ export function CartSheet({
     }, 300);
   };
 
-  // Cart Value Booster
-  const boosterEligible = promotionsConfig?.cartBoosterEnabled && subtotal >= (promotionsConfig?.cartBoosterMinSpend || 1000);
+  // Cart Value Booster: Evaluated across the total dining table spend!
+  const totalTableSpend = (runningTableSubtotal || 0) + subtotal;
+  const boosterMinSpend = promotionsConfig?.cartBoosterMinSpend || 1000;
+  const boosterEligible = promotionsConfig?.cartBoosterEnabled && (totalTableSpend >= boosterMinSpend);
   const boosterDiscount = boosterEligible ? (promotionsConfig?.cartBoosterDiscount || 100) : 0;
 
-  const discountedSubtotal = Math.max(0, subtotal - boosterDiscount);
-  const gstAmount = Number((discountedSubtotal * 0.05).toFixed(2));
-  const total = Number((discountedSubtotal + gstAmount).toFixed(2)); // 5% GST
+  // Calculate bill taxes dynamically using the taxSettings configuration
+  const effectiveTaxSettings: TaxSettings = taxSettings || {
+    ...DEFAULT_TAX_SETTINGS,
+    gstType: 'REGULAR',
+    cgstRate: 2.5,
+    sgstRate: 2.5,
+    pricingType: 'EXCLUSIVE',
+  };
+
+  const cartBillCalc = calculateBillTaxes({
+    subtotal,
+    isDineIn: true,
+    settings: effectiveTaxSettings,
+  });
+
+  const isComposition = cartBillCalc.isComposition;
+  const isInclusive = cartBillCalc.isInclusive;
+  const gstAmount = cartBillCalc.totalGst;
+  const total = cartBillCalc.grandTotal;
 
   const radSheetClass = cardStyle === 'brutalist' ? 'rounded-none' : radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-t-[3rem]' : 'rounded-t-3xl';
   const radBtnClass = cardStyle === 'brutalist' ? 'rounded-none' : radius === 'sharp' ? 'rounded-none' : radius === 'pill' ? 'rounded-full' : 'rounded-2xl';
@@ -1458,14 +1564,13 @@ export function CartSheet({
         
         {/* HEADER */}
         <div className={`p-4 px-5 flex justify-between items-center ${cardStyle === 'brutalist' ? 'border-b-4 border-black' : 'border-b border-gray-100'}`}>
-          <div>
-            <h2 className={`font-extrabold text-lg ${cardStyle === 'brutalist' ? 'uppercase tracking-tighter' : 'tracking-tight'}`}>
-              {hasActiveSession ? `Round #${roundNumber} Cart (${cart.length})` : `Your Cart (${cart.length})`}
+          <div className="flex items-center gap-2.5">
+            <h2 className={`font-extrabold text-lg ${cardStyle === 'brutalist' ? 'uppercase tracking-tighter' : 'tracking-tight text-zinc-900'}`}>
+              Your Order
             </h2>
-            <p className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1.5 mt-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              {hasActiveSession ? 'Fires directly to kitchen · Added to live tab' : 'Dine First • Pay at the End'}
-            </p>
+            <span className="text-xs font-bold text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2.5 py-0.5 rounded-full tabular-nums">
+              {cart.length} {cart.length === 1 ? 'item' : 'items'}
+            </span>
           </div>
           <button 
             onClick={handleClose} 
@@ -1478,39 +1583,6 @@ export function CartSheet({
         {/* SCROLLABLE BODY */}
         <div className={`p-5 overflow-y-auto custom-scrollbar flex-1 space-y-4 ${cardStyle === 'brutalist' ? 'font-mono' : ''}`}>
           
-          {hasActiveSession && activeRoundsCount > 0 && (
-            <div className="p-3.5 bg-zinc-900 text-white rounded-2xl flex items-center justify-between shadow-xs border border-white/10">
-              <div className="flex items-center gap-2.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                <div>
-                  <p className="text-[10px] font-bold text-zinc-300 uppercase tracking-wider">
-                    Running Table Tab
-                  </p>
-                  <p className="text-[12px] font-extrabold text-white">
-                    {activeRoundsCount} Round{activeRoundsCount > 1 ? 's' : ''} Already Placed
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[13px] font-black tabular-nums text-emerald-400">
-                  ₹{runningGrandTotal.toFixed(0)}
-                </span>
-                {onOpenBill && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose();
-                      onOpenBill();
-                    }}
-                    className="px-2.5 py-1 text-[11px] font-bold bg-white/15 hover:bg-white/25 text-white rounded-xl transition-all cursor-pointer border border-white/15"
-                  >
-                    View Bill
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
           {cart.length === 0 ? (
             <div className="py-12 flex flex-col items-center justify-center text-center">
               <div className="w-12 h-12 rounded-full bg-gray-100 text-gray-400 flex items-center justify-center mb-3">
@@ -1526,14 +1598,14 @@ export function CartSheet({
                 {groupedCart.map((g, idx) => (
                   <div 
                     key={g.item?.id ? `${g.item.id}_${idx}` : idx} 
-                    className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${
+                    className={`flex items-center justify-between p-3.5 rounded-2xl border transition-all ${
                       cardStyle === 'brutalist' 
                         ? 'bg-white border-2 border-black rounded-none shadow-[2px_2px_0_0_#000]' 
-                        : 'bg-zinc-50/80 border-zinc-200/70 shadow-xs'
+                        : 'bg-zinc-50/70 border-zinc-200/60 shadow-xs'
                     }`}
                   >
                     <div className="flex-1 pr-3 min-w-0">
-                      <h4 className={`text-[13.5px] truncate leading-tight ${cardStyle === 'brutalist' ? 'font-black uppercase' : 'font-bold text-zinc-900'}`}>
+                      <h4 className={`text-[13.5px] font-bold tracking-tight leading-snug break-words ${cardStyle === 'brutalist' ? 'uppercase font-black' : 'text-zinc-900'}`}>
                         {g.item?.name}
                       </h4>
                       {g.notes && (
@@ -1541,12 +1613,9 @@ export function CartSheet({
                           {g.notes}
                         </p>
                       )}
-                      <span className="text-[11px] font-semibold text-zinc-400 tabular-nums">
-                        ₹{g.unitPrice.toFixed(0)} each
-                      </span>
                     </div>
                     
-                    <div className="flex items-center gap-2.5 shrink-0">
+                    <div className="flex items-center gap-3 shrink-0">
                       {onUpdateQuantity && (
                         <div className={`flex items-center gap-1 p-0.5 border ${
                           cardStyle === 'brutalist' 
@@ -1581,13 +1650,13 @@ export function CartSheet({
                                 ? 'bg-yellow-400 text-black border border-black'
                                 : 'rounded-lg text-white shadow-xs'
                             }`}
-                            style={cardStyle !== 'brutalist' ? { backgroundColor: primaryColor } : {}}
+                            style={cardStyle !== 'brutalist' ? { backgroundColor: primaryColor || '#E46254' } : {}}
                           >
                             +
                           </button>
                         </div>
                       )}
-                      <span className={`text-[13.5px] tabular-nums min-w-[50px] text-right ${cardStyle === 'brutalist' ? 'font-black text-black' : 'font-black text-zinc-900'}`}>
+                      <span className={`text-[14px] font-black tabular-nums font-mono min-w-[50px] text-right ${cardStyle === 'brutalist' ? 'text-black' : 'text-zinc-900'}`}>
                         ₹{g.totalPrice.toFixed(0)}
                       </span>
                     </div>
@@ -1595,20 +1664,60 @@ export function CartSheet({
                 ))}
               </div>
 
-              {/* DINE FIRST, PAY AT THE END ASSURANCE BADGE */}
-              <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200/80 flex items-center gap-3 text-emerald-950 text-xs">
-                <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+              {/* DINE FIRST, PAY LATER LUXURY BADGE */}
+              <div className="p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border border-amber-500/20 flex items-center gap-3 text-zinc-900">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/15 text-amber-700 dark:text-amber-400 flex items-center justify-center shrink-0">
                   <Sparkles size={16} />
                 </div>
                 <div className="min-w-0">
-                  <p className="font-bold text-[12px] text-emerald-900">Dine First • Pay at the End</p>
-                  <p className="text-[11px] text-emerald-700 font-medium leading-snug">
-                    {hasActiveSession 
-                      ? `Round #${roundNumber} is fired straight to the chef. All rounds combine into your final table bill.` 
-                      : 'Your dishes fire directly to the kitchen. Settle your final table bill whenever you finish dining.'}
+                  <p className="font-bold text-[12px] text-amber-950 dark:text-amber-300">Dine in first, pay later</p>
+                  <p className="text-[11px] text-zinc-500 font-medium leading-snug">
+                    Dishes fire directly to the kitchen. Settle your table bill whenever you finish dining.
                   </p>
                 </div>
               </div>
+
+              {/* CART PRIVILEGE (HIGHLIGHTED LUXURY VIP CARD) */}
+              {promotionsConfig?.cartBoosterEnabled && (
+                <div className="p-4 rounded-2xl bg-gradient-to-br from-zinc-950 via-zinc-900 to-zinc-950 text-white shadow-md border border-white/10 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-amber-400/10 rounded-full blur-2xl pointer-events-none" />
+                  
+                  {boosterEligible ? (
+                    <div className="flex items-center justify-between text-xs relative z-10">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-full bg-amber-400/20 text-amber-300 flex items-center justify-center shrink-0">
+                          <Check size={14} strokeWidth={3} />
+                        </div>
+                        <div>
+                          <span className="block font-black text-sm text-amber-300 tracking-tight">VIP Privilege Unlocked!</span>
+                          <span className="text-[11px] text-zinc-300 font-medium">Flat ₹{promotionsConfig.cartBoosterDiscount || 100} privilege applied to final table bill</span>
+                        </div>
+                      </div>
+                      <span className="text-xs font-black uppercase tracking-wider text-amber-300 bg-amber-400/15 border border-amber-400/30 px-2.5 py-1 rounded-full font-mono shrink-0">
+                        -₹{promotionsConfig.cartBoosterDiscount || 100}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="relative z-10 space-y-2.5">
+                      <div className="flex justify-between items-center text-xs">
+                        <span className="font-bold tracking-tight text-amber-300 flex items-center gap-1.5">
+                          <Sparkles size={13} className="text-amber-400" />
+                          <span>Cart Privilege</span>
+                        </span>
+                        <span className="font-mono text-zinc-300 text-[11px]">
+                          Add <span className="font-bold text-amber-300 font-mono">₹{Math.max(0, boosterMinSpend - totalTableSpend).toFixed(0)}</span> more for <span className="font-bold text-white font-mono">Flat ₹{promotionsConfig.cartBoosterDiscount || 100} OFF</span>
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-white/15 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-gradient-to-r from-amber-400 to-amber-300 rounded-full transition-all duration-300 shadow-[0_0_10px_rgba(251,191,36,0.5)]"
+                          style={{ width: `${Math.min(100, (totalTableSpend / boosterMinSpend) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* GUEST INFO (ROUND 1 IF NOT ALREADY SAVED) */}
               {!hasActiveSession && (!savedCustomerName || !savedCustomerPhone) && (
@@ -1644,75 +1753,41 @@ export function CartSheet({
                 </div>
               )}
 
-              {/* SPECIAL COOKING INSTRUCTIONS */}
+              {/* COLLAPSIBLE SPECIAL COOKING INSTRUCTIONS */}
               <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-                  <ChefHat size={13} className="text-zinc-600" />
-                  <span>Cooking Instructions for Chef (Optional)</span>
-                </label>
-                <textarea 
-                  value={note} 
-                  onChange={e => setNote(e.target.value)} 
-                  placeholder="e.g. Serve hot, extra spicy, less salt, less ice in drinks..." 
-                  className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-medium resize-none h-16 text-xs" 
-                />
-              </div>
-
-              {/* CART BOOSTER PRIVILEGE */}
-              {promotionsConfig?.cartBoosterEnabled && (
-                <div className="p-3 bg-zinc-50 border border-zinc-200/80 rounded-2xl">
-                  {boosterEligible ? (
-                    <div className="flex items-center justify-between text-xs font-semibold text-zinc-900">
-                      <div className="flex items-center gap-1.5">
-                        <Check size={14} className="text-emerald-600 shrink-0" />
-                        <span>Flat ₹{promotionsConfig.cartBoosterDiscount || 100} Privilege Applied</span>
-                      </div>
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
-                        -₹{promotionsConfig.cartBoosterDiscount || 100}
-                      </span>
+                {!showNoteInput && !note ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowNoteInput(true)}
+                    className="text-xs font-bold text-zinc-500 hover:text-zinc-900 flex items-center gap-1.5 transition-colors cursor-pointer py-1"
+                  >
+                    <MessageSquarePlus size={14} className="text-zinc-400" />
+                    <span>+ Add cooking instructions for Chef</span>
+                  </button>
+                ) : (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+                        <ChefHat size={13} className="text-zinc-600" />
+                        <span>Cooking Instructions (Optional)</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => { setShowNoteInput(false); setNote(''); }}
+                        className="text-[11px] font-semibold text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
                     </div>
-                  ) : (
-                    <div>
-                      <div className="flex justify-between items-center text-xs font-medium text-zinc-600 mb-1.5">
-                        <span>Cart Privilege</span>
-                        <span className="font-semibold text-zinc-900">
-                          Add ₹{((promotionsConfig.cartBoosterMinSpend || 1000) - subtotal).toFixed(0)} more for Flat ₹{promotionsConfig.cartBoosterDiscount || 100} OFF
-                        </span>
-                      </div>
-                      <div className="w-full h-1.5 bg-zinc-200 rounded-full overflow-hidden">
-                        <div 
-                          className="h-full bg-zinc-900 rounded-full transition-all duration-300"
-                          style={{ width: `${Math.min(100, (subtotal / (promotionsConfig.cartBoosterMinSpend || 1000)) * 100)}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* BILL SUMMARY */}
-              <div className="pt-2 space-y-1.5 text-xs font-medium">
-                <div className="flex justify-between text-gray-500">
-                  <span>Round Subtotal</span>
-                  <span className="font-mono">₹{subtotal.toFixed(2)}</span>
-                </div>
-
-                {boosterDiscount > 0 && (
-                  <div className="flex justify-between text-emerald-700 font-semibold">
-                    <span>Cart Value Booster</span>
-                    <span className="font-mono">-₹{boosterDiscount.toFixed(2)}</span>
+                    <textarea 
+                      value={note} 
+                      onChange={e => setNote(e.target.value)} 
+                      placeholder="e.g. Extra spicy, less salt, serve hot..." 
+                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-gray-400 text-gray-900 font-medium resize-none h-16 text-xs" 
+                      autoFocus={showNoteInput && !note}
+                    />
                   </div>
                 )}
-
-                <div className="flex justify-between text-gray-500">
-                  <span>GST (5%)</span>
-                  <span className="font-mono">₹{gstAmount.toFixed(2)}</span>
-                </div>
-
-                <div className="flex justify-between text-sm font-extrabold pt-2 border-t border-gray-100 text-gray-900">
-                  <span>Round Total</span>
-                  <span className="font-mono">₹{total.toFixed(2)}</span>
-                </div>
               </div>
             </>
           )}
@@ -1731,13 +1806,13 @@ export function CartSheet({
               {isSubmitting ? (
                 <div className="flex items-center justify-center gap-2 w-full">
                   <Loader2 size={18} className="animate-spin" />
-                  <span>Firing to Kitchen...</span>
+                  <span>Sending to Kitchen...</span>
                 </div>
               ) : (
                 <>
                   <span className="flex items-center gap-2">
                     <Flame size={18} className="text-amber-300" />
-                    <span>{hasActiveSession ? `Fire Round #${roundNumber} to Kitchen` : 'Fire to Kitchen'}</span>
+                    <span>{hasActiveSession ? 'Add to Table Order' : 'Confirm & Place Order'}</span>
                   </span>
                   <span className="font-mono text-base font-extrabold">₹{total.toFixed(2)}</span>
                 </>

@@ -8,6 +8,7 @@ import {
   Minus, Plus, GlassWater, Smartphone, AlertOctagon, Octagon, Flame, ShieldAlert
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { printThermalChit } from "@/lib/thermalPrinterBridge";
 import {
   playNewOrderChime,
   playFoodReadyBell,
@@ -211,7 +212,29 @@ function KotModal({
         {/* Actions */}
         <div className="px-5 pb-4 pt-2 border-t border-zinc-100 flex gap-2">
           <button
-            onClick={() => window.print()}
+            type="button"
+            onClick={() => {
+              const kotItems: Array<{ name: string; quantity: number; notes?: string }> = [];
+              grouped.forEach(g => {
+                kotItems.push({
+                  name: g.item?.name || 'Item',
+                  quantity: g.count,
+                  notes: g.notes
+                });
+              });
+              printThermalChit({
+                type: 'KOT',
+                tableName: session.table_no,
+                orderType: 'DINE_IN',
+                orderNumber: roundIndex + 1,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                items: kotItems
+              }, {
+                fallbackCallback: () => {
+                  setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+                }
+              });
+            }}
             className="px-3 py-2 rounded-xl border border-zinc-200 text-zinc-600 hover:bg-zinc-50 text-[12px] font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <Printer size={13} /> Print
@@ -850,7 +873,37 @@ function BillModal({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => window.print()}
+                    onClick={() => {
+                      const billItems: Array<{ name: string; quantity: number; price: number; total: number }> = [];
+                      session.rounds.forEach(r => {
+                        const grouped = getGroupedItems(r.items_json);
+                        grouped.forEach(it => {
+                          const unitPrice = it.price || it.item?.basePrice || 0;
+                          billItems.push({
+                            name: it.item?.name || 'Item',
+                            quantity: it.count || 1,
+                            price: unitPrice,
+                            total: unitPrice * (it.count || 1)
+                          });
+                        });
+                      });
+                      printThermalChit({
+                        type: 'BILL',
+                        tableName: session.table_no,
+                        orderType: 'DINE_IN',
+                        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        items: billItems,
+                        subtotal,
+                        discount: computedDiscount > 0 ? computedDiscount : undefined,
+                        totalGst: gst,
+                        grandTotal: finalGrandTotal,
+                        footerMessage: 'Thank you! Visit again.'
+                      }, {
+                        fallbackCallback: () => {
+                          setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+                        }
+                      });
+                    }}
                     className="px-3.5 py-2.5 rounded-2xl border border-zinc-200 text-zinc-600 hover:bg-zinc-50 text-[12.5px] font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                   >
                     <Printer size={14} /> Print

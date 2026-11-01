@@ -25,6 +25,7 @@ import {
 import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
 import { groupOrdersIntoSessions } from "@/utils/orderSession";
+import { printThermalChit } from "@/lib/thermalPrinterBridge";
 
 /* ─── Interfaces ─────────────────────────────────────────── */
 interface OrderItem {
@@ -150,16 +151,26 @@ export default function InvoicesPage() {
   /* ─── Fetch Initial Data ───────────────────────────────── */
   const fetchData = async () => {
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      let activeUser: any = null;
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        activeUser = sessionData?.session?.user;
+      } catch {}
 
-      if (!user) {
+      if (!activeUser && typeof navigator !== "undefined" && navigator.onLine) {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          activeUser = user;
+        } catch {}
+      }
+
+      const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
+      if (!activeUser && !isOffline) {
         router.push("/login");
         return;
       }
 
-      const restId = user.user_metadata?.restaurant_id;
+      const restId = activeUser?.user_metadata?.restaurant_id || (typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") : null);
 
       if (restId) {
         const { data: restData } = await supabase.from("restaurants").select("*").eq("id", restId).maybeSingle();
@@ -447,9 +458,34 @@ export default function InvoicesPage() {
   /* ─── 1-Tap Row Instant Thermal Print ───────────────────── */
   const handleDirectPrint = (inv: Invoice) => {
     setSelectedInvoice(inv);
-    setTimeout(() => {
-      window.print();
-    }, 150);
+    
+    const items: Array<{ name: string; quantity: number; price: number; total: number }> = (inv.items || []).map((it) => ({
+      name: it.name,
+      quantity: it.count,
+      price: it.unitPrice,
+      total: it.totalPrice,
+    }));
+
+    printThermalChit({
+      type: 'BILL',
+      tableName: inv.tableNo,
+      orderType: 'DINE_IN',
+      timestamp: new Date(inv.settledAt || inv.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      items,
+      subtotal: inv.subtotal,
+      cgst: inv.cgst,
+      sgst: inv.sgst,
+      totalGst: (inv.cgst || 0) + (inv.sgst || 0),
+      grandTotal: inv.grandTotal,
+      paymentMode: inv.paymentMethod,
+      footerMessage: 'Thank you! Visit again.'
+    }, {
+      fallbackCallback: () => {
+        setTimeout(() => {
+          if (typeof window !== 'undefined') window.print();
+        }, 150);
+      }
+    });
   };
 
   /* ─── Manager Payment Switcher (UPI <-> CASH Only) ─────── */
@@ -1159,7 +1195,13 @@ export default function InvoicesPage() {
             {/* Modal Actions Footer */}
             <div className="p-3.5 border-t border-zinc-100 bg-white flex items-center justify-end">
               <button
-                onClick={() => window.print()}
+                onClick={() => {
+                  if (selectedInvoice) {
+                    handleDirectPrint(selectedInvoice);
+                  } else if (typeof window !== 'undefined') {
+                    window.print();
+                  }
+                }}
                 className="w-full py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-black text-white font-semibold text-xs shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
               >
                 <Printer size={14} className="text-[#E46254]" />

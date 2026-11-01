@@ -570,6 +570,23 @@ export default function CaptainAppPage() {
             setTimeout(() => setBellNotice(null), 10000);
           }
         })
+        .on('broadcast', { event: 'call_waiter' }, ({ payload }: any) => {
+          if (payload?.tableNo) {
+            const msg = `🔔 Table ${payload.tableNo}: Guest called for waiter assistance!`;
+            setBellNotice(msg);
+            setActiveIncomingAlert({
+              id: `waiter_${payload.tableNo}_${Date.now()}`,
+              type: 'WAITER_CALL',
+              tableName: payload.tableNo,
+              message: `Waiter Called to Table ${payload.tableNo}!`,
+              subtext: `Guest is requesting staff assistance at Table ${payload.tableNo}. Please attend promptly.`,
+              timestamp: new Date()
+            });
+            playFoodReadyBell(soundEnabled);
+            triggerHaptic([300, 100, 300]);
+            setTimeout(() => setBellNotice(null), 8000);
+          }
+        })
         .subscribe();
 
       // Auto-reconnect / sync when screen wakes up from sleep or tab regains focus

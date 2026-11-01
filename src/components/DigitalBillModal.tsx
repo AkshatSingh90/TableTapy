@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import { extractSessionId } from "@/utils/orderSession";
+import { TaxSettings, DEFAULT_TAX_SETTINGS, calculateBillTaxes } from "@/utils/tax";
 
 interface OrderItem {
   item: {
@@ -71,6 +72,7 @@ interface DigitalBillModalProps {
   tableNo: string;
   orders: OrderRound[];
   upiId?: string;
+  taxSettings?: TaxSettings;
   taxRate?: number; // e.g. 5 for 5%
   serviceChargeRate?: number; // e.g. 0 or 5 or 10%
   promotionsConfig?: any;
@@ -92,6 +94,7 @@ export function DigitalBillModal({
   tableNo,
   orders,
   upiId,
+  taxSettings,
   taxRate = 5,
   serviceChargeRate = 0,
   promotionsConfig,
@@ -244,11 +247,43 @@ export function DigitalBillModal({
     return sum + (itemsTotal > 0 ? itemsTotal : Number(o.total) || 0);
   }, 0);
 
+  // Cart Booster / Cart Privilege: APPLIED ON TOTAL TABLE BILL!
+  const boosterEligible = promotionsConfig?.cartBoosterEnabled && (rawSubtotal >= (promotionsConfig?.cartBoosterMinSpend || 1000));
+  const boosterDiscount = boosterEligible ? (promotionsConfig?.cartBoosterDiscount || 100) : 0;
+
   // TableTapy Coins Calculation: Redeemable on ANY order, capped at owner's chosen max cap X
   const loyaltyActive = promotionsConfig?.loyaltyEnabled === true;
   const maxCap = promotionsConfig?.maxCoinsPerOrder ?? 100;
-  const maxCoinsRedeemable = Math.min(userCoinsBalance, maxCap, Math.floor(rawSubtotal));
+  const netSpendBeforeCoins = Math.max(0, rawSubtotal - boosterDiscount);
+  const maxCoinsRedeemable = Math.min(userCoinsBalance, maxCap, Math.floor(netSpendBeforeCoins));
   const coinsDiscount = (redeemCoins && maxCoinsRedeemable > 0) ? (maxCoinsRedeemable * (promotionsConfig?.coinValueInRupees || 1.0)) : 0;
+
+  // Total discounts applied on food subtotal
+  const totalDiscount = boosterDiscount + coinsDiscount;
+
+  // Dynamic GST & Service Charge Calculation via central tax engine
+  const effectiveTaxSettings: TaxSettings = taxSettings || {
+    ...DEFAULT_TAX_SETTINGS,
+    gstType: (taxRate === 0 ? "COMPOSITION" : "REGULAR") as any,
+    cgstRate: (taxRate || 5) / 2,
+    sgstRate: (taxRate || 5) / 2,
+    serviceChargeEnabled: (serviceChargeRate || 0) > 0,
+    serviceChargeRate: serviceChargeRate || 0,
+    pricingType: "EXCLUSIVE",
+  };
+
+  const billTaxCalc = calculateBillTaxes({
+    subtotal: rawSubtotal,
+    discountAmount: totalDiscount,
+    isDineIn: true,
+    settings: effectiveTaxSettings,
+  });
+
+  const calcService = billTaxCalc.serviceChargeAmount;
+  const calcGst = billTaxCalc.totalGst;
+  const calculatedGrandTotal = billTaxCalc.grandTotal;
+  const isComposition = billTaxCalc.isComposition;
+  const isInclusive = billTaxCalc.isInclusive;
 
   // TableTapy Coins Earned on this dining session
   const coinsEarned = (() => {
@@ -258,11 +293,6 @@ export function DigitalBillModal({
     return matched ? (matched.coinsEarned || 0) : 0;
   })();
 
-  const discountedSubtotal = Math.max(0, rawSubtotal - coinsDiscount);
-  const calcService = Number(((discountedSubtotal * (serviceChargeRate || 0)) / 100).toFixed(2));
-  const calcGst = Number((((discountedSubtotal + calcService) * (taxRate ?? 5)) / 100).toFixed(2));
-  const calculatedGrandTotal = Number((discountedSubtotal + calcService + calcGst).toFixed(2));
-
   // Remaining coins after redemption + newly earned coins
   const totalCoinsLeft = Math.max(0, userCoinsBalance - ((redeemCoins && maxCoinsRedeemable > 0) ? maxCoinsRedeemable : 0)) + (loyaltyActive ? coinsEarned : 0);
 
@@ -271,6 +301,7 @@ export function DigitalBillModal({
   const [lastBillSnapshot, setLastBillSnapshot] = useState<{
     subtotal: number;
     coinsDiscount: number;
+    boosterDiscount: number;
     coinsRedeemed: number;
     gstAmount: number;
     serviceChargeAmount: number;
@@ -280,6 +311,10 @@ export function DigitalBillModal({
     totalCoinsLeft: number;
     previousCoins: number;
     phone: string;
+    isComposition: boolean;
+    isInclusive: boolean;
+    cgstAmount: number;
+    sgstAmount: number;
   } | null>(null);
 
   useEffect(() => {
@@ -287,6 +322,7 @@ export function DigitalBillModal({
       setLastBillSnapshot({
         subtotal: rawSubtotal,
         coinsDiscount,
+        boosterDiscount,
         coinsRedeemed: (redeemCoins && maxCoinsRedeemable > 0) ? maxCoinsRedeemable : 0,
         gstAmount: calcGst,
         serviceChargeAmount: calcService,
@@ -295,10 +331,14 @@ export function DigitalBillModal({
         coinsEarned,
         totalCoinsLeft,
         previousCoins: userCoinsBalance,
-        phone: cleanPhone
+        phone: cleanPhone,
+        isComposition,
+        isInclusive,
+        cgstAmount: billTaxCalc.cgstAmount,
+        sgstAmount: billTaxCalc.sgstAmount
       });
     }
-  }, [orders, serviceChargeRate, taxRate, rawSubtotal, coinsDiscount, calcGst, calcService, calculatedGrandTotal, coinsEarned, totalCoinsLeft, cleanPhone, redeemCoins, maxCoinsRedeemable, userCoinsBalance]);
+  }, [orders, serviceChargeRate, taxRate, rawSubtotal, coinsDiscount, boosterDiscount, calcGst, calcService, calculatedGrandTotal, coinsEarned, totalCoinsLeft, cleanPhone, redeemCoins, maxCoinsRedeemable, userCoinsBalance, isComposition, isInclusive]);
 
   const lastBillSnapshotRef = useRef<any>(null);
   useEffect(() => {
@@ -345,6 +385,12 @@ export function DigitalBillModal({
       discount: finalDiscount,
       taxAmount: finalGst,
       serviceChargeAmount: finalService,
+      cgstAmount: snap ? snap.cgstAmount : billTaxCalc.cgstAmount,
+      sgstAmount: snap ? snap.sgstAmount : billTaxCalc.sgstAmount,
+      effectiveCgstRate: billTaxCalc.effectiveCgstRate,
+      effectiveSgstRate: billTaxCalc.effectiveSgstRate,
+      isComposition: snap ? snap.isComposition : isComposition,
+      isInclusive: snap ? snap.isInclusive : isInclusive,
       earnedCoins: finalEarnedCoins,
       totalCoins: isThisDevicePayer ? finalTotalCoins : userCoinsBalance,
       previousCoins: finalPreviousCoins,
@@ -431,6 +477,7 @@ export function DigitalBillModal({
   // Use cached values ONLY if active orders cleared upon cashier settlement
   const isSettledAndCleared = orders.length === 0 && lastBillSnapshot !== null;
   const subtotal = isSettledAndCleared ? lastBillSnapshot.subtotal : rawSubtotal;
+  const activeBoosterDiscount = isSettledAndCleared ? (lastBillSnapshot.boosterDiscount || 0) : boosterDiscount;
   const activeCoinsDiscount = isSettledAndCleared ? lastBillSnapshot.coinsDiscount : coinsDiscount;
   const activeCoinsEarned = isSettledAndCleared ? lastBillSnapshot.coinsEarned : coinsEarned;
   const activeCoinsLeft = isSettledAndCleared ? lastBillSnapshot.totalCoinsLeft : totalCoinsLeft;
@@ -837,10 +884,10 @@ export function DigitalBillModal({
           {/* VIEW: RUNNING BILL BREAKDOWN */}
           {view === 'BILL' && (
             <>
-              {/* Order Rounds List */}
+              {/* Orders Placed List */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-400 uppercase tracking-wider px-0.5">
-                  <span>Order Rounds ({orders.length})</span>
+                  <span>Orders Placed ({orders.length})</span>
                   <span>Kitchen Status</span>
                 </div>
 
@@ -851,11 +898,11 @@ export function DigitalBillModal({
                       key={order.id} 
                       className="p-3.5 rounded-2xl border border-zinc-200/80 bg-zinc-50/50 space-y-2.5"
                     >
-                      {/* Round Header */}
+                      {/* Order Header */}
                       <div className="flex items-center justify-between pb-2 border-b border-zinc-200/60">
                         <div className="flex items-center gap-1.5">
                           <span className="text-[12.5px] font-semibold text-zinc-900">
-                            Round #{orderIdx + 1}
+                            Order #{orderIdx + 1}
                           </span>
                           <span className="text-[11px] text-zinc-400 tabular-nums">
                             • {new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -949,26 +996,54 @@ export function DigitalBillModal({
                   <span className="tabular-nums font-medium text-zinc-800">{formatCurrency(subtotal)}</span>
                 </div>
 
-                {coinsDiscount > 0 && (
+                {/* Cart Privilege Applied on Total Bill */}
+                {activeBoosterDiscount > 0 && (
+                  <div className="flex justify-between items-center text-emerald-700 font-bold bg-emerald-50/80 px-2.5 py-1.5 rounded-xl border border-emerald-200/70">
+                    <span className="flex items-center gap-1.5 text-xs">
+                      <Sparkles size={13} className="text-emerald-600 shrink-0" />
+                      <span>Cart Privilege (Spend ₹{promotionsConfig?.cartBoosterMinSpend || 1000}+)</span>
+                    </span>
+                    <span className="tabular-nums font-mono">-₹{activeBoosterDiscount.toFixed(2)}</span>
+                  </div>
+                )}
+
+                {activeCoinsDiscount > 0 && (
                   <div className="flex justify-between text-emerald-700 font-bold">
                     <span>TableTapy Coins Redeemed ({maxCoinsRedeemable} coins)</span>
-                    <span className="tabular-nums">-₹{coinsDiscount.toFixed(2)}</span>
+                    <span className="tabular-nums">-₹{activeCoinsDiscount.toFixed(2)}</span>
                   </div>
                 )}
 
                 {serviceChargeAmount > 0 && (
                   <div className="flex justify-between text-zinc-500">
-                    <span>Service Charge ({serviceChargeRate}%)</span>
+                    <span>Dine-In Service Charge ({effectiveTaxSettings.serviceChargeRate}%)</span>
                     <span className="tabular-nums font-medium text-zinc-800">{formatCurrency(serviceChargeAmount)}</span>
                   </div>
                 )}
 
-                <div className="flex justify-between text-zinc-500">
-                  <span className="flex items-center gap-1">
-                    GST / Taxes ({taxRate}%)
-                  </span>
-                  <span className="tabular-nums font-medium text-zinc-800">{formatCurrency(gstAmount)}</span>
-                </div>
+                {/* GST Details dynamically formatted according to GST Scheme */}
+                {isComposition ? (
+                  <div className="flex justify-between items-center text-[12px] bg-zinc-50 px-2.5 py-1.5 rounded-xl border border-zinc-200/70 text-zinc-600 font-medium">
+                    <span>Composition Scheme</span>
+                    <span className="text-[11px] font-semibold text-zinc-500">No GST Charged</span>
+                  </div>
+                ) : isInclusive ? (
+                  <div className="flex justify-between items-center text-[12px] bg-zinc-50 px-2.5 py-1.5 rounded-xl border border-zinc-200/70 text-zinc-600 font-medium">
+                    <span>Prices Include GST ({effectiveTaxSettings.cgstRate + effectiveTaxSettings.sgstRate}%)</span>
+                    <span className="tabular-nums text-zinc-500 font-semibold">{formatCurrency(gstAmount)} included</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex justify-between text-zinc-500">
+                      <span>CGST ({billTaxCalc.effectiveCgstRate}%)</span>
+                      <span className="tabular-nums font-medium text-zinc-800">{formatCurrency(isSettledAndCleared ? (lastBillSnapshot?.cgstAmount || 0) : billTaxCalc.cgstAmount)}</span>
+                    </div>
+                    <div className="flex justify-between text-zinc-500">
+                      <span>SGST ({billTaxCalc.effectiveSgstRate}%)</span>
+                      <span className="tabular-nums font-medium text-zinc-800">{formatCurrency(isSettledAndCleared ? (lastBillSnapshot?.sgstAmount || 0) : billTaxCalc.sgstAmount)}</span>
+                    </div>
+                  </>
+                )}
 
                 <div className="flex justify-between items-baseline pt-2 border-t border-zinc-200/80 text-[16px] font-bold text-zinc-900">
                   <span>Grand Total</span>

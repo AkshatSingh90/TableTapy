@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { 
   Receipt, 
   CreditCard, 
@@ -20,6 +20,7 @@ import {
   CheckCircle2
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { 
   TaxSettings, 
   DEFAULT_TAX_SETTINGS, 
@@ -59,33 +60,63 @@ export default function SettingsPage() {
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const isLoadedRef = useRef(false);
 
   useEffect(() => {
+    if (isLoadedRef.current) return;
+
     async function loadSettings() {
       try {
         const { data: { user } } = await supabase.auth.getUser();
-        const restId = user?.user_metadata?.restaurant_id;
+        let restId = user?.user_metadata?.restaurant_id;
+
+        if (!restId && typeof window !== "undefined") {
+          restId = localStorage.getItem("tabletapy_restaurant_id") || undefined;
+        }
+
+        if (!restId && user?.id) {
+          restId = user.id;
+        }
 
         if (restId) {
           setRestaurantId(restId);
+          if (typeof window !== "undefined") {
+            localStorage.setItem("tabletapy_restaurant_id", restId);
+          }
           const { data: rest } = await supabase.from('restaurants').select('*').eq('id', restId).single();
           if (rest) {
             if (rest.name) setRestaurantName(rest.name);
             if (rest.slug) setRestaurantSlug(rest.slug);
             if (rest.primary_color) setPrimaryColor(rest.primary_color);
-            if (rest.upi_id || rest.upi_vpa) setUpiId(rest.upi_id || rest.upi_vpa);
             if (rest.phone) setPhone(rest.phone);
 
             // Populate settings from Supabase if present
             if (rest.bg_image) {
+              let hasCloudTax = false;
+              let parsedBg: any = null;
+              try {
+                parsedBg = typeof rest.bg_image === 'string' ? JSON.parse(rest.bg_image) : rest.bg_image;
+                if (parsedBg && (parsedBg.taxSettings || parsedBg.gstType)) {
+                  hasCloudTax = true;
+                }
+                if (parsedBg?.upiId) {
+                  setUpiId(parsedBg.upiId);
+                } else if (parsedBg?.taxSettings?.upiId) {
+                  setUpiId(parsedBg.taxSettings.upiId);
+                }
+              } catch {}
+
               const cloudConfig = parseConfigFromRestaurant(rest);
-              setTaxSettings(cloudConfig.taxSettings);
-              setQrOrderMode(cloudConfig.qrOrderMode);
-              setBillingMode(cloudConfig.billingMode);
-              setPaperWidth(cloudConfig.paperWidth);
-              setPrintCopies(cloudConfig.printCopies);
-              setAutoPrintOnSettle(cloudConfig.autoPrintOnSettle);
-              return;
+              if (hasCloudTax) {
+                setTaxSettings(cloudConfig.taxSettings);
+                setQrOrderMode(cloudConfig.qrOrderMode);
+                setBillingMode(cloudConfig.billingMode);
+                setPaperWidth(cloudConfig.paperWidth);
+                setPrintCopies(cloudConfig.printCopies);
+                setAutoPrintOnSettle(cloudConfig.autoPrintOnSettle);
+                isLoadedRef.current = true;
+                return;
+              }
             }
           }
 
@@ -97,6 +128,7 @@ export default function SettingsPage() {
           setPaperWidth(localConfig.paperWidth);
           setPrintCopies(localConfig.printCopies);
           setAutoPrintOnSettle(localConfig.autoPrintOnSettle);
+          isLoadedRef.current = true;
         } else {
           const genericConfig = getStoredRestaurantConfig();
           setTaxSettings(genericConfig.taxSettings);
@@ -105,6 +137,7 @@ export default function SettingsPage() {
           setPaperWidth(genericConfig.paperWidth);
           setPrintCopies(genericConfig.printCopies);
           setAutoPrintOnSettle(genericConfig.autoPrintOnSettle);
+          isLoadedRef.current = true;
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
@@ -112,44 +145,114 @@ export default function SettingsPage() {
     }
 
     loadSettings();
-  }, [supabase]);
+  }, []);
 
   const handleSave = async () => {
     setSaving(true);
     try {
       const fullConfig: RestaurantConfig = {
-        taxSettings,
+        taxSettings: {
+          ...taxSettings,
+          upiId: upiId || taxSettings.upiId || ''
+        },
         qrOrderMode,
         billingMode,
         paperWidth,
         printCopies,
         autoPrintOnSettle,
+        upiId: upiId || taxSettings.upiId || ''
       };
 
-      // 1. Save full config to localStorage & cross-tab sync
-      saveRestaurantConfig(fullConfig, restaurantId);
+      // 1. Resolve restaurant id reliably
+      let targetRestId = restaurantId;
+      if (!targetRestId && typeof window !== "undefined") {
+        targetRestId = localStorage.getItem("tabletapy_restaurant_id") || '';
+      }
+      if (!targetRestId && restaurantId) {
+        targetRestId = restaurantId;
+      }
 
-      // 2. Update Supabase Restaurant Record (synced across all devices in real-time)
-      if (restaurantId) {
+      if (targetRestId && typeof window !== "undefined") {
+        localStorage.setItem("tabletapy_restaurant_id", targetRestId);
+      }
+
+      // 2. Save full config to localStorage & cross-tab sync
+      saveRestaurantConfig(fullConfig, targetRestId || undefined);
+
+      // 3. Update Supabase Restaurant Record (synced across all devices in real-time)
+      if (targetRestId) {
+        let existingCfg: any = {};
+        try {
+          const { data: r } = await supabase.from('restaurants').select('bg_image').eq('id', targetRestId).maybeSingle();
+          if (r?.bg_image) {
+            existingCfg = typeof r.bg_image === 'string' ? JSON.parse(r.bg_image) : r.bg_image;
+          }
+        } catch (fetchErr) {
+          console.warn("Could not fetch existing bg_image:", fetchErr);
+        }
+
+        const mergedBgImage = JSON.stringify({
+          ...existingCfg,
+          ...fullConfig,
+          upiId,
+          taxSettings: {
+            ...DEFAULT_TAX_SETTINGS,
+            ...taxSettings,
+            upiId: upiId || taxSettings.upiId || ''
+          }
+        });
+
         const updatePayload: Record<string, any> = {
           name: restaurantName,
           slug: restaurantSlug,
           primary_color: primaryColor,
-          upi_id: upiId,
-          bg_image: JSON.stringify(fullConfig)
+          bg_image: mergedBgImage
         };
 
-        try {
-          await supabase.from('restaurants').update(updatePayload).eq('id', restaurantId);
-        } catch (dbErr) {
-          console.warn("Database update partial notice:", dbErr);
+        const { error: updateErr } = await supabase.from('restaurants').update(updatePayload).eq('id', targetRestId);
+        if (updateErr) {
+          console.error("Database update error:", updateErr);
+          throw new Error(updateErr.message);
         }
+
+        // 4. Realtime broadcast instant update to active POS terminals and customer tables
+        try {
+          const chScoped = supabase.channel(`restaurant_config_${targetRestId}`);
+          chScoped.subscribe((status: string) => {
+            if (status === 'SUBSCRIBED') {
+              chScoped.send({
+                type: 'broadcast',
+                event: 'config_updated',
+                payload: { config: fullConfig, restaurantId: targetRestId, timestamp: Date.now() }
+              });
+              setTimeout(() => supabase.removeChannel(chScoped), 2000);
+            }
+          });
+
+          const chGlobal = supabase.channel(`restaurant_config_global`);
+          chGlobal.subscribe((status: string) => {
+            if (status === 'SUBSCRIBED') {
+              chGlobal.send({
+                type: 'broadcast',
+                event: 'config_updated',
+                payload: { config: fullConfig, restaurantId: targetRestId, timestamp: Date.now() }
+              });
+              setTimeout(() => supabase.removeChannel(chGlobal), 2000);
+            }
+          });
+        } catch {}
+      }
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("tabletapy_config_updated", { detail: { config: fullConfig, restaurantId: targetRestId } }));
+        window.dispatchEvent(new Event("storage"));
       }
 
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Save error:", err);
+      alert("Failed to save settings: " + (err.message || "Please check your network."));
     } finally {
       setSaving(false);
     }
@@ -171,22 +274,23 @@ export default function SettingsPage() {
   }, [taxSettings]);
 
   return (
-    <div className="bg-[#FAFAFA] text-zinc-900 font-sans pb-24">
+    <div className="bg-[#FAFAFA] dark:bg-transparent text-zinc-900 dark:text-zinc-100 font-sans pb-24 min-h-screen">
       
       {/* ── STICKY TOP NAVIGATION DOCK (APPLE STYLE) ── */}
-      <header className="sticky top-0 z-30 bg-[#FAFAFA]/90 backdrop-blur-md border-b border-zinc-200/80 px-4 sm:px-8 py-3.5 transition-all">
+      <header className="sticky top-0 z-30 bg-[#FAFAFA]/90 dark:bg-zinc-950/75 backdrop-blur-2xl border-b border-zinc-200/80 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08)] px-4 sm:px-8 py-3.5 transition-all">
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           
           <div>
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-zinc-900">
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-zinc-900 dark:text-white">
               Settings
             </h1>
-            <p className="text-zinc-500 text-xs sm:text-sm mt-0.5">
+            <p className="text-zinc-500 dark:text-zinc-400 text-xs sm:text-sm mt-0.5">
               Taxes, order security, POS hardware, and restaurant branding.
             </p>
           </div>
 
           <div className="flex items-center gap-3 self-end sm:self-auto">
+            <ThemeToggle variant="pill" />
             {saveSuccess && (
               <span className="text-xs font-medium text-emerald-600 flex items-center gap-1.5 animate-in fade-in">
                 <CheckCircle2 size={14} />
@@ -214,14 +318,14 @@ export default function SettingsPage() {
 
         {/* Apple-Style Segmented Tab Pills */}
         <div className="max-w-6xl mx-auto mt-3">
-          <div className="inline-flex p-1 bg-zinc-200/60 rounded-xl overflow-x-auto max-w-full">
+          <div className="inline-flex p-1.5 bg-zinc-200/60 dark:bg-zinc-950/70 border border-transparent dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.12),inset_0_-1px_1px_0_rgba(0,0,0,0.6)] backdrop-blur-2xl rounded-2xl overflow-x-auto max-w-full">
             <button
               type="button"
               onClick={() => setActiveTab('TAXES')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'TAXES'
-                  ? 'bg-white text-[#E46254] shadow-xs'
-                  : 'text-zinc-600 hover:text-zinc-900'
+                  ? 'bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-[#E46254] dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/[0.04]'
               }`}
             >
               <Receipt size={13} strokeWidth={1.75} />
@@ -233,8 +337,8 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('SECURITY')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'SECURITY'
-                  ? 'bg-white text-[#E46254] shadow-xs'
-                  : 'text-zinc-600 hover:text-zinc-900'
+                  ? 'bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-[#E46254] dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/[0.04]'
               }`}
             >
               <ShieldCheck size={13} strokeWidth={1.75} />
@@ -246,8 +350,8 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('HARDWARE')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'HARDWARE'
-                  ? 'bg-white text-[#E46254] shadow-xs'
-                  : 'text-zinc-600 hover:text-zinc-900'
+                  ? 'bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-[#E46254] dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/[0.04]'
               }`}
             >
               <Printer size={13} strokeWidth={1.75} />
@@ -259,8 +363,8 @@ export default function SettingsPage() {
               onClick={() => setActiveTab('BRAND')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
                 activeTab === 'BRAND'
-                  ? 'bg-white text-[#E46254] shadow-xs'
-                  : 'text-zinc-600 hover:text-zinc-900'
+                  ? 'bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-[#E46254] dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/[0.04]'
               }`}
             >
               <Store size={13} strokeWidth={1.75} />
@@ -283,12 +387,12 @@ export default function SettingsPage() {
             <div className="xl:col-span-7 space-y-6">
 
               {/* 1. GST Registration Status */}
-              <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-5">
+              <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] shadow-xs space-y-5">
                 <div>
-                  <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                  <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                     GST Registration Scheme
                   </h2>
-                  <p className="text-zinc-500 text-xs mt-1">
+                  <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-1">
                     Select your cafe or restaurant taxation category under Indian GST law.
                   </p>
                 </div>
@@ -307,14 +411,14 @@ export default function SettingsPage() {
                   >
                     <div>
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-zinc-900">Regular GST (5%)</span>
+                        <span className="text-xs font-bold text-zinc-900 dark:text-white">Regular GST (5%)</span>
                         {taxSettings.gstType === 'REGULAR' && (
                           <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                             <Check size={10} className="text-white" strokeWidth={3} />
                           </div>
                         )}
                       </div>
-                      <p className="text-[11px] text-zinc-500 mt-2 leading-relaxed">
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2 leading-relaxed">
                         2.5% CGST + 2.5% SGST. Standard scheme for independent restaurants and cafes.
                       </p>
                     </div>
@@ -334,14 +438,14 @@ export default function SettingsPage() {
                   >
                     <div>
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-zinc-900">Composition (0%)</span>
+                        <span className="text-xs font-bold text-zinc-900 dark:text-white">Composition (0%)</span>
                         {taxSettings.gstType === 'COMPOSITION' && (
                           <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                             <Check size={10} className="text-white" strokeWidth={3} />
                           </div>
                         )}
                       </div>
-                      <p className="text-[11px] text-zinc-500 mt-2 leading-relaxed">
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2 leading-relaxed">
                         Zero tax collected on guest bills. Issues statutory "Bill of Supply" per GST section 10.
                       </p>
                     </div>
@@ -355,7 +459,7 @@ export default function SettingsPage() {
                 {/* Exclusive vs Inclusive Pricing Mode */}
                 {taxSettings.gstType === 'REGULAR' && (
                   <div className="pt-4 border-t border-zinc-100">
-                    <label className="text-xs font-semibold text-zinc-700 block mb-2">
+                    <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 block mb-2">
                       Menu Price Display Mode
                     </label>
                     <div className="grid grid-cols-2 gap-2 bg-zinc-100 p-1 rounded-xl">
@@ -364,8 +468,8 @@ export default function SettingsPage() {
                         onClick={() => setTaxSettings(prev => ({ ...prev, pricingType: 'EXCLUSIVE' }))}
                         className={`py-2 px-3 rounded-lg text-xs font-medium transition-all cursor-pointer ${
                           taxSettings.pricingType === 'EXCLUSIVE'
-                            ? 'bg-white text-zinc-900 shadow-xs font-semibold'
-                            : 'text-zinc-600 hover:text-zinc-900'
+                            ? 'bg-white text-[#E46254] shadow-xs font-semibold'
+                            : 'text-zinc-600 hover:text-zinc-900 dark:text-white'
                         }`}
                       >
                         Exclusive (Add tax on top)
@@ -375,8 +479,8 @@ export default function SettingsPage() {
                         onClick={() => setTaxSettings(prev => ({ ...prev, pricingType: 'INCLUSIVE' }))}
                         className={`py-2 px-3 rounded-lg text-xs font-medium transition-all cursor-pointer ${
                           taxSettings.pricingType === 'INCLUSIVE'
-                            ? 'bg-white text-zinc-900 shadow-xs font-semibold'
-                            : 'text-zinc-600 hover:text-zinc-900'
+                            ? 'bg-white text-[#E46254] shadow-xs font-semibold'
+                            : 'text-zinc-600 hover:text-zinc-900 dark:text-white'
                         }`}
                       >
                         Inclusive (Tax baked into MRP)
@@ -388,7 +492,7 @@ export default function SettingsPage() {
                 {/* Statutory Identifiers */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-zinc-100">
                   <div>
-                    <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                       GSTIN (15 Digits)
                     </label>
                     <input
@@ -397,12 +501,12 @@ export default function SettingsPage() {
                       placeholder="e.g. 29AAAAA0000A1Z5"
                       value={taxSettings.gstin}
                       onChange={(e) => setTaxSettings(prev => ({ ...prev, gstin: e.target.value.toUpperCase() }))}
-                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all uppercase placeholder:text-zinc-400"
+                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900 transition-all uppercase placeholder:text-zinc-400 dark:text-[#5E5D72]"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                       FSSAI License (14 Digits)
                     </label>
                     <input
@@ -411,20 +515,20 @@ export default function SettingsPage() {
                       placeholder="e.g. 11223344556677"
                       value={taxSettings.fssai}
                       onChange={(e) => setTaxSettings(prev => ({ ...prev, fssai: e.target.value.replace(/\D/g, '') }))}
-                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all placeholder:text-zinc-400"
+                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900 transition-all placeholder:text-zinc-400 dark:text-[#5E5D72]"
                     />
                   </div>
                 </div>
               </section>
 
               {/* 2. Dine-In Service Charge */}
-              <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-4">
+              <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] shadow-xs space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                    <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                       Dine-In Service Charge
                     </h2>
-                    <p className="text-zinc-500 text-xs mt-0.5">
+                    <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-0.5">
                       Optional staff fee strictly applied on Dine-In orders. Never charged on Takeaway.
                     </p>
                   </div>
@@ -433,7 +537,7 @@ export default function SettingsPage() {
                     type="button"
                     onClick={() => setTaxSettings(prev => ({ ...prev, serviceChargeEnabled: !prev.serviceChargeEnabled }))}
                     className={`w-11 h-6 rounded-full transition-colors cursor-pointer relative p-0.5 ${
-                      taxSettings.serviceChargeEnabled ? 'bg-zinc-900' : 'bg-zinc-200'
+                      taxSettings.serviceChargeEnabled ? 'bg-[#E46254]' : 'bg-zinc-200'
                     }`}
                   >
                     <div className={`w-5 h-5 rounded-full bg-white transition-transform ${
@@ -452,8 +556,8 @@ export default function SettingsPage() {
                         onClick={() => setTaxSettings(prev => ({ ...prev, serviceChargeRate: rate }))}
                         className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-all ${
                           taxSettings.serviceChargeRate === rate
-                            ? 'bg-zinc-900 text-white font-semibold'
-                            : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
+                            ? 'bg-[#E46254] text-white font-semibold'
+                            : 'bg-zinc-100 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-200'
                         }`}
                       >
                         {rate}%
@@ -466,22 +570,22 @@ export default function SettingsPage() {
                         max={25}
                         value={taxSettings.serviceChargeRate}
                         onChange={(e) => setTaxSettings(prev => ({ ...prev, serviceChargeRate: Math.max(0, parseFloat(e.target.value) || 0) }))}
-                        className="w-16 px-2.5 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-mono text-zinc-900 outline-none focus:bg-white focus:border-zinc-900"
+                        className="w-16 px-2.5 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-mono text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900"
                       />
-                      <span className="text-xs text-zinc-400 ml-1.5 font-mono">%</span>
+                      <span className="text-xs text-zinc-400 dark:text-[#5E5D72] ml-1.5 font-mono">%</span>
                     </div>
                   </div>
                 )}
               </section>
 
               {/* 3. Alcohol Liquor VAT */}
-              <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-4">
+              <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] shadow-xs space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                    <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                       Alcohol & Liquor State VAT
                     </h2>
-                    <p className="text-zinc-500 text-xs mt-0.5">
+                    <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-0.5">
                       State alcohol tax billed separately from GST if serving beer, cocktails, or spirits.
                     </p>
                   </div>
@@ -490,7 +594,7 @@ export default function SettingsPage() {
                     type="button"
                     onClick={() => setTaxSettings(prev => ({ ...prev, alcoholVatEnabled: !prev.alcoholVatEnabled }))}
                     className={`w-11 h-6 rounded-full transition-colors cursor-pointer relative p-0.5 ${
-                      taxSettings.alcoholVatEnabled ? 'bg-zinc-900' : 'bg-zinc-200'
+                      taxSettings.alcoholVatEnabled ? 'bg-[#E46254]' : 'bg-zinc-200'
                     }`}
                   >
                     <div className={`w-5 h-5 rounded-full bg-white transition-transform ${
@@ -509,8 +613,8 @@ export default function SettingsPage() {
                         onClick={() => setTaxSettings(prev => ({ ...prev, alcoholVatRate: rate }))}
                         className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-all ${
                           taxSettings.alcoholVatRate === rate
-                            ? 'bg-zinc-900 text-white font-semibold'
-                            : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
+                            ? 'bg-[#E46254] text-white font-semibold'
+                            : 'bg-zinc-100 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-200'
                         }`}
                       >
                         {rate}%
@@ -523,28 +627,28 @@ export default function SettingsPage() {
                         max={40}
                         value={taxSettings.alcoholVatRate}
                         onChange={(e) => setTaxSettings(prev => ({ ...prev, alcoholVatRate: Math.max(0, parseFloat(e.target.value) || 0) }))}
-                        className="w-16 px-2.5 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-mono text-zinc-900 outline-none focus:bg-white focus:border-zinc-900"
+                        className="w-16 px-2.5 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-mono text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900"
                       />
-                      <span className="text-xs text-zinc-400 ml-1.5 font-mono">%</span>
+                      <span className="text-xs text-zinc-400 dark:text-[#5E5D72] ml-1.5 font-mono">%</span>
                     </div>
                   </div>
                 )}
               </section>
 
               {/* 4. Thermal Receipt Content */}
-              <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-4">
+              <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] shadow-xs space-y-4">
                 <div>
-                  <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                  <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                     Thermal Chit Header & Footer
                   </h2>
-                  <p className="text-zinc-500 text-xs mt-0.5">
+                  <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-0.5">
                     Printed address, phone number, and closing message on thermal slips.
                   </p>
                 </div>
 
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                       Store Address & Contact (Header)
                     </label>
                     <textarea
@@ -552,12 +656,12 @@ export default function SettingsPage() {
                       placeholder="e.g. 104 Indiranagar 100ft Road, Bengaluru&#10;Ph: +91 98765 43210"
                       value={taxSettings.receiptAddress}
                       onChange={(e) => setTaxSettings(prev => ({ ...prev, receiptAddress: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all placeholder:text-zinc-400"
+                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900 transition-all placeholder:text-zinc-400 dark:text-[#5E5D72]"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                    <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                       Custom Footer Greeting
                     </label>
                     <input
@@ -565,7 +669,7 @@ export default function SettingsPage() {
                       placeholder="e.g. Thank you for dining with us! Tag @yourcafe on Instagram"
                       value={taxSettings.receiptFooter}
                       onChange={(e) => setTaxSettings(prev => ({ ...prev, receiptFooter: e.target.value }))}
-                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all placeholder:text-zinc-400"
+                      className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900 transition-all placeholder:text-zinc-400 dark:text-[#5E5D72]"
                     />
                   </div>
                 </div>
@@ -575,11 +679,11 @@ export default function SettingsPage() {
 
             {/* Right Column (5 cols): Live 80mm Thermal Receipt Preview */}
             <div className="xl:col-span-5 sticky top-28">
-              <div className="bg-[#FFFDF9] border border-zinc-300 rounded-2xl p-6 shadow-sm text-zinc-900 font-mono text-xs relative">
+              <div className="bg-[#FFFDF9] border border-zinc-300 rounded-2xl p-6 shadow-sm text-zinc-900 dark:text-white font-mono text-xs relative">
                 
                 {/* Paper Header Pin */}
                 <div className="text-center pb-3 border-b border-dashed border-zinc-300 space-y-1">
-                  <h3 className="font-bold text-sm tracking-wider uppercase text-zinc-900">
+                  <h3 className="font-bold text-sm tracking-wider uppercase text-zinc-900 dark:text-white">
                     {restaurantName}
                   </h3>
                   {taxSettings.receiptAddress ? (
@@ -587,7 +691,7 @@ export default function SettingsPage() {
                       {taxSettings.receiptAddress}
                     </p>
                   ) : (
-                    <p className="text-[10px] text-zinc-400 italic">Address printed here</p>
+                    <p className="text-[10px] text-zinc-400 dark:text-[#5E5D72] italic">Address printed here</p>
                   )}
 
                   {taxSettings.gstin && (
@@ -652,7 +756,7 @@ export default function SettingsPage() {
                   )}
 
                   {sampleCalc.isComposition ? (
-                    <div className="flex justify-between text-[10px] italic text-zinc-500">
+                    <div className="flex justify-between text-[10px] italic text-zinc-500 dark:text-zinc-400">
                       <span>GST (Composition 0%)</span>
                       <span>₹0.00</span>
                     </div>
@@ -662,7 +766,7 @@ export default function SettingsPage() {
                         <span>GST ({sampleCalc.effectiveCgstRate + sampleCalc.effectiveSgstRate}%)</span>
                         <span className="font-sans font-medium text-zinc-600">Included in Price</span>
                       </div>
-                      <div className="text-[9.5px] text-zinc-500 pl-2">
+                      <div className="text-[9.5px] text-zinc-500 dark:text-zinc-400 pl-2">
                         (CGST {sampleCalc.effectiveCgstRate}%: ₹{sampleCalc.cgstAmount.toFixed(2)} + SGST {sampleCalc.effectiveSgstRate}%: ₹{sampleCalc.sgstAmount.toFixed(2)})
                       </div>
                     </>
@@ -680,14 +784,14 @@ export default function SettingsPage() {
                   )}
 
                   {sampleCalc.alcoholVatAmount > 0 && (
-                    <div className="flex justify-between text-zinc-700">
+                    <div className="flex justify-between text-zinc-700 dark:text-zinc-200">
                       <span>State Alcohol VAT ({taxSettings.alcoholVatRate}%)</span>
                       <span>₹{sampleCalc.alcoholVatAmount.toFixed(2)}</span>
                     </div>
                   )}
 
                   {sampleCalc.roundOff !== 0 && (
-                    <div className="flex justify-between text-[10px] text-zinc-500">
+                    <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
                       <span>Round-off</span>
                       <span>{sampleCalc.roundOff > 0 ? `+₹${sampleCalc.roundOff}` : `-₹${Math.abs(sampleCalc.roundOff)}`}</span>
                     </div>
@@ -706,7 +810,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Paper Tear Serration Visual */}
-                <div className="mt-4 pt-2 border-t border-dotted border-zinc-300 flex justify-center text-[9px] text-zinc-400 font-sans tracking-widest uppercase">
+                <div className="mt-4 pt-2 border-t border-dotted border-zinc-300 flex justify-center text-[9px] text-zinc-400 dark:text-[#5E5D72] font-sans tracking-widest uppercase">
                   80mm Live Thermal Preview
                 </div>
               </div>
@@ -722,12 +826,12 @@ export default function SettingsPage() {
           <div className="max-w-3xl space-y-6">
             
             {/* 1. Menu Ordering Mode: PIN vs Staff Approval */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 sm:p-7 shadow-xs space-y-5">
+            <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] sm:p-7 shadow-xs space-y-5">
               <div>
-                <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                   QR Menu Ordering & Prank-Protection Mode
                 </h2>
-                <p className="text-zinc-500 text-xs mt-1">
+                <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-1">
                   Choose how guest table orders are verified before items reach the kitchen.
                 </p>
               </div>
@@ -755,14 +859,14 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-zinc-900">
+                      <h3 className="text-sm font-bold text-zinc-900 dark:text-white">
                         4-Digit Table PIN
                       </h3>
                       <span className="inline-block mt-0.5 text-[10.5px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md">
                         Direct Kitchen Fire
                       </span>
                     </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
                       Guests enter the 4-digit PIN printed on their table stand. Confirms physical presence and fires items instantly to Kitchen KDS with zero staff delay.
                     </p>
                   </div>
@@ -793,14 +897,14 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-zinc-900">
+                      <h3 className="text-sm font-bold text-zinc-900 dark:text-white">
                         Open Menu
                       </h3>
                       <span className="inline-block mt-0.5 text-[10.5px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md">
                         Staff Approval Queue
                       </span>
                     </div>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
                       Guests order instantly without entering a PIN. Orders enter a pending queue on POS & Captain screens where staff click Accept or Reject to prevent prank orders.
                     </p>
                   </div>
@@ -814,12 +918,12 @@ export default function SettingsPage() {
             </section>
 
             {/* 2. Guest Payment & Settlement Flow */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 sm:p-7 shadow-xs space-y-5">
+            <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] sm:p-7 shadow-xs space-y-5">
               <div>
-                <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                   Guest Billing & Payment Workflow
                 </h2>
-                <p className="text-zinc-500 text-xs mt-1">
+                <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-1">
                   Choose how table guests settle their check.
                 </p>
               </div>
@@ -847,10 +951,10 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-zinc-900">
+                      <h3 className="text-sm font-bold text-zinc-900 dark:text-white">
                         Staff-Assisted Checkout
                       </h3>
-                      <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">
                         Guest taps "Request Bill" from their phone. Floor captain brings the paper check or collects Cash / Card / UPI at the counter.
                       </p>
                     </div>
@@ -878,10 +982,10 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-zinc-900">
+                      <h3 className="text-sm font-bold text-zinc-900 dark:text-white">
                         Self-Pay Digital UPI
                       </h3>
-                      <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">
                         Guest scans dynamic UPI QR from their phone via Google Pay or PhonePe. Order auto-clears once payment is verified.
                       </p>
                     </div>
@@ -901,23 +1005,23 @@ export default function SettingsPage() {
           <div className="max-w-3xl space-y-6">
 
             {/* 1. Touchscreen Monitor & On-Screen Numpad Placeholder */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 sm:p-7 shadow-xs space-y-5">
+            <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] sm:p-7 shadow-xs space-y-5">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                    <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                       Touchscreen Monitor & On-Screen Numpad
                     </h2>
                     <span className="text-[10px] font-semibold tracking-wide uppercase px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 border border-zinc-200">
                       Desktop App Preview
                     </span>
                   </div>
-                  <p className="text-zinc-500 text-xs mt-1 leading-relaxed">
+                  <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-1 leading-relaxed">
                     Designed for touch all-in-one monitors where cashiers don't use a physical keyboard. Automatically opens an on-screen touch dial for entering quantities, table numbers, phone digits, and cash tender amounts.
                   </p>
                 </div>
 
-                <div className="w-10 h-10 rounded-2xl bg-zinc-100 flex items-center justify-center text-zinc-700 shrink-0">
+                <div className="w-10 h-10 rounded-2xl bg-zinc-100 flex items-center justify-center text-zinc-700 dark:text-zinc-200 shrink-0">
                   <Monitor size={20} strokeWidth={1.75} />
                 </div>
               </div>
@@ -928,10 +1032,10 @@ export default function SettingsPage() {
                   <div className="text-xs font-semibold text-zinc-800">
                     Touch Keypad Ergonomics
                   </div>
-                  <p className="text-[11.5px] text-zinc-500 max-w-sm leading-relaxed">
+                  <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 max-w-sm leading-relaxed">
                     When active in the upcoming TableTapy Desktop App, clicking any numeric field on POS immediately floats this large touch numpad to eliminate keyboard reach.
                   </p>
-                  <div className="pt-2 flex items-center gap-2 text-[11px] font-medium text-zinc-400">
+                  <div className="pt-2 flex items-center gap-2 text-[11px] font-medium text-zinc-400 dark:text-[#5E5D72]">
                     <Info size={13} />
                     <span>Included in TableTapy Desktop App release</span>
                   </div>
@@ -942,7 +1046,7 @@ export default function SettingsPage() {
                   <div className="bg-zinc-50 border border-zinc-100 rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-xs text-zinc-800">
                     Qty: 2
                   </div>
-                  <div className="grid grid-cols-3 gap-1.5 text-xs font-semibold font-mono text-zinc-700">
+                  <div className="grid grid-cols-3 gap-1.5 text-xs font-semibold font-mono text-zinc-700 dark:text-zinc-200">
                     {['1','2','3','4','5','6','7','8','9','C','0','00'].map((btn) => (
                       <div
                         key={btn}
@@ -957,12 +1061,12 @@ export default function SettingsPage() {
             </section>
 
             {/* 2. Thermal Printer Paper Width & Copies */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 sm:p-7 shadow-xs space-y-5">
+            <section className="bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] sm:p-7 shadow-xs space-y-5">
               <div>
-                <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                   Thermal Chit Printing Preferences
                 </h2>
-                <p className="text-zinc-500 text-xs mt-1">
+                <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-1">
                   Configure ESC/POS thermal receipt paper roll and copies.
                 </p>
               </div>
@@ -979,14 +1083,14 @@ export default function SettingsPage() {
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-900">80mm (3-Inch Standard)</span>
+                    <span className="text-xs font-bold text-zinc-900 dark:text-white">80mm (3-Inch Standard)</span>
                     {paperWidth === '80MM' && (
                       <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                         <Check size={10} className="text-white" strokeWidth={3} />
                       </div>
                     )}
                   </div>
-                  <p className="text-[11px] text-zinc-500 mt-2">
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
                     Standard high-speed desktop receipt printer (Epson, TVS, Rugtek).
                   </p>
                 </div>
@@ -1001,14 +1105,14 @@ export default function SettingsPage() {
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-900">58mm (2-Inch Mobile)</span>
+                    <span className="text-xs font-bold text-zinc-900 dark:text-white">58mm (2-Inch Mobile)</span>
                     {paperWidth === '58MM' && (
                       <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
                         <Check size={10} className="text-white" strokeWidth={3} />
                       </div>
                     )}
                   </div>
-                  <p className="text-[11px] text-zinc-500 mt-2">
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
                     Compact portable Bluetooth or pocket handheld thermal printer.
                   </p>
                 </div>
@@ -1018,7 +1122,7 @@ export default function SettingsPage() {
               <div className="pt-4 border-t border-zinc-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                 <div>
                   <span className="text-xs font-semibold text-zinc-800 block">Print Copies</span>
-                  <span className="text-[11px] text-zinc-500">Number of chit copies generated per table bill</span>
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400">Number of chit copies generated per table bill</span>
                 </div>
 
                 <div className="flex items-center gap-1.5 bg-zinc-100 p-1 rounded-xl">
@@ -1027,8 +1131,8 @@ export default function SettingsPage() {
                     onClick={() => setPrintCopies(1)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                       printCopies === 1
-                        ? 'bg-white text-zinc-900 shadow-xs'
-                        : 'text-zinc-600 hover:text-zinc-900'
+                        ? 'bg-white text-[#E46254] shadow-xs'
+                        : 'text-zinc-600 hover:text-zinc-900 dark:text-white'
                     }`}
                   >
                     1 Copy (Guest Bill)
@@ -1038,8 +1142,8 @@ export default function SettingsPage() {
                     onClick={() => setPrintCopies(2)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                       printCopies === 2
-                        ? 'bg-white text-zinc-900 shadow-xs'
-                        : 'text-zinc-600 hover:text-zinc-900'
+                        ? 'bg-white text-[#E46254] shadow-xs'
+                        : 'text-zinc-600 hover:text-zinc-900 dark:text-white'
                     }`}
                   >
                     2 Copies (Guest + Store)
@@ -1055,19 +1159,19 @@ export default function SettingsPage() {
         {/* ── TAB 4: BRAND & PROFILE ── */}
         {/* ══════════════════════════════════════════════════════════════════════ */}
         {activeTab === 'BRAND' && (
-          <div className="max-w-2xl bg-white rounded-2xl border border-zinc-200/80 p-6 sm:p-7 shadow-xs space-y-6">
+          <div className="max-w-2xl bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] p-6 shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.5)] sm:p-7 shadow-xs space-y-6">
             <div>
-              <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+              <h2 className="text-base font-bold text-zinc-900 dark:text-white tracking-tight">
                 Restaurant Brand Identity
               </h2>
-              <p className="text-zinc-500 text-xs mt-1">
+              <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-1">
                 Name, menu slug, accent color, and UPI settlement details.
               </p>
             </div>
 
             <div className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                   Restaurant Display Name
                 </label>
                 <input
@@ -1075,16 +1179,16 @@ export default function SettingsPage() {
                   value={restaurantName}
                   onChange={(e) => setRestaurantName(e.target.value)}
                   placeholder="e.g. The Daily Café"
-                  className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs sm:text-sm text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all"
+                  className="w-full px-3.5 py-2.5 bg-zinc-50 dark:bg-[#22232E] border border-zinc-200 dark:border-white/[0.08] rounded-xl text-xs sm:text-sm text-zinc-900 dark:text-white outline-none focus:bg-white dark:focus:bg-[#2A2B38] focus:border-zinc-900 transition-all"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                   Digital Menu Slug URL
                 </label>
                 <div className="flex items-center">
-                  <span className="px-3.5 py-2.5 bg-zinc-100 border border-r-0 border-zinc-200 rounded-l-xl text-xs text-zinc-500 select-none">
+                  <span className="px-3.5 py-2.5 bg-zinc-100 border border-r-0 border-zinc-200 rounded-l-xl text-xs text-zinc-500 dark:text-zinc-400 select-none">
                     tabletapy.com/r/
                   </span>
                   <input
@@ -1092,13 +1196,13 @@ export default function SettingsPage() {
                     value={restaurantSlug}
                     onChange={(e) => setRestaurantSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
                     placeholder="dailycafe"
-                    className="flex-1 px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-r-xl text-xs sm:text-sm text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all font-mono"
+                    className="flex-1 px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-r-xl text-xs sm:text-sm text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900 transition-all font-mono"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                   Merchant UPI VPA ID (For Direct Payments)
                 </label>
                 <input
@@ -1106,12 +1210,12 @@ export default function SettingsPage() {
                   value={upiId}
                   onChange={(e) => setUpiId(e.target.value)}
                   placeholder="e.g. businessname@okaxis or merchant@hdfcbank"
-                  className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs sm:text-sm text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all font-mono"
+                  className="w-full px-3.5 py-2.5 bg-zinc-50 dark:bg-[#22232E] border border-zinc-200 dark:border-white/[0.08] rounded-xl text-xs sm:text-sm text-zinc-900 dark:text-white outline-none focus:bg-white dark:focus:bg-[#2A2B38] focus:border-zinc-900 transition-all font-mono"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                   Theme Brand Color
                 </label>
                 <div className="flex items-center gap-3">
@@ -1130,7 +1234,7 @@ export default function SettingsPage() {
                     type="text"
                     value={primaryColor}
                     onChange={(e) => setPrimaryColor(e.target.value)}
-                    className="w-32 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all uppercase"
+                    className="w-32 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 dark:text-white outline-none focus:bg-white focus:border-zinc-900 transition-all uppercase"
                   />
                   <div className="flex items-center gap-1.5">
                     {['#E46254', '#2563EB', '#16A34A', '#D97706', '#9333EA', '#18181B'].map(c => (
@@ -1146,6 +1250,19 @@ export default function SettingsPage() {
                     ))}
                   </div>
                 </div>
+              </div>
+
+              {/* Theme / Appearance Segmented Control */}
+              <div className="pt-5 border-t border-zinc-100 dark:border-white/[0.07] space-y-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-900 dark:text-white">
+                    Interface Appearance
+                  </label>
+                  <p className="text-zinc-500 dark:text-zinc-400 text-xs mt-0.5">
+                    Select your visual theme. Obsidian Warmth is custom designed for comfortable low-glare night operation.
+                  </p>
+                </div>
+                <ThemeToggle variant="settings" />
               </div>
             </div>
           </div>

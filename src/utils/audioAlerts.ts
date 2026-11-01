@@ -247,3 +247,33 @@ export async function playCashCallAlert(enabled = true) {
     console.warn("[AudioManager] playCashCallAlert muted:", err);
   }
 }
+
+/**
+ * 6. Bill Request Chime (Pleasant upward chime for guest asking for bill)
+ */
+export async function playBillRequestChime(enabled = true) {
+  if (!enabled) return;
+  try {
+    const ctx = await ensureRunningContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, now); // D5
+    osc.frequency.setValueAtTime(880, now + 0.12); // A5
+
+    gain.gain.setValueAtTime(0.22, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.52);
+  } catch (err) {
+    console.warn("[AudioManager] playBillRequestChime muted:", err);
+  }
+}

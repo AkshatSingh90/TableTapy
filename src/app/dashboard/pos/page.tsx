@@ -2,30 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-import {
-  Search,
-  Plus,
-  Minus,
-  Trash2,
-  Receipt,
-  Printer,
-  UtensilsCrossed,
-  ShoppingBag,
-  Send,
-  Clock,
-  User,
-  Phone,
-  RotateCcw,
-  CheckCircle2,
-  ChevronRight,
-  ChevronLeft,
-  ArrowRightLeft,
-  Copy,
-  Tag,
-  Pencil,
-  X,
-  Check,
-} from "lucide-react";
+import { Search, Plus, Minus, Trash2, Receipt, Printer, ShoppingBag, Send, RotateCcw, CheckCircle2, ChevronRight, ChevronLeft, ArrowRightLeft, Copy, Tag, Pencil, X, Check, UtensilsCrossed, User, Phone, Clock, Users, Sparkles, CreditCard, ArrowUpRight } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import {
   ItemVariantsConfig,
@@ -42,10 +19,15 @@ import {
   DEFAULT_RESTAURANT_CONFIG,
   parseConfigFromRestaurant,
   getStoredRestaurantConfig,
+  saveRestaurantConfig,
   calculateBillTaxes,
   BillTaxCalculation,
 } from "@/utils/tax";
-import { playNewOrderChime } from "@/utils/audioAlerts";
+import { playNewOrderChime, playBillRequestChime } from "@/utils/audioAlerts";
+import { printThermalChit } from "@/lib/thermalPrinterBridge";
+import { LocalSqliteStore, getCanonicalRestaurantId } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
+import { LocalCache } from "@/utils/localCache";
 
 /* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
@@ -54,6 +36,7 @@ interface Location {
   type?: string;
   capacity?: number;
   restaurant_id?: string;
+  zone?: string;
 }
 
 interface MenuItem {
@@ -171,12 +154,45 @@ export default function PosPage() {
 
   // Terminal Navigation & Floor Filters
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("DINE_IN");
+
+  // Sync mode with top header toggle in layout
+  useEffect(() => {
+    const handleModeChange = (e: any) => {
+      if (e.detail) {
+        setTerminalMode(e.detail);
+        if (e.detail === "TAKEAWAY") {
+          setActiveTableModal(null);
+        }
+      }
+    };
+    window.addEventListener("pos_mode_change", handleModeChange);
+    return () => window.removeEventListener("pos_mode_change", handleModeChange);
+  }, []);
+
+  const switchMode = (mode: TerminalMode) => {
+    setTerminalMode(mode);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("pos_mode_sync", { detail: mode }));
+    }
+  };
   const [tableFilter, setTableFilter] = useState<"ALL" | "OCCUPIED" | "VACANT">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  // Live Clock Tick (30s interval for accurate table duration badges)
+  const [currentTimeTick, setCurrentTimeTick] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTimeTick(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Full-Screen Dine-In Modal: Active Table
   const [activeTableModal, setActiveTableModal] = useState<string | null>(null);
+  const [activeTableId, setActiveTableId] = useState<string | null>(null);
+
+  // Floor Zones State
+  const [tableZones, setTableZones] = useState<Record<string, string>>({});
+  const [selectedZone, setSelectedZone] = useState<string>("ALL");
 
   // Set of dismissed/acknowledged order IDs for floor card alert
   const [acknowledgedOrderIds, setAcknowledgedOrderIds] = useState<Set<string>>(() => {
@@ -224,6 +240,12 @@ export default function PosPage() {
   // Table Transfer State
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [transferTargetTable, setTransferTargetTable] = useState<string>("");
+
+  // Round Highlight (auto-scroll + premium flash for newest round)
+  const [highlightRoundId, setHighlightRoundId] = useState<string | null>(null);
+  const newestRoundRef = useRef<HTMLDivElement>(null);
+  // Bill breakdown toggle
+  const [showBillBreakdown, setShowBillBreakdown] = useState(false);
 
   // Toast Notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -273,6 +295,11 @@ export default function PosPage() {
   const [takeawayPackagingTier, setTakeawayPackagingTier] = useState<"NONE" | "BAG_5" | "BOX_15">("NONE");
   const [takeawayPaymentMethod, setTakeawayPaymentMethod] = useState<"CASH" | "UPI" | "CARD">("UPI");
   const [cashTenderAmount, setCashTenderAmount] = useState<string>("");
+  const [showCashTenderModal, setShowCashTenderModal] = useState(false);
+  const [showTakeawayBreakdown, setShowTakeawayBreakdown] = useState(false);
+  // Function to generate unique 4-digit token (1000 - 9999)
+  const generate4DigitToken = () => Math.floor(1000 + Math.random() * 9000);
+  const [randomToken, setRandomToken] = useState<number>(() => Math.floor(1000 + Math.random() * 9000));
   const [tokenOverride, setTokenOverride] = useState<number | null>(null);
   const [takeawayShowDiscount, setTakeawayShowDiscount] = useState(false);
   const [takeawayDiscountPercent, setTakeawayDiscountPercent] = useState<number>(0);
@@ -281,188 +308,98 @@ export default function PosPage() {
   const [takeawayTab, setTakeawayTab] = useState<"CURRENT_ORDER" | "READY_ORDERS">("CURRENT_ORDER");
   const takeawaySearchInputRef = useRef<HTMLInputElement>(null);
 
-  /* ─── 1. Load Floor, Catalog & Realtime Orders ─────────────────────── */
+  /* ─── 1. Load Floor, Catalog & Realtime Orders (100% Offline-First via Local SQLite) ─── */
   const loadInitialData = async () => {
     try {
-      setLoading(true);
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      // 1. Resolve restaurantId without waiting for external network
+      let restId = await getCanonicalRestaurantId(supabase);
+      if (restId) {
+        setRestaurantId(restId);
+      }
 
-      let restId = user?.user_metadata?.restaurant_id || user?.id;
-
-      // Check localStorage captain restaurant as well if present
-      if (typeof window !== "undefined") {
+      // 2. Load cached zones
+      let loadedTableZones: Record<string, string> = {};
+      if (typeof window !== "undefined" && restId) {
         try {
-          const savedCaptainRest = localStorage.getItem("tabletapy_captain_restaurant");
-          if (savedCaptainRest) {
-            const parsed = JSON.parse(savedCaptainRest);
-            if (parsed?.id) {
-              restId = parsed.id;
-            }
-          }
+          const rawZones = localStorage.getItem(`tabletapy_table_zones_${restId}`);
+          if (rawZones) loadedTableZones = JSON.parse(rawZones);
         } catch {}
       }
 
-      // If still no restId or not found, find the restaurant that has active orders/locations
-      if (!restId) {
-        // Check latest active orders to get active restaurant
-        const { data: latestOrd } = await supabase
-          .from("orders")
-          .select("restaurant_id")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (latestOrd?.restaurant_id) {
-          restId = latestOrd.restaurant_id;
+      // 3. ⚡ INSTANT 0ms HYDRATION FROM LOCAL SQLITE (Dishes, Tables, Settings)
+      if (restId) {
+        // A. Settings from SQLite
+        const localSettings = await LocalSqliteStore.getSettings(restId);
+        if (localSettings) {
+          if (localSettings.name) setRestaurantName(localSettings.name);
+          if (localSettings.address) setRestaurantAddress(localSettings.address);
+          if (localSettings.taxSettings) setTaxSettings(localSettings.taxSettings);
+          if (localSettings.paperWidth) setPaperWidth(localSettings.paperWidth.toUpperCase() as "80MM" | "58MM");
+          if (localSettings.printCopies === 1 || localSettings.printCopies === 2) setPrintCopies(localSettings.printCopies as 1 | 2);
+          if (localSettings.autoPrintOnSettle !== undefined) setAutoPrintOnSettle(localSettings.autoPrintOnSettle);
+          if (localSettings.qrOrderMode) setQrOrderMode(localSettings.qrOrderMode as any);
+          if (localSettings.tableZones && Object.keys(loadedTableZones).length === 0) {
+            loadedTableZones = localSettings.tableZones;
+          }
         } else {
-          // Check locations table for active restaurant
-          const { data: latestLoc } = await supabase
-            .from("locations")
-            .select("restaurant_id")
-            .limit(1)
-            .maybeSingle();
-          if (latestLoc?.restaurant_id) {
-            restId = latestLoc.restaurant_id;
+          const storedCfg = getStoredRestaurantConfig(restId);
+          setTaxSettings(storedCfg.taxSettings);
+          setQrOrderMode(storedCfg.qrOrderMode);
+          setPaperWidth(storedCfg.paperWidth);
+          setPrintCopies(storedCfg.printCopies);
+          setAutoPrintOnSettle(storedCfg.autoPrintOnSettle);
+        }
+
+        setTableZones(loadedTableZones);
+
+        // B. Tables from SQLite
+        const localTables = await LocalSqliteStore.getTables(restId);
+        if (localTables && localTables.length > 0) {
+          const enriched = localTables.map((loc) => ({
+            ...loc,
+            zone: loadedTableZones[loc.id] || loc.zone || "Main Floor",
+          }));
+          const sorted = enriched.sort((a, b) => {
+            const numA = parseInt(a.name.replace(/\D/g, ""), 10);
+            const numB = parseInt(b.name.replace(/\D/g, ""), 10);
+            if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+            return a.name.localeCompare(b.name);
+          });
+          setLocations(sorted);
+        }
+
+        // C. Dishes from SQLite (Available items)
+        let localDishes = await LocalSqliteStore.getMenuItems(restId, true);
+        if (!localDishes || localDishes.length === 0) {
+          localDishes = await LocalSqliteStore.getMenuItems(restId, false);
+        }
+        if (localDishes && localDishes.length > 0) {
+          setMenuItems(
+            localDishes.map((dish) => ({
+              ...dish,
+              variantsConfig: dish.variantsConfig || extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
+            }))
+          );
+        }
+
+        // D. Active Orders from SQLite
+        const localOrders = await LocalSqliteStore.getLocalOrders(restId);
+        if (localOrders && localOrders.length > 0) {
+          const activeLocal = localOrders.filter((o) =>
+            ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING"
+          );
+          if (activeLocal.length > 0) {
+            setActiveOrders(activeLocal as any);
           }
         }
+
+        // Stop loading spinner immediately - Screen is live!
+        setLoading(false);
       }
 
-      if (restId) {
-        const { data: restRec } = await supabase
-          .from("restaurants")
-          .select("id, name, address, bg_image")
-          .eq("id", restId)
-          .maybeSingle();
-        if (restRec) {
-          setRestaurantName(restRec.name || "My Restaurant");
-          setRestaurantAddress(restRec.address || "");
-          if (restRec.bg_image) {
-            const cloudCfg = parseConfigFromRestaurant(restRec);
-            setTaxSettings(cloudCfg.taxSettings);
-            setQrOrderMode(cloudCfg.qrOrderMode);
-            setPaperWidth(cloudCfg.paperWidth);
-            setPrintCopies(cloudCfg.printCopies);
-            setAutoPrintOnSettle(cloudCfg.autoPrintOnSettle);
-          }
-        }
-      }
-
-      // Fetch Locations (Tables)
-      let loadedLocations: Location[] = [];
-      if (restId) {
-        const { data: locData } = await supabase
-          .from("locations")
-          .select("id, name, type, restaurant_id")
-          .eq("restaurant_id", restId)
-          .order("name", { ascending: true });
-
-        if (locData && locData.length > 0) {
-          loadedLocations = locData as Location[];
-        }
-      }
-
-      // If still empty, check user.id fallback
-      if (loadedLocations.length === 0 && user?.id && user.id !== restId) {
-        const { data: userLocs } = await supabase
-          .from("locations")
-          .select("id, name, type, restaurant_id")
-          .eq("restaurant_id", user.id)
-          .order("name", { ascending: true });
-
-        if (userLocs && userLocs.length > 0) {
-          loadedLocations = userLocs as Location[];
-          restId = user.id;
-        }
-      }
-
-      // If STILL empty, dynamically query all active tables in locations so POS is 100% operational
-      if (loadedLocations.length === 0) {
-        const { data: anyLocs } = await supabase
-          .from("locations")
-          .select("id, name, type, restaurant_id")
-          .order("name", { ascending: true });
-
-        if (anyLocs && anyLocs.length > 0) {
-          loadedLocations = anyLocs as Location[];
-          if (!restId && anyLocs[0]?.restaurant_id) {
-            restId = anyLocs[0].restaurant_id;
-          }
-        }
-      }
-
-      if (!restId && loadedLocations[0]?.restaurant_id) {
-        restId = loadedLocations[0].restaurant_id;
-      }
-
-      if (restId) {
-        setRestaurantId(restId);
-        const storedCfg = getStoredRestaurantConfig(restId);
-        setTaxSettings(storedCfg.taxSettings);
-        setQrOrderMode(storedCfg.qrOrderMode);
-        setPaperWidth(storedCfg.paperWidth);
-        setPrintCopies(storedCfg.printCopies);
-        setAutoPrintOnSettle(storedCfg.autoPrintOnSettle);
-      } else {
-        const storedCfg = getStoredRestaurantConfig();
-        setTaxSettings(storedCfg.taxSettings);
-        setQrOrderMode(storedCfg.qrOrderMode);
-        setPaperWidth(storedCfg.paperWidth);
-        setPrintCopies(storedCfg.printCopies);
-        setAutoPrintOnSettle(storedCfg.autoPrintOnSettle);
-      }
-
-      if (loadedLocations.length > 0) {
-        const sorted = loadedLocations.sort((a, b) => {
-          const numA = parseInt(a.name.replace(/\D/g, ""), 10);
-          const numB = parseInt(b.name.replace(/\D/g, ""), 10);
-          if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-          return a.name.localeCompare(b.name);
-        });
-        setLocations(sorted);
-      }
-
-      // Catalog Items (scoped to restId, or fetch available items if restId has none)
-      let menuRows: MenuItem[] = [];
-      if (restId) {
-        const { data: menuData } = await supabase
-          .from("menu_items_v2")
-          .select("id, name, category, subcategory, base_price, is_veg, is_available, description")
-          .eq("restaurant_id", restId)
-          .eq("is_available", true)
-          .order("name", { ascending: true });
-
-        if (menuData && menuData.length > 0) {
-          menuRows = menuData as MenuItem[];
-        }
-      }
-
-      if (menuRows.length === 0) {
-        const { data: fallbackMenu } = await supabase
-          .from("menu_items_v2")
-          .select("id, name, category, subcategory, base_price, is_veg, is_available, description")
-          .eq("is_available", true)
-          .order("name", { ascending: true });
-
-        if (fallbackMenu && fallbackMenu.length > 0) {
-          menuRows = fallbackMenu as MenuItem[];
-        }
-      }
-
-      if (menuRows.length > 0) {
-        setMenuItems(
-          menuRows.map((dish) => ({
-            ...dish,
-            variantsConfig: extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
-          }))
-        );
-      }
-
-      // Past Orders & Active Orders
-      if (restId) {
-        await fetchPastOrders(restId);
-        await fetchActiveOrders(restId);
+      // 4. 🌐 SILENT BACKGROUND CLOUD SYNC (If online, updates SQLite quietly without disrupting UI)
+      if (typeof navigator !== "undefined" && navigator.onLine && restId) {
+        syncFromCloudInBackground(restId, loadedTableZones);
       }
     } catch (err) {
       console.error("Failed to load POS floor:", err);
@@ -471,32 +408,249 @@ export default function PosPage() {
     }
   };
 
-  const fetchActiveOrders = async (restId: string) => {
-    const { data: orderData } = await supabase
-      .from("orders")
-      .select("*")
-      .eq("restaurant_id", restId)
-      .in("status", ["NEW", "PREPARING", "SERVED"])
-      .order("created_at", { ascending: true });
+  const syncFromCloudInBackground = async (restId: string, currentZones: Record<string, string>) => {
+    try {
+      // 1. Revalidate restaurant profile & settings
+      const { data: restRec } = await supabase
+        .from("restaurants")
+        .select("id, name, address, bg_image")
+        .eq("id", restId)
+        .maybeSingle();
 
-    if (orderData) {
-      setActiveOrders(orderData as OrderRecord[]);
+      if (restRec) {
+        setRestaurantName(restRec.name || "My Restaurant");
+        setRestaurantAddress(restRec.address || "");
+        if (restRec.bg_image) {
+          const cloudCfg = parseConfigFromRestaurant(restRec);
+          setTaxSettings(cloudCfg.taxSettings);
+          setQrOrderMode(cloudCfg.qrOrderMode);
+          setPaperWidth(cloudCfg.paperWidth);
+          setPrintCopies(cloudCfg.printCopies);
+          setAutoPrintOnSettle(cloudCfg.autoPrintOnSettle);
+          saveRestaurantConfig(cloudCfg, restId);
+
+          let parsedZones = currentZones;
+          try {
+            const parsed = typeof restRec.bg_image === "string" ? JSON.parse(restRec.bg_image) : restRec.bg_image;
+            if (parsed?.tableZones) {
+              parsedZones = parsed.tableZones;
+              setTableZones(parsedZones);
+            }
+          } catch {}
+
+          await LocalSqliteStore.saveSettings({
+            restaurant_id: restId,
+            name: restRec.name || "",
+            address: restRec.address || "",
+            taxSettings: cloudCfg.taxSettings,
+            paperWidth: cloudCfg.paperWidth,
+            printCopies: cloudCfg.printCopies,
+            autoPrintOnSettle: cloudCfg.autoPrintOnSettle,
+            qrOrderMode: cloudCfg.qrOrderMode,
+            tableZones: parsedZones,
+            last_synced_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      // 2. Revalidate Tables
+      const { data: locData } = await supabase
+        .from("locations")
+        .select("id, name, type, restaurant_id")
+        .eq("restaurant_id", restId)
+        .order("name", { ascending: true });
+
+      if (locData && locData.length > 0) {
+        const enriched = locData.map((loc) => ({
+          ...loc,
+          zone: currentZones[loc.id] || (loc as any).zone || "Main Floor",
+        }));
+        const sorted = enriched.sort((a, b) => {
+          const numA = parseInt(a.name.replace(/\D/g, ""), 10);
+          const numB = parseInt(b.name.replace(/\D/g, ""), 10);
+          if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+          return a.name.localeCompare(b.name);
+        });
+        setLocations(sorted);
+
+        await LocalSqliteStore.saveTables(
+          restId,
+          locData.map((l) => ({
+            id: l.id,
+            restaurant_id: restId,
+            name: l.name,
+            type: l.type,
+            zone: currentZones[l.id] || "Main Floor",
+          }))
+        );
+      }
+
+      // 3. Revalidate Menu Items
+      const { data: allMenu } = await supabase
+        .from("menu_items_v2")
+        .select("id, name, category, subcategory, base_price, is_veg, is_available, description, restaurant_id")
+        .eq("is_available", true)
+        .eq("restaurant_id", restId)
+        .order("name", { ascending: true });
+
+      if (allMenu && allMenu.length > 0) {
+        setMenuItems(
+          allMenu.map((dish) => ({
+            ...dish,
+            variantsConfig: extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
+          }))
+        );
+
+        await LocalSqliteStore.saveMenuItems(
+          restId,
+          allMenu.map((d) => ({
+            id: d.id,
+            restaurant_id: restId,
+            name: d.name,
+            category: d.category,
+            subcategory: d.subcategory,
+            base_price: Number(d.base_price || 0),
+            is_veg: Boolean(d.is_veg),
+            is_available: Boolean(d.is_available),
+            description: d.description,
+            variantsConfig: extractVariantsFromDescription(d.description, Number(d.base_price || 0)).config,
+            updated_at: new Date().toISOString(),
+          }))
+        );
+      }
+
+      // 4. Revalidate Active Orders & Push any unsynced offline orders
+      await fetchActiveOrders(restId);
+      await fetchPastOrders(restId);
+
+      // Auto-flush any pending offline orders
+      const unsyncedOrders = await LocalSqliteStore.getUnsyncedOrders(restId);
+      for (const unsynced of unsyncedOrders) {
+        try {
+          const { error: pushErr } = await supabase.from("orders").insert({
+            restaurant_id: unsynced.restaurant_id,
+            table_no: unsynced.table_no,
+            total: unsynced.total,
+            status: unsynced.status,
+            payment_status: unsynced.payment_status,
+            payment_method: unsynced.payment_method,
+            customer_name: unsynced.customer_name || null,
+            customer_phone: unsynced.customer_phone || null,
+            items_json: unsynced.items_json,
+            created_at: unsynced.created_at,
+          });
+          if (!pushErr) {
+            await LocalSqliteStore.markOrderSynced(unsynced.id);
+          }
+        } catch {}
+      }
+    } catch (syncErr) {
+      console.warn("[POS] Background sync deferred:", syncErr);
+    }
+  };
+
+  const fetchActiveOrders = async (restId: string) => {
+    // 1. Instant local read
+    const localOrders = await LocalSqliteStore.getLocalOrders(restId);
+    if (localOrders && localOrders.length > 0) {
+      const active = localOrders.filter((o) =>
+        ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING"
+      );
+      if (active.length > 0) {
+        setActiveOrders(active as any);
+      }
+    }
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+
+    try {
+      const { data: orderData } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("restaurant_id", restId)
+        .in("status", ["NEW", "PREPARING", "SERVED"])
+        .order("created_at", { ascending: true });
+
+      if (orderData) {
+        setActiveOrders(orderData as OrderRecord[]);
+        for (const ord of orderData) {
+          LocalSqliteStore.saveOrderLocally({
+            id: ord.id,
+            restaurant_id: ord.restaurant_id,
+            table_no: ord.table_no,
+            customer_name: ord.customer_name,
+            customer_phone: ord.customer_phone,
+            total: ord.total,
+            items_json: ord.items_json,
+            status: ord.status,
+            payment_status: ord.payment_status,
+            payment_method: ord.payment_method,
+            created_at: ord.created_at,
+            synced: 1,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("[POS] fetchActiveOrders offline fallback:", err);
     }
   };
 
   const fetchPastOrders = async (restId: string) => {
-    const { data: pastData } = await supabase
-      .from("orders")
-      .select("id, table_no, customer_name, customer_phone, total, items_json, note, created_at, status, payment_status")
-      .eq("restaurant_id", restId)
-      .eq("payment_status", "PAID")
-      .order("created_at", { ascending: false })
-      .limit(250);
+    // 1. Instant local read
+    const localInvoices = await LocalSqliteStore.getInvoices(restId, 250);
+    if (localInvoices && localInvoices.length > 0) {
+      setPastOrdersHistory(
+        localInvoices.map((inv) => ({
+          id: inv.id,
+          table_no: String(inv.table_name || inv.order_number),
+          customer_name: inv.customer_name,
+          customer_phone: inv.customer_phone,
+          total: inv.total_amount,
+          items_json: inv.items_json,
+          note: "",
+          created_at: inv.created_at,
+          status: "COMPLETED",
+          payment_status: "PAID",
+        }))
+      );
+    }
 
-    if (pastData) {
-      setPastOrdersHistory(pastData);
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+
+    try {
+      const { data: pastData } = await supabase
+        .from("orders")
+        .select("id, table_no, customer_name, customer_phone, total, items_json, note, created_at, status, payment_status")
+        .eq("restaurant_id", restId)
+        .eq("payment_status", "PAID")
+        .order("created_at", { ascending: false })
+        .limit(250);
+
+      if (pastData) {
+        setPastOrdersHistory(pastData);
+      }
+    } catch (err) {
+      console.warn("[POS] fetchPastOrders offline fallback:", err);
     }
   };
+
+  // Track bill requests to chime when a guest asks for the bill
+  const knownBillRequestedIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let hasNewBillRequest = false;
+    activeOrders.forEach((o) => {
+      const payStatus = (o.payment_status || "").toUpperCase();
+      if (payStatus === "BILL_REQUESTED" || payStatus === "CASH_REQUESTED") {
+        if (!knownBillRequestedIds.current.has(o.id)) {
+          knownBillRequestedIds.current.add(o.id);
+          hasNewBillRequest = true;
+        }
+      }
+    });
+    if (hasNewBillRequest) {
+      playBillRequestChime(true);
+    }
+  }, [activeOrders]);
 
   useEffect(() => {
     loadInitialData();
@@ -536,15 +690,44 @@ export default function PosPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editingRoundItem, customizingDish, isTransferModalOpen, isGuestInfoModalOpen, terminalMode, activeTableModal, dishSearchQuery]);
 
-  // Handle opening table command modal and acknowledging any new orders
-  const handleOpenTableCommand = (tableName: string) => {
+  // Handle opening table command modal, acknowledging alerts, and auto-scrolling to newest round
+  const handleOpenTableCommand = (tableName: string, tableId?: string) => {
     setActiveTableModal(tableName);
+    setDishSearchQuery("");
+    setSelectedDrawerCat("ALL");
+    setManualCart([]);
+    setBatchNote("");
+
+    const targetId = tableId || locations.find((l) => l.name === tableName)?.id;
+    if (targetId) {
+      setActiveTableId(targetId);
+    }
+
+    // Find latest or unapproved round on this table to highlight & auto-scroll
+    const session = tableSessionMap.get(targetId || "") || tableSessionMap.get(tableName);
+    const targetRound = session?.rounds?.find((r) => r.status === "NEW") ||
+      (session?.rounds && session.rounds.length > 0 ? session.rounds[session.rounds.length - 1] : null);
+
+    if (targetRound) {
+      setHighlightRoundId(targetRound.orderId);
+      setTimeout(() => {
+        if (newestRoundRef.current) {
+          newestRoundRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }, 200);
+      // Keep showcase highlight active for 4 seconds
+      setTimeout(() => setHighlightRoundId(null), 4000);
+    }
 
     // Acknowledge all active orders on this table so shaking stops
     const norm = normalizeTableIdentifier(tableName);
-    const tableOrders = activeOrders.filter(
-      (o) => normalizeTableIdentifier(o.table_no) === norm
-    );
+    const tableOrders = activeOrders.filter((o) => {
+      if (targetId && o.note && o.note.includes(`[tid:${targetId}]`)) return true;
+      return (
+        normalizeTableIdentifier(o.table_no) === norm ||
+        o.table_no.toLowerCase().trim() === tableName.toLowerCase().trim()
+      );
+    });
 
     if (tableOrders.length > 0) {
       setAcknowledgedOrderIds((prev) => {
@@ -566,28 +749,56 @@ export default function PosPage() {
     }
   };
 
-  // Realtime Configuration synchronization across tabs/devices
+  // Realtime Configuration & Locations synchronization across tabs/devices
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key && (e.key.includes("tabletapy_full_config") || e.key.includes("tabletapy_tax_settings") || e.key.includes("tabletapy_paper_width") || e.key.includes("tabletapy_print_copies") || e.key.includes("tabletapy_autoprint"))) {
+      if (e.key && (e.key.includes("tabletapy_full_config") || e.key.includes("tabletapy_tax_settings") || e.key.includes("tabletapy_paper_width") || e.key.includes("tabletapy_print_copies") || e.key.includes("tabletapy_autoprint") || e.key.includes("tabletapy_table_zones"))) {
         const updated = getStoredRestaurantConfig(restaurantId || undefined);
         setTaxSettings(updated.taxSettings);
         setQrOrderMode(updated.qrOrderMode);
         setPaperWidth(updated.paperWidth);
         setPrintCopies(updated.printCopies);
         setAutoPrintOnSettle(updated.autoPrintOnSettle);
+        loadInitialData();
+      }
+    };
+    const handleConfigUpdated = (e: any) => {
+      if (e.detail?.config) {
+        const cfg = e.detail.config;
+        setTaxSettings(cfg.taxSettings);
+        setQrOrderMode(cfg.qrOrderMode);
+        setPaperWidth(cfg.paperWidth);
+        setPrintCopies(cfg.printCopies);
+        setAutoPrintOnSettle(cfg.autoPrintOnSettle);
+      }
+    };
+    const handleLocationsUpdated = () => {
+      loadInitialData();
+    };
+    const handleSyncComplete = () => {
+      if (restaurantId) {
+        fetchActiveOrders(restaurantId);
+        fetchPastOrders(restaurantId);
       }
     };
     window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
+    window.addEventListener("tabletapy_config_updated", handleConfigUpdated);
+    window.addEventListener("tabletapy_locations_updated", handleLocationsUpdated);
+    window.addEventListener("tabletapy_sync_completed", handleSyncComplete);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("tabletapy_config_updated", handleConfigUpdated);
+      window.removeEventListener("tabletapy_locations_updated", handleLocationsUpdated);
+      window.removeEventListener("tabletapy_sync_completed", handleSyncComplete);
+    };
   }, [restaurantId]);
 
-  // Supabase Realtime Subscription
+  // Supabase Realtime Subscription (Orders + Config Broadcast + Restaurant Cloud Updates)
   useEffect(() => {
     if (!restaurantId) return;
 
     const channel = supabase
-      .channel("pos_floor_sync")
+      .channel(`pos_floor_sync_${restaurantId}`)
       .on(
         "postgres_changes",
         {
@@ -600,14 +811,80 @@ export default function PosPage() {
           if (payload.eventType === "INSERT" || (payload.new && payload.new.status === "NEW")) {
             playNewOrderChime(true);
           }
+          if (payload.new && (payload.new.payment_status === "BILL_REQUESTED" || payload.new.payment_status === "CASH_REQUESTED")) {
+            playBillRequestChime(true);
+          }
           fetchActiveOrders(restaurantId);
           fetchPastOrders(restaurantId);
         }
       )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "restaurants",
+          filter: `id=eq.${restaurantId}`,
+        },
+        (payload: any) => {
+          if (payload.new?.bg_image) {
+            const cloudCfg = parseConfigFromRestaurant(payload.new);
+            setTaxSettings(cloudCfg.taxSettings);
+            setQrOrderMode(cloudCfg.qrOrderMode);
+            setPaperWidth(cloudCfg.paperWidth);
+            setPrintCopies(cloudCfg.printCopies);
+            setAutoPrintOnSettle(cloudCfg.autoPrintOnSettle);
+            saveRestaurantConfig(cloudCfg, restaurantId);
+          }
+        }
+      )
+      .on("broadcast", { event: "config_updated" }, (payload: any) => {
+        if (payload?.payload?.config) {
+          const cfg = payload.payload.config;
+          setTaxSettings(cfg.taxSettings);
+          setQrOrderMode(cfg.qrOrderMode);
+          setPaperWidth(cfg.paperWidth);
+          setPrintCopies(cfg.printCopies);
+          setAutoPrintOnSettle(cfg.autoPrintOnSettle);
+          saveRestaurantConfig(cfg, restaurantId);
+        }
+      })
+      .subscribe();
+
+    const configGlobalChannel = supabase
+      .channel("restaurant_config_global")
+      .on("broadcast", { event: "config_updated" }, (payload: any) => {
+        if (payload?.payload?.config && (!payload.payload.restaurantId || payload.payload.restaurantId === restaurantId)) {
+          const cfg = payload.payload.config;
+          setTaxSettings(cfg.taxSettings);
+          setQrOrderMode(cfg.qrOrderMode);
+          setPaperWidth(cfg.paperWidth);
+          setPrintCopies(cfg.printCopies);
+          setAutoPrintOnSettle(cfg.autoPrintOnSettle);
+          saveRestaurantConfig(cfg, restaurantId);
+        }
+      })
+      .subscribe();
+
+    const configScopedChannel = supabase
+      .channel(`restaurant_config_${restaurantId}`)
+      .on("broadcast", { event: "config_updated" }, (payload: any) => {
+        if (payload?.payload?.config) {
+          const cfg = payload.payload.config;
+          setTaxSettings(cfg.taxSettings);
+          setQrOrderMode(cfg.qrOrderMode);
+          setPaperWidth(cfg.paperWidth);
+          setPrintCopies(cfg.printCopies);
+          setAutoPrintOnSettle(cfg.autoPrintOnSettle);
+          saveRestaurantConfig(cfg, restaurantId);
+        }
+      })
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
+      supabase.removeChannel(configGlobalChannel);
+      supabase.removeChannel(configScopedChannel);
     };
   }, [restaurantId]);
 
@@ -615,28 +892,59 @@ export default function PosPage() {
   const tableSessionMap = useMemo(() => {
     const map = new Map<string, TableSessionData>();
 
-    locations.forEach((loc) => {
-      map.set(loc.name, {
-        status: "VACANT",
-        orders: [],
-        rounds: [],
-        allItems: [],
-        totalBill: 0,
-        hasNewRound: false,
-        hasBillRequest: false,
-        hasUpiVerifyRequest: false,
-        isPaid: false,
-      });
+    const createEmptySession = (): TableSessionData => ({
+      status: "VACANT",
+      orders: [],
+      rounds: [],
+      allItems: [],
+      totalBill: 0,
+      hasNewRound: false,
+      hasBillRequest: false,
+      hasUpiVerifyRequest: false,
+      isPaid: false,
     });
 
-    const findLocationKey = (tableNo: string) => {
-      const norm = normalizeTableIdentifier(tableNo);
-      for (const loc of locations) {
-        if (normalizeTableIdentifier(loc.name) === norm) {
-          return loc.name;
+    locations.forEach((loc) => {
+      const session = createEmptySession();
+      // Primary key: table UUID (isolates alerts to the exact physical table)
+      map.set(loc.id, session);
+      // Secondary key: table name (only if unique among tables)
+      const sameNameCount = locations.filter(
+        (l) => l.name.trim().toLowerCase() === loc.name.trim().toLowerCase()
+      ).length;
+      if (sameNameCount === 1) {
+        map.set(loc.name, session);
+      }
+    });
+
+    const findLocationIdForOrder = (order: OrderRecord): string => {
+      // 1. Try matching [tid:UUID] inside order.note
+      if (order.note) {
+        const tidMatch = order.note.match(/\[tid:([a-f0-9\-]+)\]/i);
+        if (tidMatch && tidMatch[1]) {
+          const matched = locations.find(
+            (l) => l.id.toLowerCase() === tidMatch[1].toLowerCase()
+          );
+          if (matched) return matched.id;
         }
       }
-      return tableNo;
+
+      // 2. Check if order.table_no is directly a location ID
+      const directIdMatch = locations.find((l) => l.id === order.table_no);
+      if (directIdMatch) return directIdMatch.id;
+
+      // 3. Match exact location name
+      const exactNameMatch = locations.find(
+        (l) => l.name.trim().toLowerCase() === order.table_no.trim().toLowerCase()
+      );
+      if (exactNameMatch) return exactNameMatch.id;
+
+      // 4. Match normalized name
+      const normOrder = normalizeTableIdentifier(order.table_no);
+      const normMatch = locations.find((l) => normalizeTableIdentifier(l.name) === normOrder);
+      if (normMatch) return normMatch.id;
+
+      return order.table_no;
     };
 
     activeOrders.forEach((order) => {
@@ -646,19 +954,12 @@ export default function PosPage() {
 
       if (isTakeaway) return;
 
-      const locKey = findLocationKey(order.table_no);
-      const existing = map.get(locKey) || {
-        status: "VACANT",
-        orders: [],
-        rounds: [],
-        allItems: [],
-        totalBill: 0,
-        hasNewRound: false,
-        hasBillRequest: false,
-        hasUpiVerifyRequest: false,
-        isPaid: false,
-      };
-      if (!map.has(locKey)) map.set(locKey, existing);
+      const locKey = findLocationIdForOrder(order);
+      let existing = map.get(locKey);
+      if (!existing) {
+        existing = createEmptySession();
+        map.set(locKey, existing);
+      }
 
       existing.orders.push(order);
 
@@ -773,7 +1074,7 @@ export default function PosPage() {
     });
 
     return map;
-  }, [locations, activeOrders]);
+  }, [locations, activeOrders, acknowledgedOrderIds]);
 
   // Floor Stats
   const floorStats = useMemo(() => {
@@ -782,8 +1083,9 @@ export default function PosPage() {
     let billed = 0;
     let totalRevenue = 0;
 
-    tableSessionMap.forEach((session) => {
-      if (session.status === "VACANT") {
+    locations.forEach((loc) => {
+      const session = tableSessionMap.get(loc.id) || tableSessionMap.get(loc.name);
+      if (!session || session.status === "VACANT") {
         vacant += 1;
       } else {
         occupied += 1;
@@ -795,32 +1097,60 @@ export default function PosPage() {
     return { occupied, vacant, billed, totalRevenue, totalTables: locations.length };
   }, [tableSessionMap, locations]);
 
-  // Filtered Tables for Grid
-  const filteredTables = useMemo(() => {
-    return locations.filter((loc) => {
-      const session = tableSessionMap.get(loc.name);
-      const isOccupied = session && session.status !== "VACANT";
-
-      if (tableFilter === "OCCUPIED" && !isOccupied) return false;
-      if (tableFilter === "VACANT" && isOccupied) return false;
-
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase().trim();
-        const matchesName = loc.name.toLowerCase().includes(q);
-        const matchesGuest = session?.customerName?.toLowerCase().includes(q);
-        const matchesPhone = session?.customerPhone?.toLowerCase().includes(q);
-        return matchesName || matchesGuest || matchesPhone;
-      }
-
-      return true;
+  // Distinct Zones
+  const allZones = useMemo(() => {
+    const zoneSet = new Set<string>();
+    locations.forEach((l) => {
+      const z = tableZones[l.id] || l.zone;
+      if (z && z.trim()) zoneSet.add(z.trim());
     });
-  }, [locations, tableSessionMap, tableFilter, searchQuery]);
+    if (zoneSet.size === 0) zoneSet.add("Main Floor");
+    return Array.from(zoneSet);
+  }, [locations, tableZones]);
 
   // Selected Table Session
   const activeSession = useMemo(() => {
-    if (!activeTableModal) return null;
-    return tableSessionMap.get(activeTableModal) || null;
-  }, [activeTableModal, tableSessionMap]);
+    if (!activeTableModal && !activeTableId) return null;
+    if (activeTableId && tableSessionMap.has(activeTableId)) {
+      return tableSessionMap.get(activeTableId) || null;
+    }
+    if (activeTableModal && tableSessionMap.has(activeTableModal)) {
+      return tableSessionMap.get(activeTableModal) || null;
+    }
+    return null;
+  }, [activeTableModal, activeTableId, tableSessionMap]);
+
+  // Priority Sorter for Tables in Zones: Alerting Tables FIRST
+  const sortTablesByAlertAndName = (tables: Location[]) => {
+    const getUrgencyScore = (session?: TableSessionData) => {
+      if (!session) return 0;
+      if (session.hasNewRound) return 40; // New Order - Top alert
+      if (session.hasBillRequest) return 30; // Bill Requested - 2nd alert
+      if (session.hasUpiVerifyRequest) return 20; // UPI Verification - 3rd alert
+      if (session.status !== "VACANT" && !session.isPaid) return 10; // Running
+      if (session.status !== "VACANT" && session.isPaid) return 5; // Paid
+      return 0; // Vacant
+    };
+
+    return [...tables].sort((a, b) => {
+      const sessionA = tableSessionMap.get(a.id) || tableSessionMap.get(a.name);
+      const sessionB = tableSessionMap.get(b.id) || tableSessionMap.get(b.name);
+
+      const scoreA = getUrgencyScore(sessionA);
+      const scoreB = getUrgencyScore(sessionB);
+
+      if (scoreA !== scoreB) {
+        return scoreB - scoreA; // Alerting tables first
+      }
+
+      const numA = parseInt(a.name.replace(/\D/g, ""), 10);
+      const numB = parseInt(b.name.replace(/\D/g, ""), 10);
+      if (!isNaN(numA) && !isNaN(numB) && numA !== numB) {
+        return numA - numB;
+      }
+      return a.name.localeCompare(b.name);
+    });
+  };
 
   const isVacantTable = !activeSession || activeSession.status === "VACANT" || activeSession.rounds.length === 0;
 
@@ -903,9 +1233,9 @@ export default function PosPage() {
     const updateCart = (prev: NewStaffItem[]) => {
       const idx = prev.findIndex((c) => c.id === cartEntryId);
       if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx].quantity += 1;
-        return copy;
+        return prev.map((item, i) =>
+          i === idx ? { ...item, quantity: item.quantity + 1 } : item
+        );
       }
       return [
         ...prev,
@@ -936,9 +1266,9 @@ export default function PosPage() {
         (i) => (i.dishId === dish.id || i.id === dish.id) && !i.portionName && (!i.notes || i.notes === "")
       );
       if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx].quantity += 1;
-        return copy;
+        return prev.map((item, i) =>
+          i === idx ? { ...item, quantity: item.quantity + 1 } : item
+        );
       }
       return [
         ...prev,
@@ -959,6 +1289,37 @@ export default function PosPage() {
       setTakeawayCart(updateCart);
     } else {
       setManualCart(updateCart);
+    }
+  };
+
+  // Dedicated strictly immutable stepper handlers for catalog cards (1 2 3 4 5...)
+  const handleIncrementDish = (dish: MenuItem) => {
+    handleQuickAddBase(dish);
+  };
+
+  const handleDecrementDish = (dish: MenuItem) => {
+    if (terminalMode === "TAKEAWAY") {
+      setTakeawayCart((prev) => {
+        const idx = prev.findIndex((i) => i.dishId === dish.id || i.id === dish.id);
+        if (idx < 0) return prev;
+        if (prev[idx].quantity > 1) {
+          return prev.map((item, i) =>
+            i === idx ? { ...item, quantity: item.quantity - 1 } : item
+          );
+        }
+        return prev.filter((_, i) => i !== idx);
+      });
+    } else {
+      setManualCart((prev) => {
+        const idx = prev.findIndex((i) => i.dishId === dish.id || i.id === dish.id);
+        if (idx < 0) return prev;
+        if (prev[idx].quantity > 1) {
+          return prev.map((item, i) =>
+            i === idx ? { ...item, quantity: item.quantity - 1 } : item
+          );
+        }
+        return prev.filter((_, i) => i !== idx);
+      });
     }
   };
 
@@ -1368,29 +1729,35 @@ export default function PosPage() {
 
       const roundNum = (activeSession?.rounds.length || 0) + 1;
       const noteParts: string[] = [`[POS Fired Round #${roundNum}]`];
+      if (activeTableId) {
+        noteParts.push(`[tid:${activeTableId}]`);
+      }
       if (currentTablePin && currentTablePin !== "----") {
         noteParts.push(`[PIN:${currentTablePin}]`);
       }
       if (batchNote.trim()) noteParts.push(batchNote.trim());
 
-      const { error } = await supabase.from("orders").insert({
-        restaurant_id: restaurantId,
+      const localOrderId = (activeSession?.orders && activeSession.orders[0]?.id) || 'local_' + Date.now();
+
+      // 1. Instant Local SQLite persistence (Guaranteed offline safety)
+      await LocalSqliteStore.saveOrderLocally({
+        id: localOrderId,
+        restaurant_id: restaurantId || '',
         table_no: activeTableModal,
-        total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
-        status: "PREPARING",
-        payment_status: "PENDING",
-        customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
-        customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
-        items_json: itemsPayload,
-        note: noteParts.join(" "),
-      });
+        customer_name: activeSession?.customerName,
+        customer_phone: activeSession?.customerPhone,
+        total: (subtotal || 0),
+        items_json: manualCart.map((c: any) => ({ name: c.item?.name || c.name || 'Item', quantity: c.quantity, price: c.price, notes: c.notes })),
+        status: 'PREPARING',
+        payment_status: 'UNPAID',
+        created_at: new Date().toISOString(),
+        synced: 0,
+      }).catch(e => console.warn('Local SQLite write error:', e));
 
-      if (error) throw error;
-
-      // Print Thermal KOT Chit
-      setPrintChit({
-        type: "KOT",
-        mode: "DINE_IN",
+      // 2. Print Thermal KOT Chit
+      const kotData = {
+        type: "KOT" as const,
+        mode: "DINE_IN" as const,
         tableOrToken: activeTableModal,
         kotNumber: roundNum,
         customerName: manualCustomerName.trim() || activeSession?.customerName,
@@ -1401,17 +1768,52 @@ export default function PosPage() {
           notes: c.notes,
         })),
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setPrintChit(kotData);
+
+      printThermalChit({
+        restaurantName,
+        restaurantAddress,
+        type: 'KOT',
+        tableName: activeTableModal,
+        orderType: 'DINE_IN',
+        orderNumber: roundNum,
+        timestamp: kotData.time,
+        items: kotData.items.map(it => ({ name: it.name, quantity: it.quantity, notes: it.notes })),
+      }, {
+        fallbackCallback: () => {
+          setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+        }
       });
 
       showToast(`${activeTableModal}: Round #${roundNum} fired to kitchen`);
       setManualCart([]);
       setBatchNote("");
 
-      if (restaurantId) fetchActiveOrders(restaurantId);
+      // 3. Silent cloud push if online
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        try {
+          const { error } = await supabase.from("orders").insert({
+            restaurant_id: restaurantId,
+            table_no: activeTableModal,
+            total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+            status: "PREPARING",
+            payment_status: "PENDING",
+            customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
+            customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
+            items_json: itemsPayload,
+            note: noteParts.join(" "),
+          });
+          if (!error) {
+            await LocalSqliteStore.markOrderSynced(localOrderId);
+          }
+        } catch (netErr) {
+          console.warn("[POS] Fired KOT offline, queued in SQLite:", netErr);
+        }
+      }
 
-      setTimeout(() => {
-        window.print();
-      }, 100);
+      if (restaurantId) fetchActiveOrders(restaurantId);
+      OfflineSyncEngine.triggerSync();
     } catch (err: any) {
       showToast("Failed to fire KOT: " + (err.message || "Network Error"));
     } finally {
@@ -1441,44 +1843,118 @@ export default function PosPage() {
           notes: c.notes || "",
           isReady: true,
         }));
+        const manualTotal = manualCart.reduce((s, it) => s + it.price * it.quantity, 0);
+        const localOrderId = 'ord_' + Date.now();
 
-        await supabase.from("orders").insert({
-          restaurant_id: restaurantId,
+        // 1a. Instant 0ms Local SQLite persistence
+        await LocalSqliteStore.saveOrderLocally({
+          id: localOrderId,
+          restaurant_id: restaurantId || '',
           table_no: activeTableModal,
-          total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+          customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
+          customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || '',
+          total: manualTotal,
+          items_json: unsavedPayload,
           status: "COMPLETED",
           payment_status: "PAID",
           payment_method: "COUNTER",
-          customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
-          customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
-          items_json: unsavedPayload,
-          note: `[POS Final Round - PAID] [PIN:${currentTablePin}]`,
-        });
+          created_at: new Date().toISOString(),
+          synced: 0,
+        }).catch(e => console.warn('Local SQLite write error:', e));
+
+        // 1b. Cloud push if online
+        if (typeof navigator === 'undefined' || navigator.onLine) {
+          try {
+            const { error: insErr } = await supabase.from("orders").insert({
+              id: localOrderId,
+              restaurant_id: restaurantId,
+              table_no: activeTableModal,
+              total: manualTotal,
+              status: "COMPLETED",
+              payment_status: "PAID",
+              payment_method: "COUNTER",
+              customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
+              customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
+              items_json: unsavedPayload,
+              note: `[POS Final Round - PAID] ${activeTableId ? `[tid:${activeTableId}] ` : ''}[PIN:${currentTablePin}]`,
+            });
+            if (!insErr) {
+              await LocalSqliteStore.markOrderSynced(localOrderId);
+            }
+          } catch (netErr) {
+            console.warn("[POS] Staged cart paid offline:", netErr);
+          }
+        }
 
         setManualCart([]);
       }
 
-      // 2. Mark existing active orders as PAID (Triggers Thank You View on customer device via Supabase Realtime!)
+      // 2. Mark existing active orders as PAID locally in SQLite
       if (orderIds.length > 0) {
-        const { error } = await supabase
-          .from("orders")
-          .update({
+        for (const ord of nonCancelledOrders) {
+          await LocalSqliteStore.saveOrderLocally({
+            id: ord.id,
+            restaurant_id: restaurantId || '',
+            table_no: ord.table_no,
+            customer_name: ord.customer_name,
+            customer_phone: ord.customer_phone,
+            total: ord.total,
+            items_json: ord.items_json,
+            status: ord.status || "COMPLETED",
             payment_status: "PAID",
             payment_method: "COUNTER",
-          })
-          .in("id", orderIds);
+            created_at: ord.created_at || new Date().toISOString(),
+            synced: 0,
+          }).catch(() => {});
+        }
 
-        if (error) throw error;
+        if (typeof navigator === 'undefined' || navigator.onLine) {
+          try {
+            const { error: updErr } = await supabase
+              .from("orders")
+              .update({
+                payment_status: "PAID",
+                payment_method: "COUNTER",
+              })
+              .in("id", orderIds);
+            if (!updErr) {
+              for (const oId of orderIds) {
+                await LocalSqliteStore.markOrderSynced(oId);
+              }
+            }
+          } catch (netErr) {
+            console.warn("[POS] Mark paid offline:", netErr);
+          }
+        }
       }
+
+      // 3. Save to local permanent invoice archive
+      const localInvId = 'inv_' + Date.now();
+      await LocalSqliteStore.saveInvoice({
+        id: localInvId,
+        restaurant_id: restaurantId || '',
+        order_number: String(activeTableModal),
+        table_name: String(activeTableModal),
+        order_type: 'DINE_IN',
+        customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
+        customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || '',
+        total_amount: subtotal || 0,
+        payment_mode: 'COUNTER',
+        payment_status: 'PAID',
+        items_json: (activeSession?.orders || []).flatMap((o: any) => o.items_json || []),
+        created_at: new Date().toISOString(),
+        synced: 0,
+      }).catch(e => console.warn('Local SQLite invoice error:', e));
 
       showToast(`${activeTableModal}: Payment collected! Thank you page shown on customer's phone.`);
       if (autoPrintOnSettle) {
         setTimeout(() => handlePrintGuestBill(), 120);
       }
       if (restaurantId) {
-        fetchActiveOrders(restaurantId);
-        fetchPastOrders(restaurantId);
+        await fetchActiveOrders(restaurantId);
+        await fetchPastOrders(restaurantId);
       }
+      OfflineSyncEngine.triggerSync();
     } catch (err: any) {
       showToast("Failed to mark payment: " + (err.message || "Error"));
     } finally {
@@ -1495,16 +1971,44 @@ export default function PosPage() {
       const nonCancelledOrders = (activeSession?.orders || []).filter((o) => o.status !== "CANCELLED");
       const orderIds = nonCancelledOrders.map((o) => o.id);
 
+      // 1. Mark orders as COMPLETED and PAID locally in SQLite
       if (orderIds.length > 0) {
-        const { error } = await supabase
-          .from("orders")
-          .update({
+        for (const ord of nonCancelledOrders) {
+          await LocalSqliteStore.saveOrderLocally({
+            id: ord.id,
+            restaurant_id: restaurantId || '',
+            table_no: ord.table_no,
+            customer_name: ord.customer_name,
+            customer_phone: ord.customer_phone,
+            total: ord.total,
+            items_json: ord.items_json,
             status: "COMPLETED",
             payment_status: "PAID",
-          })
-          .in("id", orderIds);
+            payment_method: ord.payment_method || "COUNTER",
+            created_at: ord.created_at || new Date().toISOString(),
+            synced: 0,
+          }).catch(() => {});
+        }
 
-        if (error) throw error;
+        // 2. Cloud update if online
+        if (typeof navigator === 'undefined' || navigator.onLine) {
+          try {
+            const { error } = await supabase
+              .from("orders")
+              .update({
+                status: "COMPLETED",
+                payment_status: "PAID",
+              })
+              .in("id", orderIds);
+            if (!error) {
+              for (const oId of orderIds) {
+                await LocalSqliteStore.markOrderSynced(oId);
+              }
+            }
+          } catch (netErr) {
+            console.warn("[POS] Settle table offline:", netErr);
+          }
+        }
       }
 
       showToast(`${activeTableModal} has been settled and is now vacant. PIN cycled for next party.`);
@@ -1513,9 +2017,10 @@ export default function PosPage() {
       setBatchNote("");
 
       if (restaurantId) {
-        fetchActiveOrders(restaurantId);
-        fetchPastOrders(restaurantId);
+        await fetchActiveOrders(restaurantId);
+        await fetchPastOrders(restaurantId);
       }
+      OfflineSyncEngine.triggerSync();
     } catch (err: any) {
       showToast("Failed to settle table: " + (err.message || "Error"));
     } finally {
@@ -1526,15 +2031,43 @@ export default function PosPage() {
   const handleApproveOrder = async (orderId: string) => {
     setIsSubmitting(true);
     try {
-      const { error } = await supabase
-        .from("orders")
-        .update({ status: "PREPARING" })
-        .eq("id", orderId);
-      if (error) throw error;
+      const targetOrd = activeOrders.find((o) => o.id === orderId);
+      if (targetOrd && restaurantId) {
+        await LocalSqliteStore.saveOrderLocally({
+          id: targetOrd.id,
+          restaurant_id: restaurantId,
+          table_no: targetOrd.table_no,
+          customer_name: targetOrd.customer_name,
+          customer_phone: targetOrd.customer_phone,
+          total: targetOrd.total,
+          items_json: targetOrd.items_json,
+          status: "PREPARING",
+          payment_status: targetOrd.payment_status,
+          payment_method: targetOrd.payment_method,
+          created_at: targetOrd.created_at || new Date().toISOString(),
+          synced: 0,
+        }).catch(() => {});
+      }
+
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        try {
+          const { error } = await supabase
+            .from("orders")
+            .update({ status: "PREPARING" })
+            .eq("id", orderId);
+          if (!error) {
+            await LocalSqliteStore.markOrderSynced(orderId);
+          }
+        } catch (netErr) {
+          console.warn("[POS] Approve order offline:", netErr);
+        }
+      }
+
       showToast("Order approved & fired to kitchen!");
       if (restaurantId) {
         fetchActiveOrders(restaurantId);
       }
+      OfflineSyncEngine.triggerSync();
     } catch (err: any) {
       showToast("Failed to approve order: " + (err.message || "Error"));
     } finally {
@@ -1545,15 +2078,43 @@ export default function PosPage() {
   const handleRejectOrder = async (orderId: string) => {
     setIsSubmitting(true);
     try {
-      const { error } = await supabase
-        .from("orders")
-        .update({ status: "CANCELLED" })
-        .eq("id", orderId);
-      if (error) throw error;
+      const targetOrd = activeOrders.find((o) => o.id === orderId);
+      if (targetOrd && restaurantId) {
+        await LocalSqliteStore.saveOrderLocally({
+          id: targetOrd.id,
+          restaurant_id: restaurantId,
+          table_no: targetOrd.table_no,
+          customer_name: targetOrd.customer_name,
+          customer_phone: targetOrd.customer_phone,
+          total: targetOrd.total,
+          items_json: targetOrd.items_json,
+          status: "CANCELLED",
+          payment_status: targetOrd.payment_status,
+          payment_method: targetOrd.payment_method,
+          created_at: targetOrd.created_at || new Date().toISOString(),
+          synced: 0,
+        }).catch(() => {});
+      }
+
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        try {
+          const { error } = await supabase
+            .from("orders")
+            .update({ status: "CANCELLED" })
+            .eq("id", orderId);
+          if (!error) {
+            await LocalSqliteStore.markOrderSynced(orderId);
+          }
+        } catch (netErr) {
+          console.warn("[POS] Reject order offline:", netErr);
+        }
+      }
+
       showToast("Order rejected / voided.");
       if (restaurantId) {
         fetchActiveOrders(restaurantId);
       }
+      OfflineSyncEngine.triggerSync();
     } catch (err: any) {
       showToast("Failed to reject order: " + (err.message || "Error"));
     } finally {
@@ -1585,9 +2146,9 @@ export default function PosPage() {
       });
     });
 
-    setPrintChit({
-      type: "BILL",
-      mode: "DINE_IN",
+    const billChitData = {
+      type: "BILL" as const,
+      mode: "DINE_IN" as const,
       tableOrToken: activeTableModal,
       customerName: manualCustomerName || activeSession?.customerName,
       customerPhone: manualCustomerPhone || activeSession?.customerPhone,
@@ -1606,17 +2167,38 @@ export default function PosPage() {
       isInclusive: dineInBillCalc.isInclusive,
       isComposition: dineInBillCalc.isComposition,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    });
+    };
+    setPrintChit(billChitData);
 
-    setTimeout(() => {
-      window.print();
-    }, 100);
+    printThermalChit({
+      restaurantName,
+      restaurantAddress,
+      gstin: taxSettings.gstin,
+      fssai: taxSettings.fssai,
+      type: 'BILL',
+      tableName: activeTableModal,
+      orderType: 'DINE_IN',
+      timestamp: billChitData.time,
+      items: allBillItems.map(it => ({ name: it.name, quantity: it.quantity, price: it.price, total: (it.price || 0) * (it.quantity || 1) })),
+      subtotal,
+      discount: effectiveDiscount > 0 ? effectiveDiscount : undefined,
+      serviceCharge: serviceChargeAmount > 0 ? serviceChargeAmount : undefined,
+      cgst: cgstAmount,
+      sgst: sgstAmount,
+      totalGst: gstAmount,
+      grandTotal,
+      footerMessage: "Thank you! Visit again.",
+    }, {
+      fallbackCallback: () => {
+        setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+      }
+    });
   };
 
   const handleReprintKOT = (round: TableRound) => {
-    setPrintChit({
-      type: "KOT",
-      mode: "DINE_IN",
+    const reprintKotData = {
+      type: "KOT" as const,
+      mode: "DINE_IN" as const,
       tableOrToken: activeTableModal || "Table",
       kotNumber: round.roundNumber,
       customerName: activeSession?.customerName,
@@ -1627,11 +2209,23 @@ export default function PosPage() {
         notes: it.notes,
       })),
       time: new Date(round.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    });
+    };
+    setPrintChit(reprintKotData);
 
-    setTimeout(() => {
-      window.print();
-    }, 100);
+    printThermalChit({
+      restaurantName,
+      restaurantAddress,
+      type: 'KOT',
+      tableName: activeTableModal || "Table",
+      orderType: 'DINE_IN',
+      orderNumber: round.roundNumber,
+      timestamp: reprintKotData.time,
+      items: reprintKotData.items.map(it => ({ name: it.name, quantity: it.quantity, notes: it.notes })),
+    }, {
+      fallbackCallback: () => {
+        setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+      }
+    });
   };
 
   /* ─── 10. Table Transfer ────────────────────────────────────────── */
@@ -1711,7 +2305,7 @@ export default function PosPage() {
     return maxToken > 0 ? maxToken + 1 : todayTakeawayOrders.length + 1;
   }, [todayTakeawayOrders]);
 
-  const currentToken = tokenOverride ?? nextTokenNumber;
+  const currentToken = tokenOverride ?? randomToken;
 
   const takeawaySubtotal = useMemo(() => {
     return takeawayCart.reduce((sum, it) => sum + it.price * it.quantity, 0);
@@ -1807,8 +2401,8 @@ export default function PosPage() {
 
     setIsSubmitting(true);
     try {
-      const tokenFormatted = `Token #${String(currentToken).padStart(2, "0")}`;
-      const tokenIdentifier = `Takeaway #${String(currentToken).padStart(2, "0")}`;
+      const tokenFormatted = `Token #${currentToken}`;
+      const tokenIdentifier = `Takeaway #${currentToken}`;
 
       const itemsPayload = takeawayCart.map((c) => ({
         item: {
@@ -1831,20 +2425,66 @@ export default function PosPage() {
       if (cashChangeDue !== null && cashChangeDue >= 0) noteParts.push(`[Tender: ₹${cashTenderAmount}, Change: ₹${cashChangeDue}]`);
       if (takeawayBatchNote.trim()) noteParts.push(takeawayBatchNote.trim());
 
-      const { error } = await supabase.from("orders").insert({
-        restaurant_id: restaurantId,
-        table_no: tokenIdentifier,
-        total: takeawayTotal,
-        status: "PREPARING",
-        payment_status: "PAID",
-        payment_method: takeawayPaymentMethod,
-        customer_name: takeawayCustomerName.trim() || "Takeaway Guest",
-        customer_phone: takeawayCustomerPhone.trim() || null,
-        items_json: itemsPayload,
-        note: noteParts.join(" "),
-      });
+      const localTakeawayId = 'tok_' + Date.now();
 
-      if (error) throw error;
+      // 1. Instant Local SQLite persistence
+      await LocalSqliteStore.saveOrderLocally({
+        id: localTakeawayId,
+        restaurant_id: restaurantId || '',
+        table_no: tokenIdentifier,
+        customer_name: takeawayCustomerName || 'Takeaway Guest',
+        customer_phone: takeawayCustomerPhone || '',
+        total: takeawayTotal,
+        items_json: takeawayCart.map((c: any) => ({ name: c.item?.name || c.name || 'Item', quantity: c.quantity, price: c.price, notes: c.notes })),
+        status: 'COMPLETED',
+        payment_status: 'PAID',
+        payment_method: takeawayPaymentMethod,
+        created_at: new Date().toISOString(),
+        synced: 0,
+      }).catch(e => console.warn('Local SQLite write error:', e));
+
+      // Save to permanent local invoices archive
+      await LocalSqliteStore.saveInvoice({
+        id: 'inv_' + localTakeawayId,
+        restaurant_id: restaurantId || '',
+        order_number: tokenFormatted,
+        table_name: tokenFormatted,
+        order_type: 'TAKEAWAY',
+        customer_name: takeawayCustomerName || 'Takeaway Guest',
+        customer_phone: takeawayCustomerPhone || '',
+        total_amount: takeawayTotal,
+        payment_mode: takeawayPaymentMethod,
+        payment_status: 'PAID',
+        items_json: itemsPayload,
+        created_at: new Date().toISOString(),
+        synced: 0,
+      }).catch(e => console.warn('Local SQLite invoice error:', e));
+
+      // 2. Silent cloud push if online
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        try {
+          const { error } = await supabase.from("orders").insert({
+            restaurant_id: restaurantId,
+            table_no: tokenIdentifier,
+            total: takeawayTotal,
+            status: "PREPARING",
+            payment_status: "PAID",
+            payment_method: takeawayPaymentMethod,
+            customer_name: takeawayCustomerName.trim() || "Takeaway Guest",
+            customer_phone: takeawayCustomerPhone.trim() || null,
+            items_json: itemsPayload,
+            note: noteParts.join(" "),
+          });
+          if (!error) {
+            await LocalSqliteStore.markOrderSynced(localTakeawayId);
+            await LocalSqliteStore.markInvoiceSynced('inv_' + localTakeawayId);
+          }
+        } catch (netErr) {
+          console.warn("[POS] Processed takeaway offline, queued in SQLite:", netErr);
+        }
+      }
+
+      OfflineSyncEngine.triggerSync();
 
       // Set Thermal Print Chit
       setPrintChit({
@@ -1887,16 +2527,39 @@ export default function PosPage() {
       setTakeawayDiscountPercent(0);
       setTakeawayDiscountRupees("");
       setTakeawayShowDiscount(false);
-      setTokenOverride(currentToken + 1);
+      setRandomToken(generate4DigitToken());
+      setTokenOverride(null);
+      setShowCashTenderModal(false);
 
       if (restaurantId) {
         fetchActiveOrders(restaurantId);
         fetchPastOrders(restaurantId);
       }
 
-      setTimeout(() => {
-        window.print();
-      }, 100);
+      printThermalChit({
+        restaurantName,
+        restaurantAddress,
+        gstin: taxSettings.gstin,
+        fssai: taxSettings.fssai,
+        type: 'TOKEN',
+        tableName: tokenFormatted,
+        orderType: 'TAKEAWAY',
+        orderNumber: currentToken,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        items: takeawayCart.map(c => ({ name: c.name, quantity: c.quantity, price: c.price, notes: c.notes })),
+        subtotal: takeawaySubtotal,
+        packagingCharge: takeawayPackagingAmount,
+        cgst: takeawayBillCalc.cgstAmount,
+        sgst: takeawayBillCalc.sgstAmount,
+        totalGst: takeawayBillCalc.totalGst,
+        grandTotal: takeawayTotal,
+        paymentMode: takeawayPaymentMethod,
+        footerMessage: "Thank you! Visit again.",
+      }, {
+        fallbackCallback: () => {
+          setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+        }
+      });
     } catch (err: any) {
       showToast("Failed to process token: " + (err.message || "Error"));
     } finally {
@@ -1944,9 +2607,9 @@ export default function PosPage() {
       settings: taxSettings,
     });
 
-    setPrintChit({
-      type: "BILL",
-      mode: "TAKEAWAY",
+    const reprintTakeawayChit = {
+      type: "BILL" as const,
+      mode: "TAKEAWAY" as const,
       tableOrToken: tokenFormatted,
       customerName: order.customer_name || "Takeaway Guest",
       customerPhone: order.customer_phone || undefined,
@@ -1962,289 +2625,439 @@ export default function PosPage() {
       isInclusive: reprintCalc.isInclusive,
       isComposition: reprintCalc.isComposition,
       time: new Date(order.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    });
+    };
+    setPrintChit(reprintTakeawayChit);
 
-    setTimeout(() => {
-      window.print();
-    }, 100);
+    printThermalChit({
+      restaurantName,
+      restaurantAddress,
+      gstin: taxSettings.gstin,
+      fssai: taxSettings.fssai,
+      type: 'BILL',
+      tableName: tokenFormatted,
+      orderType: 'TAKEAWAY',
+      timestamp: reprintTakeawayChit.time,
+      items: items.map(it => ({ name: it.name, quantity: it.quantity, price: it.price })),
+      subtotal: order.total,
+      cgst: reprintCalc.cgstAmount,
+      sgst: reprintCalc.sgstAmount,
+      totalGst: reprintCalc.totalGst,
+      grandTotal: order.total,
+      footerMessage: "Thank you! Visit again.",
+    }, {
+      fallbackCallback: () => {
+        setTimeout(() => { if (typeof window !== 'undefined') window.print(); }, 100);
+      }
+    });
   };
 
   /* ─── Render View ────────────────────────────────────────────────── */
   return (
-    <div className="flex flex-col h-screen bg-[#FAF8F7] text-zinc-900 select-none overflow-hidden font-sans">
+    <div className="flex flex-col h-full bg-white dark:bg-transparent text-zinc-900 dark:text-zinc-100 select-none overflow-hidden font-sans">
       
-      {/* ── TOP DECK / NAVIGATION BAR ── */}
-      <header className="h-14 bg-white px-4 sm:px-6 flex items-center justify-between shrink-0 z-40 relative">
-        <Link
-          href="/dashboard"
-          className="flex items-center gap-2 text-zinc-700 hover:text-black font-semibold text-xs tracking-tight transition-colors shrink-0"
-        >
-          <span className="w-7 h-7 rounded-lg bg-zinc-100 flex items-center justify-center text-zinc-600">
-            <ChevronLeft size={16} />
-          </span>
-          <span className="hidden sm:inline">Back to Dashboard</span>
-        </Link>
-
-        {/* Inventory-style Tab Switcher */}
-        <div className="bg-gray-100/80 p-1 rounded-xl flex items-center gap-1 w-full max-w-xs shadow-inner border border-gray-200/50">
-          <button 
-            type="button"
-            onClick={() => setTerminalMode("DINE_IN")}
-            className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
-              terminalMode === "DINE_IN" 
-                ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
-                : "text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            <UtensilsCrossed size={14} className={terminalMode === "DINE_IN" ? "text-[#E46254]" : ""} />
-            Dine-In
-          </button>
-          <button 
-            type="button"
-            onClick={() => {
-              setTerminalMode("TAKEAWAY");
-              setActiveTableModal(null);
-            }}
-            className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
-              terminalMode === "TAKEAWAY" 
-                ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900 font-semibold" 
-                : "text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            <ShoppingBag size={14} className={terminalMode === "TAKEAWAY" ? "text-[#E46254]" : ""} />
-            Takeaway
-          </button>
-        </div>
-
-        {/* Empty Balancer for True Center Alignment */}
-        <div className="w-7 sm:w-28 shrink-0" />
-      </header>
-
-      {/* ── FLOOR FILTER TOOLBAR ── */}
-      <div className="px-6 py-3 bg-white border-b border-zinc-200/80 flex flex-wrap items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2 flex-1 max-w-md">
-          <div className="relative w-full">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
-            <input
-              ref={searchInputRef}
-              type="text"
-              placeholder="Search table, guest name or phone... (Press '/')"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-8 py-1.5 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all placeholder:text-zinc-400"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Table Filter Tabs */}
-        <div className="flex items-center gap-1.5 bg-[#FAF8F7] p-1 rounded-xl border border-zinc-200/80 text-xs">
-          {(["ALL", "OCCUPIED", "VACANT"] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setTableFilter(tab)}
-              className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                tableFilter === tab
-                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
-                  : "text-zinc-500 hover:text-zinc-800"
-              }`}
-            >
-              {tab === "ALL" && `All Tables (${locations.length})`}
-              {tab === "OCCUPIED" && `Running (${floorStats.occupied})`}
-              {tab === "VACANT" && `Vacant (${floorStats.vacant})`}
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* ── FLOOR GRID VIEW ── */}
-      <div className="flex-1 overflow-y-auto p-6 slim-scrollbar">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 slim-scrollbar bg-[#FAF8F7]/40 dark:bg-transparent">
         {loading ? (
           <div className="h-64 flex flex-col items-center justify-center gap-3 text-zinc-400">
             <div className="w-8 h-8 border-2 border-zinc-200 border-t-[#E46254] rounded-full animate-spin" />
-            <p className="text-xs font-medium">Loading restaurant dining floor...</p>
+            <p className="text-xs font-medium">Loading tables...</p>
           </div>
-        ) : filteredTables.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center text-center p-6 bg-white rounded-2xl border border-zinc-200/80 max-w-md mx-auto my-12">
-            <div className="w-12 h-12 rounded-2xl bg-[#FAF8F7] border border-zinc-200/80 flex items-center justify-center text-zinc-400 mb-3">
-              <UtensilsCrossed size={20} />
-            </div>
-            <h3 className="font-bold text-sm text-zinc-800">No tables found</h3>
+        ) : locations.length === 0 ? (
+          <div className="h-64 flex flex-col items-center justify-center text-center p-6 bg-white rounded-2xl border border-zinc-200/80 max-w-md mx-auto my-12 shadow-2xs">
+            <h3 className="font-bold text-sm text-zinc-800">No tables configured</h3>
             <p className="text-xs text-zinc-500 mt-1 max-w-xs">
-              {searchQuery
-                ? `No tables matching "${searchQuery}"`
-                : "Create your dining tables in Locations to start taking orders and viewing your floor layout."}
+              Add your dining tables in Locations to view your floor.
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-            {filteredTables.map((table) => {
-              const session = tableSessionMap.get(table.name);
-              const isOccupied = session && session.status !== "VACANT";
-              const hasNewRound = session?.hasNewRound;
-              const hasBillRequest = session?.hasBillRequest;
-              const hasUpiVerifyRequest = session?.hasUpiVerifyRequest;
-              const isPaid = session?.isPaid;
-              const isBillPrinted = session?.status === "BILLED";
-              const elapsedMinutes = session?.firstOrderAt
-                ? Math.max(0, Math.floor((Date.now() - new Date(session.firstOrderAt).getTime()) / 60000))
-                : 0;
+          <div className="max-w-7xl mx-auto space-y-4">
+            {/* ── Floor Zone Filter Bar (Apple Milled Glass Dock) ── */}
+            {allZones.length > 1 && (
+              <div className="flex items-center overflow-x-auto pb-2 scrollbar-none">
+                <div className="p-1 rounded-2xl bg-zinc-200/60 dark:bg-zinc-950/70 backdrop-blur-2xl border border-zinc-200/80 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.1),0_8px_24px_rgba(0,0,0,0.5)] inline-flex items-center gap-1 max-w-full">
+                  <button
+                    onClick={() => setSelectedZone("ALL")}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      selectedZone === "ALL"
+                        ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-zinc-900 dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30 border border-zinc-200/60 dark:border-transparent"
+                        : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/60 dark:hover:bg-white/[0.05]"
+                    }`}
+                  >
+                    All Zones ({locations.length})
+                  </button>
+                  {allZones.map((z) => {
+                    const count = locations.filter(
+                      (l) => (tableZones[l.id] || l.zone || "Main Floor") === z
+                    ).length;
+                    return (
+                      <button
+                        key={z}
+                        onClick={() => setSelectedZone(z)}
+                        className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                          selectedZone === z
+                            ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-zinc-900 dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30 border border-zinc-200/60 dark:border-transparent"
+                            : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/60 dark:hover:bg-white/[0.05]"
+                        }`}
+                      >
+                        {z} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
-              const normTbl = normalizeTableIdentifier(table.name);
-              const cardActive = activeOrders.filter(
-                (o) => normalizeTableIdentifier(o.table_no) === normTbl && o.status !== "CANCELLED"
-              );
-              const cardPast = pastOrdersHistory.filter(
-                (o) => normalizeTableIdentifier(o.table_no) === normTbl && o.payment_status === "PAID"
-              );
-              const { pin: cardPin } = resolveTablePinAndSeed(table.name, cardActive, cardPast);
+            {/* ── Floor Table Cards (Grouped by Zone when ALL, or Filtered by Zone) ── */}
+            {selectedZone === "ALL" && allZones.length > 1 ? (
+              <div className="space-y-6">
+                {allZones.map((zoneName) => {
+                  const zoneTables = locations.filter(
+                    (t) => (tableZones[t.id] || t.zone || "Main Floor") === zoneName
+                  );
+                  if (zoneTables.length === 0) return null;
 
-              return (
-                <div
-                  key={table.id}
-                  onClick={() => handleOpenTableCommand(table.name)}
-                  className={`rounded-2xl border p-4 transition-all flex flex-col justify-between cursor-pointer min-h-[175px] group shadow-2xs hover:shadow-md hover:-translate-y-0.5 ${
-                    hasNewRound
-                      ? "bg-rose-50/80 border-[#E46254] ring-4 ring-[#E46254]/25 table-attention-shake"
-                      : hasBillRequest
-                      ? "bg-amber-50/60 border-amber-300 ring-2 ring-amber-400/20"
-                      : hasUpiVerifyRequest
-                      ? "bg-blue-50/60 border-blue-300 ring-2 ring-blue-400/20"
-                      : isPaid
-                      ? "bg-emerald-50/50 border-emerald-300 ring-1 ring-emerald-300/40"
-                      : isOccupied
-                      ? "bg-white border-[#E46254]/40 ring-1 ring-[#E46254]/20"
-                      : "bg-white border-zinc-200/80 hover:border-zinc-300"
-                  }`}
-                >
-                  {/* Top Bar: Table Identifier & PIN & Status */}
-                  <div>
-                    <div className="flex items-start justify-between gap-1">
-                      <div>
-                        <span className="font-black text-base text-zinc-900 group-hover:text-[#E46254] transition-colors tracking-tight">
-                          {table.name}
-                        </span>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          {table.capacity && (
-                            <span className="text-[10px] text-zinc-400 font-medium">
-                              {table.capacity}p
-                            </span>
-                          )}
-                          <span className="text-[10px] font-mono font-bold text-zinc-600 bg-zinc-100 px-1 py-0.2 rounded border border-zinc-200/60">
-                            PIN: {cardPin}
+                  const sortedZoneTables = sortTablesByAlertAndName(zoneTables);
+                  const zoneAlertCount = sortedZoneTables.filter((t) => {
+                    const s = tableSessionMap.get(t.id) || tableSessionMap.get(t.name);
+                    return s?.hasNewRound || s?.hasBillRequest || s?.hasUpiVerifyRequest;
+                  }).length;
+
+                  return (
+                    <div key={zoneName} className="space-y-2.5">
+                      <div className="flex items-center justify-between pb-2 border-b border-zinc-200/70 dark:border-white/[0.07]">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-[#E46254] dark:shadow-[0_0_8px_#E46254]" />
+                          <h3 className="text-xs sm:text-sm font-bold tracking-tight text-zinc-900 dark:text-white uppercase">
+                            {zoneName}
+                          </h3>
+                          <span className="text-[11px] font-semibold text-zinc-400">
+                            ({sortedZoneTables.length} {sortedZoneTables.length === 1 ? "table" : "tables"})
                           </span>
                         </div>
-                      </div>
-
-                      {/* Status Indicator */}
-                      <div className="flex items-center gap-1 flex-wrap justify-end">
-                        {hasNewRound ? (
-                          <span className="px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-extrabold shadow-sm flex items-center gap-1 animate-pulse">
-                            <span className="w-1.5 h-1.5 rounded-full bg-white" />
-                            <span>New QR Order</span>
-                          </span>
-                        ) : hasBillRequest ? (
-                          <span className="px-2 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-bold shadow-2xs">
-                            Bill Call
-                          </span>
-                        ) : hasUpiVerifyRequest ? (
-                          <span className="px-2 py-0.5 rounded-full bg-zinc-900 text-white text-[10px] font-bold shadow-2xs">
-                            Verify UPI
-                          </span>
-                        ) : isPaid ? (
-                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200">
-                            Paid • Seated
-                          </span>
-                        ) : isBillPrinted ? (
-                          <span className="px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 text-[10px] font-bold border border-purple-200">
-                            Billed
-                          </span>
-                        ) : isOccupied ? (
-                          <span className="px-2 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[10px] font-bold border border-[#E46254]/20">
-                            Running
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 text-[10px] font-medium border border-zinc-200/60">
-                            Vacant
+                        {zoneAlertCount > 0 && (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-[#E46254]/10 text-[#E46254] border border-[#E46254]/20 animate-pulse">
+                            {zoneAlertCount} {zoneAlertCount === 1 ? "Alert" : "Alerts"}
                           </span>
                         )}
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
+                        {sortedZoneTables.map((table) => {
+                          const session = tableSessionMap.get(table.id) || tableSessionMap.get(table.name);
+                          const isOccupied = session && session.status !== "VACANT";
+                          const hasNewRound = session?.hasNewRound;
+                          const hasBillRequest = session?.hasBillRequest;
+                          const hasUpiVerifyRequest = session?.hasUpiVerifyRequest;
+                          const isPaid = session?.isPaid;
+                          const elapsedMinutes = session?.firstOrderAt
+                            ? Math.max(0, Math.floor((currentTimeTick - new Date(session.firstOrderAt).getTime()) / 60000))
+                            : 0;
+
+                          const totalFormatted = session?.totalBill 
+                            ? `₹${Math.round(session.totalBill).toLocaleString("en-IN")}`
+                            : "₹0";
+
+                          const capacityCount = table.capacity || 4;
+
+                          return (
+<div
+                                key={table.id}
+                                onClick={() => handleOpenTableCommand(table.name, table.id)}
+                                className={`group relative rounded-2xl p-3.5 sm:p-4 flex flex-col justify-between cursor-pointer min-h-[140px] transition-all duration-200 select-none active:scale-[0.98] ${
+                                  hasNewRound
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-[#E46254]/[0.18] dark:via-[#E46254]/[0.05] dark:to-transparent border-2 border-[#E46254] shadow-lg shadow-[#E46254]/20 dark:shadow-[inset_0_1px_2px_0_rgba(255,255,255,0.25),0_0_36px_rgba(228,98,84,0.35),0_8px_24px_rgba(0,0,0,0.6)] ring-2 ring-[#E46254]/30 dark:ring-[#E46254]/40 table-attention-shake"
+                                    : hasBillRequest
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-rose-500/[0.12] dark:via-rose-500/[0.03] dark:to-transparent border-2 border-amber-400 dark:border-rose-500/50 shadow-md shadow-amber-400/20 dark:shadow-[inset_0_1px_1px_0_rgba(255,180,190,0.2),0_0_32px_rgba(244,63,94,0.2),0_8px_24px_rgba(0,0,0,0.6)] table-attention-shake"
+                                    : isPaid
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-emerald-500/[0.1] dark:via-emerald-500/[0.02] dark:to-transparent border-2 border-emerald-500/80 dark:border-emerald-500/50 shadow-xs hover:border-emerald-600 dark:hover:border-emerald-400 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(160,255,200,0.2),0_0_24px_rgba(16,185,129,0.18),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    : hasUpiVerifyRequest
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-blue-500/[0.1] dark:via-blue-500/[0.02] dark:to-transparent border-2 border-blue-400 dark:border-blue-500/50 shadow-xs hover:border-blue-500 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(180,220,255,0.2),0_0_24px_rgba(59,130,246,0.15),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    : isOccupied
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-amber-500/[0.08] dark:via-amber-500/[0.025] dark:to-transparent border border-[#E46254]/75 dark:border-amber-500/35 shadow-[0_2px_12px_-2px_rgba(228,98,84,0.18),0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[inset_0_1px_1px_0_rgba(255,210,130,0.18),0_0_24px_rgba(245,158,11,0.12),0_8px_24px_rgba(0,0,0,0.6)] ring-1 ring-[#E46254]/25 dark:ring-transparent hover:border-[#E46254] dark:hover:border-amber-500/60 hover:shadow-[0_4px_18px_-2px_rgba(228,98,84,0.25)]"
+                                    : "bg-white/90 dark:bg-gradient-to-b dark:from-white/[0.04] dark:via-white/[0.015] dark:to-transparent backdrop-blur-2xl border border-zinc-200/80 dark:border-white/[0.08] shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08),0_8px_24px_rgba(0,0,0,0.5)] hover:bg-white dark:hover:from-white/[0.07] dark:hover:border-white/[0.22] hover:border-zinc-300 hover:shadow-md dark:hover:shadow-[0_12px_32px_rgba(0,0,0,0.7)]"
+                                }`}
+                              >
+                                {/* Top Specular Edge Glow for Running & Alert Cards */}
+                                {hasNewRound && (
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-[#E46254] rounded-b-full shadow-xs dark:shadow-[0_0_10px_#E46254]" />
+                                )}
+                                {hasBillRequest && !hasNewRound && (
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-amber-400 dark:bg-rose-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#f43f5e]" />
+                                )}
+                                {isPaid && !hasNewRound && (
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-emerald-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#10b981]" />
+                                )}
+                                {isOccupied && !hasNewRound && !hasBillRequest && !isPaid && (
+                                  <div className="absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-[#E46254] dark:via-amber-400/80 to-transparent rounded-full opacity-90" />
+                                )}
+
+                                {/* ── 1. Top Row: Table Name + Capacity & Status Chip ── */}
+                                <div className="flex items-start justify-between gap-1.5">
+                                  <div>
+                                    <span className="font-black text-lg sm:text-xl tracking-tight text-zinc-900 dark:text-white group-hover:text-[#E46254] dark:group-hover:text-amber-300 transition-colors leading-none">
+                                      {table.name}
+                                    </span>
+                                    <div className="flex items-center gap-1 mt-1 text-zinc-400 dark:text-zinc-500">
+                                      <Users size={11} strokeWidth={2} />
+                                      <span className="text-[11px] font-semibold tracking-tight">{capacityCount}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Status Badges: True Translucent Crystal Badges */}
+                                  <div>
+                                    {hasNewRound ? (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wider shadow-xs dark:shadow-[0_0_12px_rgba(228,98,84,0.5)] animate-pulse">
+                                        New Order
+                                      </span>
+                                    ) : isPaid ? (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                                        <CheckCircle2 size={10} />
+                                        <span>Paid</span>
+                                      </span>
+                                    ) : hasBillRequest ? (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-50 dark:bg-rose-500/15 text-amber-800 dark:text-rose-300 border border-amber-200/80 dark:border-rose-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(244,63,94,0.2)]">
+                                        <Receipt size={10} />
+                                        <span>Bill</span>
+                                      </span>
+                                    ) : hasUpiVerifyRequest ? (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-500/30 text-[10px] font-bold tracking-wide">
+                                        <CreditCard size={10} />
+                                        <span>UPI</span>
+                                      </span>
+                                    ) : isOccupied ? (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#E46254] dark:text-amber-300 bg-[#E46254]/10 dark:bg-amber-500/15 border border-[#E46254]/20 dark:border-amber-500/30 dark:shadow-[0_0_10px_rgba(245,158,11,0.2)]">
+                                        Running
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-100/80 dark:bg-emerald-500/10 text-zinc-500 dark:text-emerald-400 border border-zinc-200/60 dark:border-emerald-500/20 text-[10px] font-semibold dark:shadow-[0_0_8px_rgba(16,185,129,0.15)]">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-emerald-400" />
+                                        <span>Free</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* ── 2. Middle Row: Guest / Order Insights or Vacant Prompt ── */}
+                                <div className="my-2">
+                                  {isOccupied ? (
+                                    <div className="space-y-0.5">
+                                      <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-200">
+                                        <User size={11} className="text-zinc-400 dark:text-zinc-500 shrink-0" />
+                                        <span className="text-[12px] font-bold truncate">
+                                          {session?.customerName || `Seated Guest`}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 pl-4">
+                                        {session?.rounds?.length || 0} {(session?.rounds?.length || 0) === 1 ? "round" : "rounds"} · {session?.allItems?.length || 0} items
+                                      </p>
+                                    </div>
+                                  ) : (
+                                    <div className="py-1">
+                                      <span className="text-[11.5px] font-medium text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-700 dark:group-hover:text-[#E46254] transition-colors flex items-center gap-1">
+                                        <Plus size={12} className="text-zinc-300 dark:text-zinc-600 group-hover:text-[#E46254] transition-colors" />
+                                        <span>Tap to Seat</span>
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* ── 3. Bottom Row: Bill Total + Live Elapsed Time ── */}
+                                <div className="pt-2 flex items-baseline justify-between border-t border-zinc-100/80 dark:border-white/[0.05]">
+                                  {isOccupied ? (
+                                    <>
+                                      <span className="text-[17px] font-black text-zinc-900 dark:text-white font-mono tracking-tight tabular-nums">
+                                        {totalFormatted}
+                                      </span>
+                                      {elapsedMinutes > 0 ? (
+                                        <span className="flex items-center gap-1 text-[10.5px] font-mono text-zinc-600 dark:text-zinc-300 font-semibold bg-zinc-100/90 dark:bg-white/[0.06] px-1.5 py-0.5 rounded-md border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_rgba(255,255,255,0.06)]">
+                                          <Clock size={10} className="text-zinc-400 dark:text-zinc-400" />
+                                          <span>{elapsedMinutes}m</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] font-mono text-emerald-700 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-500/15 px-1.5 py-0.5 rounded-md border border-emerald-200/60 dark:border-emerald-500/25">
+                                          Just in
+                                        </span>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span className="text-xs font-mono text-zinc-400 dark:text-zinc-600 font-medium">Ready</span>
+                                      <span className="text-[11px] font-semibold text-zinc-400 dark:text-zinc-400 group-hover:text-zinc-700 dark:group-hover:text-white flex items-center gap-0.5 transition-colors">
+                                        <span>Open</span>
+                                        <ArrowUpRight size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
                       </div>
                     </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
+                {(() => {
+                  const targetTables = selectedZone === "ALL"
+                    ? locations
+                    : locations.filter((t) => (tableZones[t.id] || t.zone || "Main Floor") === selectedZone);
+                  const sorted = sortTablesByAlertAndName(targetTables);
 
-                    {/* Middle: Active Session Details or Vacant State */}
-                    {isOccupied ? (
-                      <div className="space-y-1.5 mt-3 pt-3 border-t border-zinc-100">
-                        <div className="flex items-center justify-between text-xs">
-                          <div className="flex items-center gap-1.5 truncate text-zinc-700 font-medium">
-                            <User size={12} className="text-zinc-400 shrink-0" />
-                            <span className="truncate max-w-[110px]">
-                              {session?.customerName || "Dine-in Guest"}
-                            </span>
-                          </div>
-                          <span className="text-[10.5px] text-zinc-400 font-mono flex items-center gap-1 shrink-0">
-                            <Clock size={10} />
-                            {elapsedMinutes}m
-                          </span>
-                        </div>
+                  return sorted.map((table) => {
+                    const session = tableSessionMap.get(table.id) || tableSessionMap.get(table.name);
+                    const isOccupied = session && session.status !== "VACANT";
+                    const hasNewRound = session?.hasNewRound;
+                    const hasBillRequest = session?.hasBillRequest;
+                    const hasUpiVerifyRequest = session?.hasUpiVerifyRequest;
+                    const isPaid = session?.isPaid;
+                    const elapsedMinutes = session?.firstOrderAt
+                      ? Math.max(0, Math.floor((currentTimeTick - new Date(session.firstOrderAt).getTime()) / 60000))
+                      : 0;
 
-                        {session?.customerPhone && (
-                          <div className="flex items-center gap-1 text-[10.5px] text-zinc-500 font-mono">
-                            <Phone size={10} className="text-zinc-400" />
-                            <span>{session.customerPhone}</span>
-                          </div>
-                        )}
+                    const totalFormatted = session?.totalBill 
+                      ? `₹${Math.round(session.totalBill).toLocaleString("en-IN")}`
+                      : "₹0";
 
-                        <div className="flex items-center justify-between text-[10.5px] text-zinc-400 pt-0.5 font-medium">
-                          <span>
-                            {session?.rounds.length} {session?.rounds.length === 1 ? "round" : "rounds"}
-                          </span>
-                          <span className="font-mono font-semibold text-zinc-700">₹{session?.totalBill || 0}</span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="py-5 flex flex-col items-center justify-center text-center">
-                        <div className="w-8 h-8 rounded-full bg-[#FAF8F7] border border-zinc-200/60 flex items-center justify-center text-zinc-400 mb-1.5">
-                          <UtensilsCrossed size={14} />
-                        </div>
-                        <span className="text-[11px] text-zinc-400 font-medium">Ready for guests</span>
-                      </div>
-                    )}
-                  </div>
+                    const capacityCount = table.capacity || 4;
 
-                  {/* Bottom Action */}
-                  <div className="mt-3 pt-2.5 border-t border-zinc-100 flex items-center justify-between">
-                    {isOccupied ? (
-                      <>
-                        <div>
-                          <span className="text-[9.5px] text-zinc-400 uppercase tracking-wider font-semibold block">
-                            Bill Total
-                          </span>
-                          <span className="text-base font-black text-zinc-900 font-mono tabular-nums">
-                            ₹{session?.totalBill || 0}
-                          </span>
-                        </div>
-                        <span className="text-[11px] font-bold text-[#E46254] flex items-center gap-0.5 group-hover:translate-x-0.5 transition-transform">
-                          <span>Open</span>
-                          <ChevronRight size={13} />
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-[11px] font-bold text-zinc-600 group-hover:text-black flex items-center gap-1 w-full justify-center py-0.5">
-                        <Plus size={12} />
-                        <span>Seat Table</span>
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+                    return (
+<div
+                                key={table.id}
+                                onClick={() => handleOpenTableCommand(table.name, table.id)}
+                                className={`group relative rounded-2xl p-3.5 sm:p-4 flex flex-col justify-between cursor-pointer min-h-[140px] transition-all duration-200 select-none active:scale-[0.98] ${
+                                  hasNewRound
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-[#E46254]/[0.18] dark:via-[#E46254]/[0.05] dark:to-transparent border-2 border-[#E46254] shadow-lg shadow-[#E46254]/20 dark:shadow-[inset_0_1px_2px_0_rgba(255,255,255,0.25),0_0_36px_rgba(228,98,84,0.35),0_8px_24px_rgba(0,0,0,0.6)] ring-2 ring-[#E46254]/30 dark:ring-[#E46254]/40 table-attention-shake"
+                                    : hasBillRequest
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-rose-500/[0.12] dark:via-rose-500/[0.03] dark:to-transparent border-2 border-amber-400 dark:border-rose-500/50 shadow-md shadow-amber-400/20 dark:shadow-[inset_0_1px_1px_0_rgba(255,180,190,0.2),0_0_32px_rgba(244,63,94,0.2),0_8px_24px_rgba(0,0,0,0.6)] table-attention-shake"
+                                    : isPaid
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-emerald-500/[0.1] dark:via-emerald-500/[0.02] dark:to-transparent border-2 border-emerald-500/80 dark:border-emerald-500/50 shadow-xs hover:border-emerald-600 dark:hover:border-emerald-400 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(160,255,200,0.2),0_0_24px_rgba(16,185,129,0.18),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    : hasUpiVerifyRequest
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-blue-500/[0.1] dark:via-blue-500/[0.02] dark:to-transparent border-2 border-blue-400 dark:border-blue-500/50 shadow-xs hover:border-blue-500 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(180,220,255,0.2),0_0_24px_rgba(59,130,246,0.15),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    : isOccupied
+                                    ? "bg-white dark:bg-gradient-to-b dark:from-amber-500/[0.08] dark:via-amber-500/[0.025] dark:to-transparent border border-[#E46254]/75 dark:border-amber-500/35 shadow-[0_2px_12px_-2px_rgba(228,98,84,0.18),0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[inset_0_1px_1px_0_rgba(255,210,130,0.18),0_0_24px_rgba(245,158,11,0.12),0_8px_24px_rgba(0,0,0,0.6)] ring-1 ring-[#E46254]/25 dark:ring-transparent hover:border-[#E46254] dark:hover:border-amber-500/60 hover:shadow-[0_4px_18px_-2px_rgba(228,98,84,0.25)]"
+                                    : "bg-white/90 dark:bg-gradient-to-b dark:from-white/[0.04] dark:via-white/[0.015] dark:to-transparent backdrop-blur-2xl border border-zinc-200/80 dark:border-white/[0.08] shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08),0_8px_24px_rgba(0,0,0,0.5)] hover:bg-white dark:hover:from-white/[0.07] dark:hover:border-white/[0.22] hover:border-zinc-300 hover:shadow-md dark:hover:shadow-[0_12px_32px_rgba(0,0,0,0.7)]"
+                                }`}
+                              >
+                                {/* Top Specular Edge Glow for Running & Alert Cards */}
+                                {hasNewRound && (
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-[#E46254] rounded-b-full shadow-xs dark:shadow-[0_0_10px_#E46254]" />
+                                )}
+                                {hasBillRequest && !hasNewRound && (
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-amber-400 dark:bg-rose-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#f43f5e]" />
+                                )}
+                                {isPaid && !hasNewRound && (
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-emerald-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#10b981]" />
+                                )}
+                                {isOccupied && !hasNewRound && !hasBillRequest && !isPaid && (
+                                  <div className="absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-[#E46254] dark:via-amber-400/80 to-transparent rounded-full opacity-90" />
+                                )}
+
+                                {/* ── 1. Top Row: Table Name + Capacity & Status Chip ── */}
+                                <div className="flex items-start justify-between gap-1.5">
+                                  <div>
+                                    <span className="font-black text-lg sm:text-xl tracking-tight text-zinc-900 dark:text-white group-hover:text-[#E46254] dark:group-hover:text-amber-300 transition-colors leading-none">
+                                      {table.name}
+                                    </span>
+                                    <div className="flex items-center gap-1 mt-1 text-zinc-400 dark:text-zinc-500">
+                                      <Users size={11} strokeWidth={2} />
+                                      <span className="text-[11px] font-semibold tracking-tight">{capacityCount}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Status Badges: True Translucent Crystal Badges */}
+                                  <div>
+                                    {hasNewRound ? (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wider shadow-xs dark:shadow-[0_0_12px_rgba(228,98,84,0.5)] animate-pulse">
+                                        New Order
+                                      </span>
+                                    ) : isPaid ? (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                                        <CheckCircle2 size={10} />
+                                        <span>Paid</span>
+                                      </span>
+                                    ) : hasBillRequest ? (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-50 dark:bg-rose-500/15 text-amber-800 dark:text-rose-300 border border-amber-200/80 dark:border-rose-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(244,63,94,0.2)]">
+                                        <Receipt size={10} />
+                                        <span>Bill</span>
+                                      </span>
+                                    ) : hasUpiVerifyRequest ? (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-500/30 text-[10px] font-bold tracking-wide">
+                                        <CreditCard size={10} />
+                                        <span>UPI</span>
+                                      </span>
+                                    ) : isOccupied ? (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#E46254] dark:text-amber-300 bg-[#E46254]/10 dark:bg-amber-500/15 border border-[#E46254]/20 dark:border-amber-500/30 dark:shadow-[0_0_10px_rgba(245,158,11,0.2)]">
+                                        Running
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-100/80 dark:bg-emerald-500/10 text-zinc-500 dark:text-emerald-400 border border-zinc-200/60 dark:border-emerald-500/20 text-[10px] font-semibold dark:shadow-[0_0_8px_rgba(16,185,129,0.15)]">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-emerald-400" />
+                                        <span>Free</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* ── 2. Middle Row: Guest / Order Insights or Vacant Prompt ── */}
+                                <div className="my-2">
+                                  {isOccupied ? (
+                                    <div className="space-y-0.5">
+                                      <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-200">
+                                        <User size={11} className="text-zinc-400 dark:text-zinc-500 shrink-0" />
+                                        <span className="text-[12px] font-bold truncate">
+                                          {session?.customerName || `Seated Guest`}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 pl-4">
+                                        {session?.rounds?.length || 0} {(session?.rounds?.length || 0) === 1 ? "round" : "rounds"} · {session?.allItems?.length || 0} items
+                                      </p>
+                                    </div>
+                                  ) : (
+                                    <div className="py-1">
+                                      <span className="text-[11.5px] font-medium text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-700 dark:group-hover:text-[#E46254] transition-colors flex items-center gap-1">
+                                        <Plus size={12} className="text-zinc-300 dark:text-zinc-600 group-hover:text-[#E46254] transition-colors" />
+                                        <span>Tap to Seat</span>
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* ── 3. Bottom Row: Bill Total + Live Elapsed Time ── */}
+                                <div className="pt-2 flex items-baseline justify-between border-t border-zinc-100/80 dark:border-white/[0.05]">
+                                  {isOccupied ? (
+                                    <>
+                                      <span className="text-[17px] font-black text-zinc-900 dark:text-white font-mono tracking-tight tabular-nums">
+                                        {totalFormatted}
+                                      </span>
+                                      {elapsedMinutes > 0 ? (
+                                        <span className="flex items-center gap-1 text-[10.5px] font-mono text-zinc-600 dark:text-zinc-300 font-semibold bg-zinc-100/90 dark:bg-white/[0.06] px-1.5 py-0.5 rounded-md border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_rgba(255,255,255,0.06)]">
+                                          <Clock size={10} className="text-zinc-400 dark:text-zinc-400" />
+                                          <span>{elapsedMinutes}m</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] font-mono text-emerald-700 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-500/15 px-1.5 py-0.5 rounded-md border border-emerald-200/60 dark:border-emerald-500/25">
+                                          Just in
+                                        </span>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span className="text-xs font-mono text-zinc-400 dark:text-zinc-600 font-medium">Ready</span>
+                                      <span className="text-[11px] font-semibold text-zinc-400 dark:text-zinc-400 group-hover:text-zinc-700 dark:group-hover:text-white flex items-center gap-0.5 transition-colors">
+                                        <span>Open</span>
+                                        <ArrowUpRight size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -2261,7 +3074,7 @@ export default function PosPage() {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={() => setTerminalMode("DINE_IN")}
+              onClick={() => switchMode("DINE_IN")}
               className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 hover:text-black font-semibold text-xs transition-colors cursor-pointer"
             >
               <ChevronLeft size={16} />
@@ -2312,20 +3125,34 @@ export default function PosPage() {
                 )}
               </div>
 
-              {/* Horizontal Category Pill Tabs */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 slim-scrollbar">
+              {/* Category Tab Bar with Full Mouse Wheel Scroll */}
+              <div
+                id="takeaway-category-scroll"
+                onWheel={(e) => {
+                  if (e.deltaY !== 0) {
+                    e.currentTarget.scrollLeft += e.deltaY;
+                  }
+                }}
+                className="flex items-center gap-2 overflow-x-auto pb-2 slim-scrollbar scroll-smooth"
+                style={{ scrollbarWidth: "none" }}
+              >
                 {drawerCategories.map((cat) => (
                   <button
                     key={cat}
                     type="button"
+                    ref={(el) => {
+                      if (selectedDrawerCat === cat && el) {
+                        el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+                      }
+                    }}
                     onClick={() => setSelectedDrawerCat(cat)}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                    className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer whitespace-nowrap select-none ${
                       selectedDrawerCat === cat
-                        ? "bg-[#E46254]/10 text-[#C2410C] border border-[#E46254]/30 shadow-2xs"
-                        : "bg-[#FAF8F7] hover:bg-[#E46254]/5 text-zinc-600 border border-zinc-200/60"
+                        ? "bg-[#E46254] text-white shadow-xs shadow-[#E46254]/25 scale-[1.02]"
+                        : "bg-white dark:bg-[#1C1D26] hover:bg-[#E46254]/10 text-zinc-700 dark:text-zinc-400 hover:text-[#E46254] dark:hover:text-[#E46254] border border-zinc-200/80 dark:border-white/[0.08] hover:border-[#E46254]/30 shadow-2xs"
                     }`}
                   >
-                    {cat === "ALL" ? "All Categories" : cat}
+                    {cat === "ALL" ? "All Items" : cat}
                   </button>
                 ))}
               </div>
@@ -2335,7 +3162,7 @@ export default function PosPage() {
             <div className="flex-1 overflow-y-auto p-4 slim-scrollbar">
               {filteredCatalog.length === 0 ? (
                 <div className="h-48 flex flex-col items-center justify-center text-zinc-400 text-center">
-                  <UtensilsCrossed size={20} className="mb-2 opacity-50 text-zinc-400" />
+                  <UtensilsCrossed size={20} className="mb-2 opacity-50" />
                   <p className="text-xs font-medium">No dishes found matching search</p>
                 </div>
               ) : (
@@ -2349,24 +3176,42 @@ export default function PosPage() {
                     const portions = hasPortions ? dish.variantsConfig!.portions : [];
                     const hasAddons = Boolean(dish.variantsConfig?.hasAddons);
 
+                    const cartMatches = takeawayCart.filter((c) => c.dishId === dish.id || c.name === dish.name);
+                    const totalSelectedQty = cartMatches.reduce((s, it) => s + it.quantity, 0);
+
                     return (
                       <div
                         key={dish.id}
-                        className="bg-white rounded-2xl p-3.5 border border-zinc-200/80 hover:border-zinc-300 shadow-2xs hover:shadow-md transition-all flex flex-col justify-between group"
+                        className={`rounded-2xl p-3 border transition-all flex flex-col justify-between group shadow-2xs ${
+                          totalSelectedQty > 0
+                            ? "bg-white border-[#E46254]/50 shadow-sm shadow-[#E46254]/10 ring-1 ring-[#E46254]/25"
+                            : "bg-white border-zinc-200/70 hover:border-[#E46254]/30 hover:shadow-md"
+                        }`}
                       >
-                        <div>
-                          <div className="flex items-start justify-between gap-1 mb-1.5">
-                            <span className="font-bold text-xs text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2">
+                        {/* Card Header: Veg dot + Clean Name with Ellipsis & Title */}
+                        <div className="flex items-start gap-1.5 mb-2">
+                          <span
+                            className={`mt-1 w-2.5 h-2.5 rounded-sm border-[1.5px] shrink-0 ${
+                              dish.is_veg
+                                ? "border-emerald-500 bg-emerald-50"
+                                : "border-rose-500 bg-rose-50"
+                            }`}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <span
+                              title={dish.name}
+                              className="font-bold text-[11.5px] text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2 break-words"
+                            >
                               {dish.name}
                             </span>
+                            <span className="text-[10px] text-zinc-400 font-medium block truncate mt-0.5">
+                              {dish.category}
+                            </span>
                           </div>
-
-                          <span className="text-[10.5px] text-zinc-400 font-medium block">
-                            {dish.category}
-                          </span>
                         </div>
 
-                        <div className="mt-3 pt-2.5 border-t border-zinc-100">
+                        {/* Bottom: Price + Stepper or Add Button */}
+                        <div className="mt-auto pt-1">
                           {hasPortions ? (
                             <div className="space-y-1.5">
                               <div className="grid grid-cols-2 gap-1">
@@ -2375,7 +3220,7 @@ export default function PosPage() {
                                     key={portion.name || pIdx}
                                     type="button"
                                     onClick={() => handleQuickAddPortion(dish, portion)}
-                                    className="py-1 px-1.5 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10.5px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer"
+                                    className="py-1 px-1.5 rounded-xl bg-white hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer shadow-2xs"
                                   >
                                     <span className="truncate">{portion.name}</span>
                                     <span className="font-mono text-[10px] ml-1">₹{portion.price}</span>
@@ -2389,13 +3234,14 @@ export default function PosPage() {
                                   onClick={() => handleOpenCustomizer(dish)}
                                   className="w-full text-[10px] font-bold text-[#E46254] hover:underline text-center py-0.5 cursor-pointer block"
                                 >
-                                  + Addons / Instructions
+                                  + Addons
                                 </button>
                               )}
                             </div>
                           ) : (
-                            <div className="flex items-center justify-between">
-                              <span className="font-mono font-bold text-xs text-zinc-900">
+                            /* Standard Dish with Single Price */
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-mono font-black text-sm text-zinc-900 tracking-tight">
                                 ₹{dish.base_price}
                               </span>
 
@@ -2404,21 +3250,53 @@ export default function PosPage() {
                                   <button
                                     type="button"
                                     onClick={() => handleOpenCustomizer(dish)}
-                                    className="p-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-600 text-[10.5px] font-bold cursor-pointer"
+                                    className="px-1.5 py-0.5 rounded-lg bg-zinc-100/80 hover:bg-zinc-200 text-zinc-600 text-[10px] font-bold cursor-pointer transition-colors"
                                     title="Customise addons"
                                   >
-                                    Custom
+                                    Addons
                                   </button>
                                 )}
 
-                                <button
-                                  type="button"
-                                  onClick={() => handleQuickAddBase(dish)}
-                                  className="w-7 h-7 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 border border-zinc-200/80 flex items-center justify-center transition-colors cursor-pointer"
-                                  title="Add to Ticket"
-                                >
-                                  <Plus size={13} strokeWidth={2.5} />
-                                </button>
+                                {totalSelectedQty > 0 ? (
+                                  /* Aesthetic - 1 + Stepper directly on card */
+                                  <div className="flex items-center bg-[#E46254] text-white rounded-xl shadow-xs p-0.5 animate-in zoom-in-95 duration-150">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDecrementDish(dish);
+                                      }}
+                                      className="w-5 h-5 flex items-center justify-center hover:bg-black/20 rounded-lg transition-colors cursor-pointer active:scale-90"
+                                      title="Decrease"
+                                    >
+                                      <Minus size={11} strokeWidth={3} />
+                                    </button>
+                                    <span className="w-5 text-center font-mono font-black text-xs">
+                                      {totalSelectedQty}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleIncrementDish(dish);
+                                      }}
+                                      className="w-5 h-5 flex items-center justify-center hover:bg-black/20 rounded-lg transition-colors cursor-pointer active:scale-90"
+                                      title="Increase"
+                                    >
+                                      <Plus size={11} strokeWidth={3} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleIncrementDish(dish)}
+                                    className="h-7 px-2.5 rounded-xl bg-[#E46254]/10 hover:bg-[#E46254] text-[#E46254] hover:text-white border border-[#E46254]/25 hover:border-[#E46254] flex items-center justify-center gap-1 font-bold text-xs transition-all cursor-pointer shadow-2xs active:scale-95"
+                                    title="Add to Ticket"
+                                  >
+                                    <Plus size={12} strokeWidth={3} />
+                                    <span>Add</span>
+                                  </button>
+                                )}
                               </div>
                             </div>
                           )}
@@ -2448,7 +3326,7 @@ export default function PosPage() {
                 >
                   <span>Current Order</span>
                   <span className="font-mono text-[11px] text-[#E46254] font-bold">
-                    #{String(currentToken).padStart(2, "0")}
+                    #{currentToken}
                   </span>
                 </button>
 
@@ -2492,7 +3370,7 @@ export default function PosPage() {
                       onClick={() => setShowGuestDetails(true)}
                       className="text-xs text-zinc-500 hover:text-zinc-900 flex items-center gap-1.5 font-medium py-0.5 transition-colors cursor-pointer"
                     >
-                      <User size={12} className="text-zinc-400" />
+                      {/* Icon removed */}
                       <span>+ Add Customer Details (Optional)</span>
                     </button>
                   ) : (
@@ -2544,14 +3422,14 @@ export default function PosPage() {
                       </div>
                       <h4 className="font-bold text-xs text-zinc-700">Ticket is empty</h4>
                       <p className="text-[11px] text-zinc-400 mt-1 max-w-[200px]">
-                        Tap any dish from the catalog on the left to start billing Token #{String(currentToken).padStart(2, "0")}.
+                        Tap any dish from the catalog on the left to start billing Token #{currentToken}.
                       </p>
                     </div>
                   ) : (
                     takeawayCart.map((item) => (
                       <div
                         key={item.id}
-                        className="p-3 bg-[#FAF8F7] rounded-xl border border-zinc-200/80 hover:border-zinc-300 transition-all flex items-start justify-between gap-3 group"
+                        className="p-3 bg-white rounded-2xl border border-zinc-200/80 hover:border-zinc-300 transition-all flex items-start justify-between gap-3 group shadow-2xs"
                       >
                         <div className="flex-1 min-w-0">
                           <span className="font-bold text-xs text-zinc-900 block truncate">
@@ -2607,90 +3485,75 @@ export default function PosPage() {
                   )}
                 </div>
 
-                {/* Bill Footer & Quick Checkout */}
-                <div className="p-4 bg-white border-t border-zinc-200/80 space-y-3 shrink-0">
-                  
-                  {/* Packaging Selector (3 Tiers) */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
-                        Packaging Option
-                      </span>
-                      {takeawayPackagingAmount > 0 && (
-                        <span className="text-[11px] font-mono font-bold text-[#C2410C]">
-                          +₹{takeawayPackagingAmount}
-                        </span>
-                      )}
-                    </div>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setTakeawayPackagingTier("NONE")}
-                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                          takeawayPackagingTier === "NONE"
-                            ? "bg-white text-zinc-900 border-zinc-400 shadow-2xs"
-                            : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
-                        }`}
-                      >
-                        No Bag (₹0)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTakeawayPackagingTier("BAG_5")}
-                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                          takeawayPackagingTier === "BAG_5"
-                            ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
-                            : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
-                        }`}
-                      >
-                        Paper Bag (+₹5)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTakeawayPackagingTier("BOX_15")}
-                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                          takeawayPackagingTier === "BOX_15"
-                            ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
-                            : "bg-[#FAF8F7] text-zinc-500 border-zinc-200/80 hover:bg-zinc-100"
-                        }`}
-                      >
-                        Box/Carrier (+₹15)
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Suppressed Discount Toggle */}
-                  {!takeawayShowDiscount ? (
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => setTakeawayShowDiscount(true)}
-                        className="text-[11px] font-bold text-[#E46254] hover:underline flex items-center gap-1 cursor-pointer"
-                      >
-                        <Tag size={11} />
-                        <span>+ Add discount</span>
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="p-2.5 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
-                          Discount
-                        </span>
+                {/* Compact Luxury Takeaway Dock — Ultra-clean 1-Row Controls & Space Reclaimed */}
+                <div className="p-3.5 bg-white border-t border-zinc-100 space-y-2.5 shrink-0">
+                  {/* Row 1: Packaging Capsule + Payment Mode Pills + Discount Toggle */}
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    {/* Packaging Selector Capsule */}
+                    <div className="flex items-center bg-zinc-50 border border-zinc-200/70 p-0.5 rounded-xl">
+                      {(
+                        [
+                          { id: "NONE", label: "No Bag", price: 0 },
+                          { id: "BAG_5", label: "Paper Bag", price: 5 },
+                          { id: "BOX_15", label: "Box", price: 15 },
+                        ] as const
+                      ).map((pkg) => (
                         <button
+                          key={pkg.id}
+                          type="button"
+                          onClick={() => setTakeawayPackagingTier(pkg.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap ${
+                            takeawayPackagingTier === pkg.id
+                              ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/80"
+                              : "text-zinc-500 hover:text-zinc-800"
+                          }`}
+                        >
+                          {pkg.label} {pkg.price > 0 && <span className="font-mono text-[10px] text-[#E46254]">+₹{pkg.price}</span>}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Payment Mode Pills */}
+                    <div className="flex items-center gap-1">
+                      {(["UPI", "CASH", "CARD"] as const).map((mode) => (
+                        <button
+                          key={mode}
                           type="button"
                           onClick={() => {
-                            setTakeawayShowDiscount(false);
-                            setTakeawayDiscountPercent(0);
-                            setTakeawayDiscountRupees("");
+                            setTakeawayPaymentMethod(mode);
+                            if (mode === "CASH") setShowCashTenderModal(true);
                           }}
-                          className="text-[10px] text-zinc-400 hover:text-zinc-600 font-bold cursor-pointer"
+                          className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all border cursor-pointer ${
+                            takeawayPaymentMethod === mode
+                              ? "bg-[#E46254] text-white border-[#E46254] shadow-xs"
+                              : "bg-white text-zinc-600 border-zinc-200/80 hover:bg-zinc-50"
+                          }`}
                         >
-                          Cancel
+                          {mode === "UPI" ? "UPI / QR" : mode === "CASH" ? "Cash" : "Card"}
                         </button>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {[5, 10, 15].map((pct) => (
+                      ))}
+                    </div>
+
+                    {/* Discount Button */}
+                    <button
+                      type="button"
+                      onClick={() => setTakeawayShowDiscount((v) => !v)}
+                      className={`px-2 py-1 rounded-xl text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                        takeawayDiscountAmount > 0
+                          ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                          : "text-zinc-400 hover:text-[#E46254]"
+                      }`}
+                    >
+                      <Tag size={10} />
+                      <span>{takeawayDiscountAmount > 0 ? `-₹${takeawayDiscountAmount.toFixed(0)}` : "+ Discount"}</span>
+                    </button>
+                  </div>
+
+                  {/* Popdown Discount Slider */}
+                  {takeawayShowDiscount && (
+                    <div className="p-2.5 bg-zinc-50/70 rounded-xl border border-zinc-100 flex items-center justify-between gap-2 animate-in fade-in duration-150">
+                      <div className="flex items-center gap-1">
+                        {[5, 10, 15, 20].map((pct) => (
                           <button
                             key={pct}
                             type="button"
@@ -2698,188 +3561,131 @@ export default function PosPage() {
                               setTakeawayDiscountPercent(takeawayDiscountPercent === pct ? 0 : pct);
                               setTakeawayDiscountRupees("");
                             }}
-                            className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                              takeawayDiscountPercent === pct
-                                ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40"
-                                : "bg-white text-zinc-700 border-zinc-200/80 hover:bg-zinc-50"
+                            className={`px-2 py-0.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                              takeawayDiscountPercent === pct && !takeawayDiscountRupees
+                                ? "bg-[#E46254] text-white border-[#E46254]"
+                                : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-100"
                             }`}
                           >
                             {pct}%
                           </button>
                         ))}
-                        <div className="relative flex-1">
-                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 text-xs">₹</span>
-                          <input
-                            type="number"
-                            placeholder="Custom"
-                            value={takeawayDiscountRupees}
-                            onChange={(e) => {
-                              setTakeawayDiscountRupees(e.target.value);
-                              setTakeawayDiscountPercent(0);
-                            }}
-                            className="w-full pl-5 pr-2 py-1 bg-white border border-zinc-200/80 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
-                          />
-                        </div>
                       </div>
+                      <input
+                        type="number"
+                        placeholder="₹ Flat"
+                        value={takeawayDiscountRupees}
+                        onChange={(e) => {
+                          setTakeawayDiscountRupees(e.target.value);
+                          setTakeawayDiscountPercent(0);
+                        }}
+                        className="w-20 px-2 py-0.5 bg-white border border-zinc-200 rounded-lg text-xs font-mono font-bold outline-none focus:border-[#E46254]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTakeawayShowDiscount(false);
+                          setTakeawayDiscountPercent(0);
+                          setTakeawayDiscountRupees("");
+                        }}
+                        className="text-[10px] text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                      >
+                        Reset
+                      </button>
                     </div>
                   )}
 
-                  {/* Bill Calculations */}
-                  <div className="space-y-1 text-xs pt-1 border-t border-zinc-100">
-                    <div className="flex justify-between text-zinc-500 font-medium">
-                      <span>Items Subtotal:</span>
-                      <span className="font-mono text-zinc-800">₹{takeawaySubtotal}</span>
+                  {/* Row 2: Live Total & Breakdown Toggle Bar */}
+                  <div className="px-3.5 py-2 rounded-xl bg-zinc-50/60 border border-zinc-100 flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setShowTakeawayBreakdown((v) => !v)}
+                      className="text-[11px] font-semibold text-zinc-500 hover:text-zinc-800 flex items-center gap-1 cursor-pointer"
+                    >
+                      <span>{showTakeawayBreakdown ? "Hide Taxes" : "Taxes & Breakdown"}</span>
+                      <span className="text-[10px] text-zinc-400">({takeawayCart.reduce((s, it) => s + it.quantity, 0)} items)</span>
+                    </button>
+
+                    <div className="text-right">
+                      <div className="flex items-baseline justify-end gap-1">
+                        <span className="text-[11px] font-bold text-zinc-400">Total:</span>
+                        <span className="font-mono font-black text-lg text-zinc-900 tracking-tight">₹{takeawayTotal}</span>
+                      </div>
+                      <span className="text-[9.5px] text-emerald-600 font-medium block -mt-0.5">Taxes included</span>
                     </div>
+                  </div>
 
-                    {takeawayPackagingAmount > 0 && (
-                      <div className="flex justify-between text-zinc-500 font-medium">
-                        <span>Packaging:</span>
-                        <span className="font-mono text-zinc-800">+₹{takeawayPackagingAmount}</span>
+                  {/* Expandable Tax Breakdown */}
+                  {showTakeawayBreakdown && (
+                    <div className="p-3 bg-white rounded-xl border border-zinc-100 space-y-1.5 text-[11px] animate-in fade-in duration-150">
+                      <div className="flex justify-between text-zinc-500">
+                        <span>Items Subtotal:</span>
+                        <span className="font-mono text-zinc-700">₹{takeawaySubtotal}</span>
                       </div>
-                    )}
-
-                    {takeawayDiscountAmount > 0 && (
-                      <div className="flex justify-between text-emerald-600 font-medium">
-                        <span>Discount:</span>
-                        <span className="font-mono">-₹{takeawayDiscountAmount.toFixed(0)}</span>
-                      </div>
-                    )}
-
-                    {takeawayBillCalc.isComposition ? (
-                      <div className="flex justify-between text-zinc-400 text-[11px] italic">
-                        <span>GST (Composition):</span>
-                        <span className="font-mono">₹0.00</span>
-                      </div>
-                    ) : takeawayBillCalc.isInclusive ? (
-                      <div className="flex justify-between text-zinc-500 text-[11px]">
-                        <span>GST ({takeawayBillCalc.effectiveCgstRate + takeawayBillCalc.effectiveSgstRate}%):</span>
-                        <span className="font-mono text-zinc-600">Inclusive</span>
-                      </div>
-                    ) : (
-                      takeawayBillCalc.totalGst > 0 && (
+                      {takeawayPackagingAmount > 0 && (
+                        <div className="flex justify-between text-zinc-500">
+                          <span>Packaging:</span>
+                          <span className="font-mono text-zinc-700">+₹{takeawayPackagingAmount}</span>
+                        </div>
+                      )}
+                      {takeawayDiscountAmount > 0 && (
+                        <div className="flex justify-between text-emerald-600">
+                          <span>Discount:</span>
+                          <span className="font-mono">-₹{takeawayDiscountAmount.toFixed(0)}</span>
+                        </div>
+                      )}
+                      {takeawayBillCalc.totalGst > 0 && (
                         <>
-                          <div className="flex justify-between text-zinc-500 text-xs">
+                          <div className="flex justify-between text-zinc-500">
                             <span>CGST ({takeawayBillCalc.effectiveCgstRate}%):</span>
-                            <span className="font-mono text-zinc-800">₹{takeawayBillCalc.cgstAmount.toFixed(1)}</span>
+                            <span className="font-mono text-zinc-700">₹{takeawayBillCalc.cgstAmount.toFixed(1)}</span>
                           </div>
-                          <div className="flex justify-between text-zinc-500 text-xs">
+                          <div className="flex justify-between text-zinc-500">
                             <span>SGST ({takeawayBillCalc.effectiveSgstRate}%):</span>
-                            <span className="font-mono text-zinc-800">₹{takeawayBillCalc.sgstAmount.toFixed(1)}</span>
+                            <span className="font-mono text-zinc-700">₹{takeawayBillCalc.sgstAmount.toFixed(1)}</span>
                           </div>
                         </>
-                      )
-                    )}
-
-                    {takeawayBillCalc.roundOff !== 0 && (
-                      <div className="flex justify-between text-zinc-400 text-[10.5px]">
-                        <span>Round-off:</span>
-                        <span className="font-mono">
-                          {takeawayBillCalc.roundOff > 0 ? `+₹${takeawayBillCalc.roundOff}` : `-₹${Math.abs(takeawayBillCalc.roundOff)}`}
-                        </span>
-                      </div>
-                    )}
-
-                    <div className="flex justify-between items-baseline pt-1.5 border-t border-zinc-200">
-                      <span className="font-bold text-sm text-zinc-900">Total Payable:</span>
-                      <span className="font-mono font-black text-xl text-zinc-900">
-                        ₹{takeawayTotal}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Payment Method Selector */}
-                  <div className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
-                      Payment Mode
-                    </span>
-                    <div className="grid grid-cols-3 gap-2">
-                      {[
-                        { id: "UPI", label: "📱 UPI / QR" },
-                        { id: "CASH", label: "💵 Cash" },
-                        { id: "CARD", label: "💳 Card" },
-                      ].map((pm) => (
-                        <button
-                          key={pm.id}
-                          type="button"
-                          onClick={() => setTakeawayPaymentMethod(pm.id as any)}
-                          className={`py-2 px-1 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
-                            takeawayPaymentMethod === pm.id
-                              ? "bg-[#E46254]/10 text-[#C2410C] border-[#E46254]/40 shadow-2xs"
-                              : "bg-[#FAF8F7] text-zinc-600 border-zinc-200/80 hover:bg-zinc-100"
-                          }`}
-                        >
-                          {pm.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Quick Cash Tender Presets & Change Due Calculator */}
-                  {takeawayPaymentMethod === "CASH" && (
-                    <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl space-y-2.5 animate-in fade-in duration-150">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
-                          Cash Tender
-                        </span>
-                        <span className="text-[10.5px] text-zinc-400 font-mono">
-                          Payable: ₹{takeawayTotal}
-                        </span>
-                      </div>
-
-                      {/* Preset chips */}
-                      <div className="flex flex-wrap gap-1.5">
-                        {cashTenderPresets.map((amount) => (
-                          <button
-                            key={amount}
-                            type="button"
-                            onClick={() => setCashTenderAmount(String(amount))}
-                            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border transition-all cursor-pointer ${
-                              cashTenderAmount === String(amount)
-                                ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
-                                : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100"
-                            }`}
-                          >
-                            {amount === takeawayTotal ? `Exact (₹${amount})` : `₹${amount}`}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* Manual Tender Input */}
-                      <div className="relative">
-                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 text-xs font-mono">₹</span>
-                        <input
-                          type="number"
-                          placeholder="Enter tendered cash..."
-                          value={cashTenderAmount}
-                          onChange={(e) => setCashTenderAmount(e.target.value)}
-                          className="w-full pl-7 pr-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-mono font-semibold outline-none focus:border-[#E46254]"
-                        />
-                      </div>
-
-                      {/* Change Due Indicator */}
-                      {cashChangeDue !== null && (
-                        <div
-                          className={`p-2 rounded-lg text-xs font-bold flex items-center justify-between border ${
-                            cashChangeDue >= 0
-                              ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-                              : "bg-red-50 text-red-700 border-red-200"
-                          }`}
-                        >
-                          <span>{cashChangeDue >= 0 ? "Change to return:" : "Short amount:"}</span>
-                          <span className="font-mono text-sm font-black">
-                            ₹{Math.abs(cashChangeDue)}
+                      )}
+                      {takeawayBillCalc.roundOff !== 0 && (
+                        <div className="flex justify-between text-zinc-400 text-[10px]">
+                          <span>Round-off:</span>
+                          <span className="font-mono">
+                            {takeawayBillCalc.roundOff > 0 ? `+₹${takeawayBillCalc.roundOff}` : `-₹${Math.abs(takeawayBillCalc.roundOff)}`}
                           </span>
                         </div>
                       )}
                     </div>
                   )}
 
-                  {/* Big Action Button */}
+                  {/* Cash Change Indicator if Tender entered */}
+                  {takeawayPaymentMethod === "CASH" && cashTenderAmount && cashChangeDue !== null && (
+                    <div
+                      onClick={() => setShowCashTenderModal(true)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center justify-between cursor-pointer border ${
+                        cashChangeDue >= 0
+                          ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                          : "bg-red-50 text-red-700 border-red-200"
+                      }`}
+                    >
+                      <span className="text-[11px] font-semibold">
+                        Cash: ₹{cashTenderAmount} • {cashChangeDue >= 0 ? "Change to Return:" : "Short:"}
+                      </span>
+                      <span className="font-mono font-black text-sm">₹{Math.abs(cashChangeDue)}</span>
+                    </div>
+                  )}
+
+                  {/* Big Action Punch Button */}
                   <button
                     type="button"
                     disabled={takeawayCart.length === 0 || isSubmitting}
-                    onClick={handleCollectAndFireTakeaway}
-                    className={`w-full py-3 rounded-2xl font-black text-sm tracking-wide shadow-sm flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                    onClick={() => {
+                      if (takeawayPaymentMethod === "CASH" && (!cashTenderAmount || Number(cashTenderAmount) < takeawayTotal)) {
+                        setShowCashTenderModal(true);
+                        return;
+                      }
+                      handleCollectAndFireTakeaway();
+                    }}
+                    className={`w-full py-3 rounded-2xl font-black text-sm tracking-wide shadow-xs flex items-center justify-center gap-2 transition-all cursor-pointer ${
                       takeawayCart.length === 0 || isSubmitting
                         ? "bg-zinc-200 text-zinc-400 cursor-not-allowed"
                         : "bg-[#E46254] hover:bg-[#d55345] text-white active:scale-[0.99]"
@@ -2888,12 +3694,12 @@ export default function PosPage() {
                     {isSubmitting ? (
                       <>
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        <span>Punching Token...</span>
+                        <span>Punching Token #{currentToken}...</span>
                       </>
                     ) : (
                       <>
                         <CheckCircle2 size={16} />
-                        <span>COLLECT & FIRE TOKEN (₹{takeawayTotal})</span>
+                        <span>COLLECT & FIRE TOKEN #{currentToken} (₹{takeawayTotal})</span>
                       </>
                     )}
                   </button>
@@ -3002,44 +3808,159 @@ export default function PosPage() {
       </div>
 
       {/* ═════════════════════════════════════════════════════════════════ */}
+      {/* ── ZERO-FRICTION CASH TENDER CALCULATOR MODAL ── */}
+      {showCashTenderModal && (
+        <div className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-sm w-full border border-zinc-200/80 shadow-2xl overflow-hidden p-5 space-y-4 animate-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
+              <div>
+                <h3 className="font-black text-base text-zinc-900 tracking-tight">Cash Payment Calculator</h3>
+                <p className="text-[11px] text-zinc-400 font-mono">Token #{currentToken} • Total Due: ₹{takeawayTotal}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCashTenderModal(false)}
+                className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-zinc-100 text-zinc-400 hover:text-zinc-700 cursor-pointer"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            {/* Quick Cash Presets */}
+            <div className="space-y-1.5">
+              <span className="text-[10.5px] font-bold text-zinc-400 uppercase tracking-wider block">
+                Quick Preset Notes
+              </span>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  takeawayTotal,
+                  Math.ceil(takeawayTotal / 100) * 100,
+                  500,
+                  2000,
+                ]
+                  .filter((v, i, a) => a.indexOf(v) === i && v >= takeawayTotal)
+                  .map((amount) => (
+                    <button
+                      key={amount}
+                      type="button"
+                      onClick={() => setCashTenderAmount(String(amount))}
+                      className={`py-2 px-1 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer text-center ${
+                        cashTenderAmount === String(amount)
+                          ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                          : "bg-white text-zinc-800 border-zinc-200 hover:bg-zinc-50"
+                      }`}
+                    >
+                      {amount === takeawayTotal ? `Exact` : `₹${amount}`}
+                    </button>
+                  ))}
+              </div>
+            </div>
+
+            {/* Cash Received Input */}
+            <div className="space-y-1">
+              <label className="text-[11px] font-bold text-zinc-700">Cash Received from Customer</label>
+              <div className="relative">
+                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400 font-mono font-bold text-sm">₹</span>
+                <input
+                  type="number"
+                  autoFocus
+                  placeholder="e.g. 500"
+                  value={cashTenderAmount}
+                  onChange={(e) => setCashTenderAmount(e.target.value)}
+                  className="w-full pl-8 pr-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-base font-mono font-black outline-none focus:border-[#E46254] focus:bg-white"
+                />
+              </div>
+            </div>
+
+            {/* Change to Return Banner */}
+            {cashChangeDue !== null && (
+              <div
+                className={`p-3 rounded-2xl text-xs font-bold flex items-center justify-between border ${
+                  cashChangeDue >= 0
+                    ? "bg-emerald-50 text-emerald-900 border-emerald-200"
+                    : "bg-amber-50 text-amber-900 border-amber-200"
+                }`}
+              >
+                <div>
+                  <span className="text-[11px] uppercase tracking-wider block">
+                    {cashChangeDue >= 0 ? "Change to Return" : "Short Amount"}
+                  </span>
+                  <span className="text-[10px] text-zinc-500 font-normal">
+                    {cashChangeDue >= 0 ? "Return this exact balance" : "Customer still owes"}
+                  </span>
+                </div>
+                <span className="font-mono text-xl font-black">
+                  ₹{Math.abs(cashChangeDue)}
+                </span>
+              </div>
+            )}
+
+            {/* Confirm & Punch */}
+            <div className="pt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCashTenderModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-zinc-200 text-zinc-600 font-bold text-xs hover:bg-zinc-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={takeawayCart.length === 0 || isSubmitting || (cashChangeDue !== null && cashChangeDue < 0)}
+                onClick={() => {
+                  setShowCashTenderModal(false);
+                  handleCollectAndFireTakeaway();
+                }}
+                className="flex-2 py-2.5 rounded-xl bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white font-black text-xs shadow-xs cursor-pointer active:scale-98 transition-all"
+              >
+                Confirm & Fire Token
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── FULL-SCREEN TABLE COMMAND STATION MODAL ── */}
       {/* ═════════════════════════════════════════════════════════════════ */}
       {activeTableModal && (
-        <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in duration-100">
+        <div className="fixed inset-0 z-50 bg-white dark:bg-[#070709] text-zinc-900 dark:text-white flex flex-col animate-in fade-in duration-100">
           
-          {/* 1. Command Station Header Deck */}
-          <div className="h-14 bg-white border-b border-zinc-200/80 px-4 sm:px-6 flex items-center justify-between shrink-0 shadow-2xs">
+          {/* 1. Command Station Header Deck (Luxury Architectural Minimalist) */}
+          <div className="h-16 bg-white dark:bg-zinc-950/80 backdrop-blur-2xl border-b border-zinc-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.1),0_8px_32px_rgba(0,0,0,0.6)] px-4 sm:px-6 flex items-center justify-between shrink-0">
             
-            {/* Left: Return to Floor + Table Status Badge */}
-            <div className="flex items-center gap-4">
+            {/* Left: Back button + Table identification with typography luxury */}
+            <div className="flex items-center gap-3 sm:gap-4">
               <button
                 type="button"
                 onClick={() => setActiveTableModal(null)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-bold transition-all shadow-2xs cursor-pointer active:scale-95"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-50 dark:bg-[#22232E] hover:bg-[#E46254]/10 text-zinc-600 dark:text-zinc-400 hover:text-[#E46254] dark:hover:text-[#E46254] text-xs font-bold transition-all cursor-pointer border border-zinc-200/60 dark:border-white/[0.08] active:scale-95 shadow-2xs"
                 title="Return to floor overview (Esc)"
               >
-                <ChevronLeft size={16} />
-                <span>Floor (Esc)</span>
+                <ChevronLeft size={15} />
+                <span>Floor</span>
               </button>
 
-              <div className="h-4 w-px bg-zinc-200" />
+              <div className="h-5 w-px bg-zinc-200/60" />
 
-              <div className="flex items-center gap-2">
-                <span className="text-base font-black text-zinc-900 tracking-tight">
+              <div className="flex items-center gap-2.5">
+                <span className="text-lg sm:text-xl font-black text-zinc-900 dark:text-white tracking-tight">
                   {activeTableModal}
                 </span>
 
                 <div className="flex items-center gap-1.5">
                   {isTablePaid ? (
-                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[11px] font-bold border border-emerald-200">
-                      Paid • Seated
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-bold border border-emerald-200/70">
+                      <CheckCircle2 size={11} />
+                      <span>Settled & Paid</span>
                     </span>
                   ) : !isVacantTable ? (
-                    <span className="px-2.5 py-0.5 rounded-full bg-[#E46254]/10 text-[#C2410C] text-[11px] font-bold border border-[#E46254]/20">
-                      Running • {activeSession?.rounds.length} {activeSession?.rounds.length === 1 ? "Round" : "Rounds"}
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E46254]/10 text-[#E46254] text-[11px] font-bold border border-[#E46254]/20 shadow-2xs">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#E46254] animate-pulse" />
+                      <span>Active • Round {activeSession?.rounds.length}</span>
                     </span>
                   ) : (
-                    <span className="px-2.5 py-0.5 rounded-full bg-zinc-100 text-zinc-700 text-[11px] font-semibold border border-zinc-200">
+                    <span className="px-2.5 py-0.5 rounded-full bg-zinc-100 text-zinc-500 text-[11px] font-semibold border border-zinc-200/60">
                       Vacant Table
                     </span>
                   )}
@@ -3047,49 +3968,49 @@ export default function PosPage() {
               </div>
             </div>
 
-            {/* Right: Operational Info (Elapsed Timer, Table PIN, Guest CRM & Transfer) */}
-            <div className="flex items-center gap-3 text-xs font-medium text-zinc-600">
+            {/* Right: Operational Info (Clean Pills) */}
+            <div className="flex items-center gap-2 sm:gap-3 text-xs font-medium">
               {!isVacantTable && activeSession?.firstOrderAt && (
-                <div className="flex items-center gap-1.5 text-zinc-500">
-                  <Clock size={13} className="text-[#E46254]" />
-                  <span>Seated {Math.max(0, Math.floor((Date.now() - new Date(activeSession.firstOrderAt).getTime()) / 60000))}m ago</span>
+                <div className="hidden sm:flex items-center gap-1.5 text-zinc-500 bg-zinc-50 px-3 py-1 rounded-full border border-zinc-200/60 font-mono text-[11.5px]">
+                  <Clock size={12} className="text-[#E46254]" />
+                  <span>{Math.max(0, Math.floor((Date.now() - new Date(activeSession.firstOrderAt).getTime()) / 60000))}m seated</span>
                 </div>
               )}
 
               {/* Table PIN Badge */}
-              <div className="flex items-center gap-1.5 bg-[#E46254]/5 border border-[#E46254]/20 px-3 py-1 rounded-xl">
-                <span className="text-[11px] text-[#C2410C] font-semibold">Table PIN:</span>
+              <div className="flex items-center gap-1.5 bg-[#E46254]/5 border border-[#E46254]/15 px-3 py-1 rounded-full">
+                <span className="text-[11px] text-[#E46254] font-semibold">PIN:</span>
                 <span className="font-mono font-bold text-zinc-900 text-xs tracking-wider">{currentTablePin}</span>
                 <button
                   type="button"
                   onClick={() => handleCopyPin(currentTablePin)}
-                  className="p-1 text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                  className="p-0.5 text-zinc-400 hover:text-[#E46254] cursor-pointer transition-colors"
                   title="Copy Table PIN"
                 >
                   <Copy size={11} />
                 </button>
               </div>
 
-              {/* Optional Guest CRM Button */}
+              {/* Guest CRM Button */}
               <button
                 type="button"
                 onClick={() => setIsGuestInfoModalOpen(true)}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-600 text-xs transition-colors cursor-pointer"
+                className="flex items-center gap-1 px-3 py-1 rounded-full bg-white hover:bg-zinc-50 text-zinc-600 hover:text-zinc-900 text-xs font-semibold border border-zinc-200/70 transition-all cursor-pointer shadow-2xs"
                 title="Edit Guest Name / Phone"
               >
                 <User size={12} className="text-zinc-400" />
-                <span>{manualCustomerName || activeSession?.customerName || "Guest Details"}</span>
+                <span className="truncate max-w-[120px]">{manualCustomerName || activeSession?.customerName || "Guest Details"}</span>
               </button>
 
               {!isVacantTable && (
                 <button
                   type="button"
                   onClick={() => setIsTransferModalOpen(true)}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-xl border border-zinc-200/80 bg-white hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+                  className="flex items-center gap-1 px-3 py-1 rounded-full bg-white hover:bg-[#E46254]/10 text-zinc-700 hover:text-[#E46254] text-xs font-semibold transition-all cursor-pointer border border-zinc-200/70 shadow-2xs"
                   title="Transfer orders to another table"
                 >
-                  <ArrowRightLeft size={13} className="text-[#E46254]" />
-                  <span>Transfer Table</span>
+                  <ArrowRightLeft size={12} className="text-[#E46254]" />
+                  <span>Transfer</span>
                 </button>
               )}
             </div>
@@ -3099,46 +4020,65 @@ export default function PosPage() {
           <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
             
             {/* ── LEFT PANEL (63%): High-Speed Menu Catalog ── */}
-            <div className="w-full lg:w-[63%] flex flex-col border-r border-zinc-200/80 bg-[#FAF8F7] overflow-hidden">
+            <div className="w-full lg:w-[63%] flex flex-col border-r border-zinc-100 dark:border-white/[0.07] bg-zinc-50/40 dark:bg-transparent overflow-hidden">
               
               {/* Top Search Bar & Category Tabs */}
-              <div className="p-4 bg-white border-b border-zinc-200/80 space-y-3 shrink-0">
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
-                  <input
-                    type="text"
-                    placeholder="Search dishes (Press '/' to focus)..."
-                    value={dishSearchQuery}
-                    onChange={(e) => setDishSearchQuery(e.target.value)}
-                    className="w-full pl-9 pr-8 py-2 bg-[#FAF8F7] border border-zinc-200/80 rounded-xl text-xs font-medium outline-none focus:border-[#E46254] focus:bg-white transition-all"
-                  />
-                  {dishSearchQuery && (
-                    <button
-                      type="button"
-                      onClick={() => setDishSearchQuery("")}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
-                    >
-                      <X size={12} />
-                    </button>
-                  )}
+              <div className="bg-white/95 dark:bg-zinc-950/70 backdrop-blur-2xl border-b border-zinc-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)] shrink-0">
+                {/* Search Row */}
+                <div className="px-4 pt-3.5 pb-2">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={13} />
+                    <input
+                      type="text"
+                      placeholder="Search dishes..."
+                      value={dishSearchQuery}
+                      onChange={(e) => setDishSearchQuery(e.target.value)}
+                      className="w-full pl-8 pr-7 py-1.5 bg-zinc-50 dark:bg-[#22232E] border border-zinc-200/70 dark:border-white/[0.08] rounded-xl text-xs font-medium outline-none focus:border-[#E46254]/60 focus:bg-white dark:focus:bg-[#2A2B38] text-zinc-900 dark:text-white transition-all placeholder-zinc-400 dark:placeholder-[#5E5D72]"
+                    />
+                    {dishSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setDishSearchQuery("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+                      >
+                        <X size={11} />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                {/* Horizontal Category Pill Tabs */}
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 slim-scrollbar">
-                  {drawerCategories.map((cat) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setSelectedDrawerCat(cat)}
-                      className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                        selectedDrawerCat === cat
-                          ? "bg-[#E46254]/10 text-[#C2410C] border border-[#E46254]/30 shadow-2xs"
-                          : "bg-[#FAF8F7] hover:bg-[#E46254]/5 text-zinc-600 border border-zinc-200/60"
-                      }`}
-                    >
-                      {cat === "ALL" ? "All Categories" : cat}
-                    </button>
-                  ))}
+                {/* Category Bar with Full Mouse Wheel Scroll + Left/Right Chevron Controls */}
+                <div className="relative px-4 pb-3">
+                  <div
+                    id="dinein-category-scroll"
+                    onWheel={(e) => {
+                      if (e.deltaY !== 0) {
+                        e.currentTarget.scrollLeft += e.deltaY;
+                      }
+                    }}
+                    className="flex items-center gap-2 overflow-x-auto slim-scrollbar scroll-smooth"
+                    style={{ scrollbarWidth: "none" }}
+                  >
+                    {drawerCategories.map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        ref={(el) => {
+                          if (selectedDrawerCat === cat && el) {
+                            el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+                          }
+                        }}
+                        onClick={() => setSelectedDrawerCat(cat)}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer whitespace-nowrap select-none ${
+                          selectedDrawerCat === cat
+                            ? "bg-[#E46254] text-white shadow-xs shadow-[#E46254]/25 scale-[1.02]"
+                            : "bg-white dark:bg-[#1C1D26] hover:bg-[#E46254]/10 text-zinc-700 dark:text-zinc-400 hover:text-[#E46254] dark:hover:text-[#E46254] border border-zinc-200/80 dark:border-white/[0.08] hover:border-[#E46254]/30 shadow-2xs"
+                        }`}
+                      >
+                        {cat === "ALL" ? "All Items" : cat}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -3160,25 +4100,43 @@ export default function PosPage() {
                       const portions = hasPortions ? dish.variantsConfig!.portions : [];
                       const hasAddons = Boolean(dish.variantsConfig?.hasAddons);
 
+                      const cartMatches = manualCart.filter((c) => c.dishId === dish.id || c.name === dish.name);
+                      const totalSelectedQty = cartMatches.reduce((s, it) => s + it.quantity, 0);
+                      const firstCartItem = cartMatches[0];
+
                       return (
                         <div
                           key={dish.id}
-                          className="bg-white rounded-2xl p-3.5 border border-zinc-200/80 hover:border-zinc-300 shadow-2xs hover:shadow-md transition-all flex flex-col justify-between group"
+                          className={`rounded-2xl p-3 border transition-all flex flex-col justify-between group shadow-2xs ${
+                            totalSelectedQty > 0
+                              ? "bg-white border-[#E46254]/50 shadow-sm shadow-[#E46254]/10 ring-1 ring-[#E46254]/25"
+                              : "bg-white border-zinc-200/70 hover:border-[#E46254]/30 hover:shadow-md"
+                          }`}
                         >
-                          <div>
-                            <div className="flex items-start justify-between gap-1 mb-1.5">
-                              <span className="font-bold text-xs text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2">
+                          {/* Card Header: Veg dot + Clean Name with Ellipsis & Title */}
+                          <div className="flex items-start gap-1.5 mb-2">
+                            <span
+                              className={`mt-1 w-2.5 h-2.5 rounded-sm border-[1.5px] shrink-0 ${
+                                dish.is_veg
+                                  ? "border-emerald-500 bg-emerald-50"
+                                  : "border-rose-500 bg-rose-50"
+                              }`}
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span
+                                title={dish.name}
+                                className="font-bold text-[11.5px] text-zinc-900 group-hover:text-[#E46254] transition-colors leading-snug line-clamp-2 break-words"
+                              >
                                 {dish.name}
                               </span>
+                              <span className="text-[10px] text-zinc-400 font-medium block truncate mt-0.5">
+                                {dish.category}
+                              </span>
                             </div>
-
-                            <span className="text-[10.5px] text-zinc-400 font-medium block">
-                              {dish.category}
-                            </span>
                           </div>
 
-                          <div className="mt-3 pt-2.5 border-t border-zinc-100">
-                            {/* Inline Portions Buttons */}
+                          {/* Bottom: Price + Stepper or Add Button */}
+                          <div className="mt-auto pt-1">
                             {hasPortions ? (
                               <div className="space-y-1.5">
                                 <div className="grid grid-cols-2 gap-1">
@@ -3187,7 +4145,7 @@ export default function PosPage() {
                                       key={portion.name || pIdx}
                                       type="button"
                                       onClick={() => handleQuickAddPortion(dish, portion)}
-                                      className="py-1 px-1.5 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10.5px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer"
+                                      className="py-1 px-1.5 rounded-xl bg-white hover:bg-[#E46254] hover:text-white text-zinc-800 text-[10px] font-bold border border-zinc-200/80 transition-colors flex items-center justify-between cursor-pointer shadow-2xs"
                                     >
                                       <span className="truncate">{portion.name}</span>
                                       <span className="font-mono text-[10px] ml-1">₹{portion.price}</span>
@@ -3201,14 +4159,14 @@ export default function PosPage() {
                                     onClick={() => handleOpenCustomizer(dish)}
                                     className="w-full text-[10px] font-bold text-[#E46254] hover:underline text-center py-0.5 cursor-pointer block"
                                   >
-                                    + Addons / Instructions
+                                    + Addons
                                   </button>
                                 )}
                               </div>
                             ) : (
                               /* Standard Dish with Single Price */
-                              <div className="flex items-center justify-between">
-                                <span className="font-mono font-bold text-xs text-zinc-900">
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="font-mono font-black text-sm text-zinc-900 tracking-tight">
                                   ₹{dish.base_price}
                                 </span>
 
@@ -3217,21 +4175,53 @@ export default function PosPage() {
                                     <button
                                       type="button"
                                       onClick={() => handleOpenCustomizer(dish)}
-                                      className="p-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-600 text-[10.5px] font-bold cursor-pointer"
+                                      className="px-1.5 py-0.5 rounded-lg bg-zinc-100/80 hover:bg-zinc-200 text-zinc-600 text-[10px] font-bold cursor-pointer transition-colors"
                                       title="Customise addons"
                                     >
-                                      Custom
+                                      Addons
                                     </button>
                                   )}
 
-                                  <button
-                                    type="button"
-                                    onClick={() => handleQuickAddBase(dish)}
-                                    className="w-7 h-7 rounded-lg bg-[#FAF8F7] hover:bg-[#E46254] hover:text-white text-zinc-800 border border-zinc-200/80 flex items-center justify-center transition-colors cursor-pointer"
-                                    title="Add to Ticket"
-                                  >
-                                    <Plus size={13} strokeWidth={2.5} />
-                                  </button>
+                                  {totalSelectedQty > 0 ? (
+                                    /* Aesthetic - 1 + Stepper directly on card (Gradual 1 2 3 4 5...) */
+                                    <div className="flex items-center bg-[#E46254] text-white rounded-xl shadow-xs p-0.5 animate-in zoom-in-95 duration-150">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDecrementDish(dish);
+                                        }}
+                                        className="w-5 h-5 flex items-center justify-center hover:bg-black/20 rounded-lg transition-colors cursor-pointer active:scale-90"
+                                        title="Decrease"
+                                      >
+                                        <Minus size={11} strokeWidth={3} />
+                                      </button>
+                                      <span className="w-5 text-center font-mono font-black text-xs">
+                                        {totalSelectedQty}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleIncrementDish(dish);
+                                        }}
+                                        className="w-5 h-5 flex items-center justify-center hover:bg-black/20 rounded-lg transition-colors cursor-pointer active:scale-90"
+                                        title="Increase"
+                                      >
+                                        <Plus size={11} strokeWidth={3} />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleIncrementDish(dish)}
+                                      className="h-7 px-2.5 rounded-xl bg-[#E46254]/10 hover:bg-[#E46254] text-[#E46254] hover:text-white border border-[#E46254]/25 hover:border-[#E46254] flex items-center justify-center gap-1 font-bold text-xs transition-all cursor-pointer shadow-2xs active:scale-95"
+                                      title="Add to Ticket"
+                                    >
+                                      <Plus size={12} strokeWidth={3} />
+                                      <span>Add</span>
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             )}
@@ -3245,22 +4235,25 @@ export default function PosPage() {
             </div>
 
             {/* ── RIGHT PANEL (37%): Table Ticket, Unfired Batch, Rounds & Payment / Settle Button ── */}
-            <div className="w-full lg:w-[37%] flex flex-col bg-white overflow-hidden">
+            <div className="w-full lg:w-[37%] flex flex-col bg-white dark:bg-[#16171F] border-l border-zinc-100 dark:border-white/[0.07] overflow-hidden">
               <div className="flex-1 overflow-y-auto p-4 space-y-3.5 slim-scrollbar">
                 
                 {/* Header status bar */}
-                <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
+                <div className="flex items-center justify-between pb-3">
                   <div>
-                    <h3 className="text-sm font-bold text-zinc-900 tracking-tight">Active Table Ticket</h3>
+                    <h3 className="text-sm font-black text-zinc-900 tracking-tight">Ticket</h3>
                     <p className="text-[11px] text-zinc-400 mt-0.5">
                       {!isVacantTable
                         ? `${activeSession?.rounds.length} ${activeSession?.rounds.length === 1 ? 'round' : 'rounds'} fired`
-                        : "No orders fired yet"}
+                        : "Vacant — add dishes to start"}
                     </p>
                   </div>
-                  <span className="font-mono font-bold text-sm text-zinc-900">
-                    Live Total: ₹{grandTotal}
-                  </span>
+                  {!isVacantTable && (
+                    <div className="text-right">
+                      <span className="font-mono font-black text-base text-zinc-900">₹{grandTotal}</span>
+                      <p className="text-[10px] text-zinc-400 mt-0.5">incl. taxes</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* 1. CURRENT UNFIRED STAGED ITEMS (At the top of ticket) */}
@@ -3283,9 +4276,9 @@ export default function PosPage() {
                       </button>
                     </div>
 
-                    <div className="divide-y divide-[#E46254]/10">
+                    <div className="space-y-1">
                       {manualCart.map((it) => (
-                        <div key={it.id} className="py-2 flex items-center justify-between text-xs">
+                        <div key={it.id} className="flex items-center justify-between text-xs py-1.5 px-2 rounded-xl bg-white/60 hover:bg-white transition-colors">
                           <div className="flex items-start gap-2 flex-1 pr-2 min-w-0">
                             <span className="font-mono font-bold text-[#E46254] w-5 shrink-0 mt-0.5">
                               {it.quantity}×
@@ -3377,17 +4370,31 @@ export default function PosPage() {
                 {/* 2. CHRONOLOGICAL FIRED ROUNDS STREAM */}
                 {activeSession && activeSession.rounds.length > 0 ? (
                   <div className="space-y-3">
-                    {activeSession.rounds.map((round) => (
+                    {activeSession.rounds.map((round, roundIdx) => {
+                    const isNewest = roundIdx === activeSession.rounds.length - 1;
+                    const isHighlighted = highlightRoundId === round.orderId;
+                    return (
                       <div
                         key={round.orderId}
-                        className="bg-white rounded-2xl border border-zinc-200/80 p-3.5 space-y-2.5 shadow-2xs hover:border-zinc-300 transition-all"
+                        ref={isNewest ? newestRoundRef : undefined}
+                        className={`rounded-2xl p-3.5 space-y-2.5 transition-all duration-500 relative ${
+                          isHighlighted
+                            ? "bg-gradient-to-br from-amber-50/70 via-white to-[#E46254]/5 border-2 border-[#E46254] shadow-lg shadow-[#E46254]/15 ring-4 ring-[#E46254]/20 scale-[1.01]"
+                            : "bg-white border border-zinc-200/70 shadow-2xs hover:border-zinc-300"
+                        }`}
                       >
-                        {/* Round Header (No Void Round Button) */}
-                        <div className="flex items-center justify-between text-xs pb-2 border-b border-zinc-100">
+                        {/* Round Header */}
+                        <div className="flex items-center justify-between text-xs pb-1">
                           <div className="flex items-center gap-2">
-                            <span className="font-bold text-zinc-900 font-mono text-xs">
+                            <span className="font-black text-zinc-900 font-mono text-xs">
                               Round #{round.roundNumber}
                             </span>
+                            {isHighlighted && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wide animate-pulse shadow-xs">
+                                <Sparkles size={10} />
+                                <span>NEW ROUND</span>
+                              </span>
+                            )}
                             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#E46254]/5 text-[#C2410C] border border-[#E46254]/15">
                               {round.source === "QR" ? "Customer QR" : round.source === "CAPTAIN" ? "Captain App" : "POS Counter"}
                             </span>
@@ -3447,18 +4454,18 @@ export default function PosPage() {
                           {round.items.map((it) => (
                             <div
                               key={it.itemIndex}
-                              className="py-2 px-2.5 rounded-xl bg-zinc-50/70 hover:bg-zinc-50 border border-zinc-100/90 flex items-center justify-between text-xs transition-colors"
+                              className="py-2 px-3 rounded-xl bg-white dark:bg-[#22232E] hover:bg-zinc-50 dark:hover:bg-[#2A2B38] border border-zinc-100 dark:border-white/[0.06] flex items-center justify-between text-xs transition-all shadow-2xs"
                             >
-                              <div className="flex items-start gap-2 flex-1 pr-2 min-w-0">
-                                <span className="font-mono font-bold text-zinc-600 bg-white border border-zinc-200/80 px-1.5 py-0.2 rounded text-[11px] shrink-0 mt-0.5">
+                              <div className="flex items-start gap-2.5 flex-1 pr-2 min-w-0">
+                                <span className="font-mono font-black text-[#E46254] bg-[#E46254]/10 border border-[#E46254]/20 px-1.5 py-0.5 rounded-md text-[11px] shrink-0 mt-0.5">
                                   {it.quantity}×
                                 </span>
                                 <div className="min-w-0">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="font-semibold text-zinc-900 leading-snug truncate max-w-[170px]">{it.name}</span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-bold text-zinc-900 leading-snug truncate" title={it.name}>{it.name}</span>
                                   </div>
                                   {it.notes && (
-                                    <span className="text-[10.5px] text-[#C2410C] mt-0.5 block font-medium truncate max-w-[190px]">
+                                    <span className="text-[10.5px] text-[#C2410C] mt-0.5 block font-medium truncate max-w-[200px]">
                                       {it.notes}
                                     </span>
                                   )}
@@ -3496,10 +4503,11 @@ export default function PosPage() {
                           ))}
                         </div>
                       </div>
-                    ))}
+                    );
+                  })}
                   </div>
                 ) : manualCart.length === 0 ? (
-                  <div className="p-8 bg-[#FAF8F7] rounded-2xl border border-dashed border-zinc-200 text-center space-y-2">
+                  <div className="p-8 bg-zinc-50/40 rounded-2xl border border-dashed border-zinc-200/70 text-center space-y-2">
                     <div className="w-10 h-10 rounded-2xl bg-[#E46254]/10 text-[#E46254] flex items-center justify-center mx-auto mb-1">
                       <UtensilsCrossed size={18} />
                     </div>
@@ -3510,49 +4518,72 @@ export default function PosPage() {
                   </div>
                 ) : null}
 
-                {/* 3. FINANCIAL SUMMARY WITH ROUND-OFF (Discount suppressed by default) */}
+{/* 3. PREMIUM EDITORIAL BILL SUMMARY (No Grey Dullness) */}
                 {subtotal > 0 && (
-                  <div className="bg-white rounded-2xl p-4 border border-zinc-200/80 space-y-2.5 text-xs shadow-2xs">
-                    <div className="flex justify-between text-zinc-500">
-                      <span>Item Subtotal</span>
-                      <span className="font-semibold text-zinc-800 font-mono">₹{subtotal}</span>
-                    </div>
+                  <div className="rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] bg-white dark:bg-[#1C1D26] overflow-hidden text-xs shadow-xs transition-all">
+                    {/* Compact Primary Bar — Clean Luxury White & Soft Brand */}
+                    <div className="px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-r from-white dark:from-[#1C1D26] via-zinc-50/30 dark:via-[#22232E] to-white dark:to-[#1C1D26]">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowBillBreakdown((v) => !v)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white hover:bg-[#E46254]/5 text-zinc-800 hover:text-[#E46254] text-[11px] font-bold border border-zinc-200/80 cursor-pointer transition-all shadow-2xs active:scale-95"
+                        >
+                          <span>{showBillBreakdown ? "Hide Taxes" : "Taxes & Breakdown"}</span>
+                          <span className="text-[10px] text-zinc-400 font-mono">({activeSession?.allItems?.length || 0})</span>
+                        </button>
 
-                    {/* Suppressed Discount Section: Not openly shown */}
-                    {effectiveDiscount > 0 ? (
-                      <div className="flex items-center justify-between text-emerald-600 font-medium pt-1.5 border-t border-zinc-100">
-                        <span className="flex items-center gap-1">
-                          <Tag size={11} />
-                          <span>Discount ({discountPercent > 0 ? `${discountPercent}%` : "Flat"})</span>
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold font-mono">-₹{effectiveDiscount.toFixed(1)}</span>
+                        {effectiveDiscount > 0 ? (
+                          <div className="flex items-center gap-1 text-emerald-700 font-bold text-[11px] bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200/80 shadow-2xs">
+                            <Tag size={10} />
+                            <span>-₹{effectiveDiscount.toFixed(0)}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDiscountPercent(0);
+                                setCustomDiscountRupees("");
+                                setShowDiscountControls(false);
+                              }}
+                              className="text-[10px] text-zinc-400 hover:text-rose-600 underline ml-1 cursor-pointer"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
                           <button
                             type="button"
-                            onClick={() => {
-                              setDiscountPercent(0);
-                              setCustomDiscountRupees("");
-                              setShowDiscountControls(false);
-                            }}
-                            className="text-[10px] text-zinc-400 hover:text-rose-600 underline cursor-pointer"
+                            onClick={() => setShowDiscountControls((v) => !v)}
+                            className="text-[11px] text-zinc-500 hover:text-[#E46254] flex items-center gap-1 cursor-pointer font-bold px-2 py-1 rounded-full hover:bg-[#E46254]/5 transition-colors"
                           >
-                            Remove
+                            <Tag size={10} />
+                            <span>+ Discount</span>
                           </button>
-                        </div>
+                        )}
                       </div>
-                    ) : showDiscountControls ? (
-                      <div className="pt-2 border-t border-zinc-100 space-y-2">
-                        <div className="flex items-center justify-between text-zinc-600 text-[11px]">
-                          <span className="font-semibold">Apply Discount</span>
+
+                      <div className="text-right">
+                        <div className="flex items-baseline justify-end gap-1.5">
+                          <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Total</span>
+                          <span className="font-mono font-black text-lg text-zinc-900 tracking-tight">₹{grandTotal}</span>
+                        </div>
+                        <span className="text-[10px] text-emerald-600 font-medium block">All taxes included</span>
+                      </div>
+                    </div>
+
+                    {/* Discount Input Popdown */}
+                    {showDiscountControls && (
+                      <div className="px-4 py-3 bg-zinc-50/50 border-t border-zinc-100 space-y-2.5 animate-in fade-in duration-150">
+                        <div className="flex items-center justify-between text-zinc-700 text-[11px]">
+                          <span className="font-bold">Apply Bill Discount</span>
                           <button
                             type="button"
                             onClick={() => setShowDiscountControls(false)}
-                            className="text-zinc-400 hover:text-zinc-700 text-[10px] cursor-pointer"
+                            className="text-zinc-400 hover:text-zinc-700 text-[10px] font-semibold cursor-pointer"
                           >
-                            Cancel
+                            Close
                           </button>
                         </div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-2">
                           {[5, 10, 15, 20].map((pct) => (
                             <button
                               key={pct}
@@ -3561,10 +4592,10 @@ export default function PosPage() {
                                 setDiscountPercent(pct);
                                 setCustomDiscountRupees("");
                               }}
-                              className={`flex-1 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer ${
+                              className={`flex-1 py-1.5 rounded-xl text-[11px] font-bold border cursor-pointer transition-all ${
                                 discountPercent === pct && !customDiscountRupees
-                                  ? "bg-[#E46254] text-white border-[#E46254]"
-                                  : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
+                                  ? "bg-[#E46254] text-white border-[#E46254] shadow-2xs"
+                                  : "bg-white text-zinc-700 border-zinc-200 hover:border-[#E46254]/40 hover:bg-[#E46254]/5"
                               }`}
                             >
                               {pct}%
@@ -3572,80 +4603,74 @@ export default function PosPage() {
                           ))}
                           <input
                             type="number"
-                            placeholder="₹ Flat"
+                            placeholder="Flat ₹"
                             value={customDiscountRupees}
                             onChange={(e) => {
                               setCustomDiscountRupees(e.target.value);
                               setDiscountPercent(0);
                             }}
-                            className="w-16 px-2 py-1 bg-[#FAF8F7] border border-zinc-200 rounded-lg text-xs font-mono outline-none focus:border-[#E46254]"
+                            className="w-24 px-2.5 py-1.5 bg-white border border-zinc-200 rounded-xl text-xs font-mono font-bold outline-none focus:border-[#E46254] shadow-2xs"
                           />
                         </div>
                       </div>
-                    ) : (
-                      <div className="pt-1 flex justify-end">
-                        <button
-                          type="button"
-                          onClick={() => setShowDiscountControls(true)}
-                          className="text-[11px] text-zinc-400 hover:text-zinc-600 flex items-center gap-1 cursor-pointer"
-                        >
-                          <Tag size={10} />
-                          <span>+ Add discount</span>
-                        </button>
-                      </div>
                     )}
 
-                    {serviceChargeAmount > 0 && (
-                      <div className="flex justify-between text-zinc-500">
-                        <span>Service Charge ({taxSettings.serviceChargeRate}%)</span>
-                        <span className="font-semibold text-zinc-800 font-mono">₹{serviceChargeAmount.toFixed(1)}</span>
-                      </div>
-                    )}
+                    {/* Expandable Breakdown Drawer */}
+                    {showBillBreakdown && (
+                      <div className="px-4 py-3 bg-white border-t border-zinc-100 space-y-2 animate-in fade-in duration-150 text-[11.5px]">
+                        <div className="flex justify-between text-zinc-600">
+                          <span>Items Subtotal</span>
+                          <span className="font-mono font-bold text-zinc-800">₹{subtotal}</span>
+                        </div>
 
-                    {dineInBillCalc.isComposition ? (
-                      <div className="flex justify-between text-zinc-400 text-[11px] italic">
-                        <span>GST (Composition - 0%)</span>
-                        <span className="font-mono">₹0.00</span>
-                      </div>
-                    ) : dineInBillCalc.isInclusive ? (
-                      <div className="flex justify-between text-zinc-500 text-[11px]">
-                        <span>GST ({dineInBillCalc.effectiveCgstRate + dineInBillCalc.effectiveSgstRate}%)</span>
-                        <span className="font-mono text-zinc-600 font-semibold">Inclusive</span>
-                      </div>
-                    ) : (
-                      gstAmount > 0 && (
-                        <>
+                        {serviceChargeAmount > 0 && (
                           <div className="flex justify-between text-zinc-500">
-                            <span>CGST ({dineInBillCalc.effectiveCgstRate}%)</span>
-                            <span className="font-semibold text-zinc-800 font-mono">₹{cgstAmount.toFixed(1)}</span>
+                            <span>Service Charge ({taxSettings.serviceChargeRate}%)</span>
+                            <span className="font-mono font-medium text-zinc-700">₹{serviceChargeAmount.toFixed(1)}</span>
                           </div>
-                          <div className="flex justify-between text-zinc-500">
-                            <span>SGST ({dineInBillCalc.effectiveSgstRate}%)</span>
-                            <span className="font-semibold text-zinc-800 font-mono">₹{sgstAmount.toFixed(1)}</span>
-                          </div>
-                        </>
-                      )
-                    )}
+                        )}
 
-                    {roundOff !== 0 && (
-                      <div className="flex justify-between text-zinc-400 text-[10.5px]">
-                        <span>Round-off</span>
-                        <span className="font-mono">
-                          {roundOff > 0 ? `+₹${roundOff}` : `-₹${Math.abs(roundOff)}`}
-                        </span>
+                        {dineInBillCalc.isComposition ? (
+                          <div className="flex justify-between text-zinc-400 italic">
+                            <span>GST (Composition — 0%)</span>
+                            <span className="font-mono">₹0.00</span>
+                          </div>
+                        ) : dineInBillCalc.isInclusive ? (
+                          <div className="flex justify-between text-zinc-500">
+                            <span>GST ({dineInBillCalc.effectiveCgstRate + dineInBillCalc.effectiveSgstRate}%)</span>
+                            <span className="font-mono text-zinc-700 font-semibold">Included</span>
+                          </div>
+                        ) : (
+                          gstAmount > 0 && (
+                            <>
+                              <div className="flex justify-between text-zinc-500">
+                                <span>CGST ({dineInBillCalc.effectiveCgstRate}%)</span>
+                                <span className="font-mono text-zinc-700">₹{cgstAmount.toFixed(1)}</span>
+                              </div>
+                              <div className="flex justify-between text-zinc-500">
+                                <span>SGST ({dineInBillCalc.effectiveSgstRate}%)</span>
+                                <span className="font-mono text-zinc-700">₹{sgstAmount.toFixed(1)}</span>
+                              </div>
+                            </>
+                          )
+                        )}
+
+                        {roundOff !== 0 && (
+                          <div className="flex justify-between text-zinc-400 text-[10.5px]">
+                            <span>Round-off</span>
+                            <span className="font-mono">
+                              {roundOff > 0 ? `+₹${roundOff}` : `-₹${Math.abs(roundOff)}`}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
-
-                    <div className="flex justify-between text-zinc-900 font-bold text-sm pt-2 border-t border-zinc-200">
-                      <span>Grand Total</span>
-                      <span className="font-mono text-base font-black">₹{grandTotal}</span>
-                    </div>
                   </div>
                 )}
               </div>
 
               {/* ── ACTION DOCK: PRINT BILL & SIMPLE SETTLE BUTTON (NO EMOJI, NO DESCRIPTION) ── */}
-              <div className="p-4 bg-[#FAF8F7] border-t border-zinc-200/80 space-y-2 shrink-0">
+              <div className="p-4 bg-white border-t border-zinc-100 space-y-2 shrink-0">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <button
                     type="button"
@@ -3659,11 +4684,23 @@ export default function PosPage() {
                   {!isTablePaid ? (
                     <button
                       type="button"
-                      disabled={subtotal === 0 || isSubmitting}
+                      disabled={
+                        subtotal === 0 ||
+                        isSubmitting ||
+                        !activeSession ||
+                        activeSession.rounds.length === 0
+                      }
                       onClick={handlePaymentCollected}
-                      className="sm:col-span-2 py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#d55345] disabled:opacity-40 text-white font-bold text-xs flex items-center justify-center cursor-pointer transition-all shadow-xs"
+                      className="sm:col-span-2 py-3 px-4 rounded-xl bg-[#E46254] hover:bg-[#d55345] disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold text-xs flex items-center justify-center cursor-pointer transition-all shadow-xs"
+                      title={
+                        !activeSession || activeSession.rounds.length === 0
+                          ? "Fire round to kitchen (KOT) before collecting payment"
+                          : "Record payment for this table"
+                      }
                     >
-                      Payment Collected
+                      {!activeSession || activeSession.rounds.length === 0
+                        ? "Fire KOT First to Collect"
+                        : "Payment Collected"}
                     </button>
                   ) : (
                     <button

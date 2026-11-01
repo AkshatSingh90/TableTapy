@@ -21,6 +21,7 @@ import {
   Coins
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { LocalCache } from "@/utils/localCache";
 
 /* ─── Interfaces ─────────────────────────────────────────── */
 interface OrderItem {
@@ -70,13 +71,36 @@ interface CustomerProfile {
 
 export default function CustomersPage() {
   const supabase = createClient();
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
 
   // Centered Top Nav Tab Toggle (Exact match to Inventory Page)
   const [activeTab, setActiveTab] = useState<"Intelligence" | "All Customers">("Intelligence");
+
+  // Sync tab with top header
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("customers_tab_sync", { detail: activeTab }));
+    const handleTabChange = (e: any) => {
+      if (e.detail) {
+        if (e.detail === "Intelligence") {
+          setSelectedSegmentFilter(null);
+        }
+        setActiveTab(e.detail);
+      }
+    };
+    window.addEventListener("customers_tab_change", handleTabChange);
+    return () => window.removeEventListener("customers_tab_change", handleTabChange);
+  }, [activeTab]);
+
+  const handleTabSelect = (tab: "Intelligence" | "All Customers") => {
+    if (tab === "Intelligence") {
+      setSelectedSegmentFilter(null);
+    }
+    setActiveTab(tab);
+    window.dispatchEvent(new CustomEvent("customers_tab_sync", { detail: tab }));
+  };
 
   // Filter selection when clicking an Intelligence card
   const [selectedSegmentFilter, setSelectedSegmentFilter] = useState<string | null>(null);
@@ -90,11 +114,13 @@ export default function CustomersPage() {
   /* ─── Fetch Data ────────────────────────────────────────── */
   const fetchData = async () => {
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      const restId = user?.user_metadata?.restaurant_id;
+      let restId = restaurantId || (typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") || "" : "");
+      if (!restId) {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        restId = user?.user_metadata?.restaurant_id || "";
+      }
 
       setRestaurantId(restId || null);
 
@@ -109,6 +135,7 @@ export default function CustomersPage() {
 
         if (ordersData) {
           setOrders(ordersData as OrderRecord[]);
+          LocalCache.set(LocalCache.makeKey("customer_orders", restId), ordersData);
         }
       }
     } catch (err) {
@@ -120,6 +147,21 @@ export default function CustomersPage() {
   };
 
   useEffect(() => {
+    // Instant optimistic hydration from client cache to eliminate reload glitch
+    const restId = typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") || "" : "";
+    if (restId) {
+      const cached = LocalCache.get<OrderRecord[]>(LocalCache.makeKey("customer_orders", restId));
+      if (cached?.data && Array.isArray(cached.data) && cached.data.length > 0) {
+        setOrders(cached.data);
+        setLoading(false);
+      }
+    } else {
+      const anyCached = LocalCache.getAny<OrderRecord[]>("customer_orders");
+      if (anyCached && Array.isArray(anyCached) && anyCached.length > 0) {
+        setOrders(anyCached);
+        setLoading(false);
+      }
+    }
     fetchData();
   }, []);
 
@@ -350,61 +392,10 @@ export default function CustomersPage() {
     });
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-white">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-2 border-zinc-200 border-t-[#E46254] rounded-full animate-spin" />
-          <p className="text-zinc-500 font-medium text-xs">Loading customer intelligence...</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex h-screen flex-col bg-white overflow-hidden text-gray-900 font-sans relative">
-      <div className="flex-1 overflow-y-auto slim-scrollbar px-6 md:px-10 w-full pb-10">
+    <div className="flex flex-col min-h-full bg-white text-gray-900 font-sans relative">
+      <div className="flex-1 px-6 md:px-10 w-full pb-10">
         
-        {/* ───────────────────────────────────────────────────────────── */}
-        {/* TOP NAV TABS (Exact match to Inventory Page: max-w-sm centered) */}
-        {/* ───────────────────────────────────────────────────────────── */}
-        <div className="pt-6 pb-2 w-full flex items-center justify-center">
-          <div className="bg-gray-100/80 p-1 rounded-xl flex items-center gap-1 w-full max-w-sm mx-auto shadow-inner border border-gray-200/50">
-            <button
-              onClick={() => {
-                setSelectedSegmentFilter(null);
-                setActiveTab("Intelligence");
-              }}
-              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
-                activeTab === "Intelligence"
-                  ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              <Sparkles
-                size={14}
-                className={activeTab === "Intelligence" ? "text-[#E46254]" : ""}
-              />
-              Intelligence
-            </button>
-
-            <button
-              onClick={() => setActiveTab("All Customers")}
-              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all cursor-pointer ${
-                activeTab === "All Customers"
-                  ? "bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              <Users
-                size={14}
-                className={activeTab === "All Customers" ? "text-[#E46254]" : ""}
-              />
-              All Customers
-            </button>
-          </div>
-        </div>
-
         {/* ───────────────────────────────────────────────────────────── */}
         {/* TAB 1: INTELLIGENCE VIEW (Exact match to IntelligenceDashboard.tsx) */}
         {/* ───────────────────────────────────────────────────────────── */}
@@ -594,7 +585,12 @@ export default function CustomersPage() {
 
             {/* Customers Card Grid */}
             <div className="mt-6">
-              {filteredList.length === 0 ? (
+              {loading && filteredList.length === 0 ? (
+                <div className="py-24 text-center bg-white rounded-2xl border border-gray-100 p-8">
+                  <div className="w-8 h-8 border-2 border-zinc-200 border-t-[#E46254] rounded-full animate-spin mx-auto mb-3" />
+                  <p className="text-zinc-500 font-medium text-xs">Loading customer directory...</p>
+                </div>
+              ) : filteredList.length === 0 ? (
                 <div className="py-24 text-center bg-white rounded-2xl border border-gray-200 p-8">
                   <Users size={28} className="text-[#E46254] mx-auto mb-2.5" />
                   <h3 className="text-[15px] font-semibold text-gray-900">No Customers Found</h3>

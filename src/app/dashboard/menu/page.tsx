@@ -1,8 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Trash2, ChefHat, Check, Layers } from "lucide-react";
+import React, { useState, useEffect, useMemo } from "react";
+import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Pencil, Trash2, ChefHat, Check, Layers, Filter } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { LocalCache } from "@/utils/localCache";
+import { LocalSqliteStore, getCanonicalRestaurantId, LocalMenuItem } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import {
   ItemVariantsConfig,
   getDefaultVariantsConfig,
@@ -31,6 +34,7 @@ interface MenuItem {
   description: string;
   is_veg: boolean;
   is_available: boolean;
+  image_url?: string;
   badge?: "CHEF_SIGNATURE" | "BESTSELLER" | "SPECIAL" | "MUST_TRY" | null;
   recipeUsages?: any[];
   variantsConfig?: ItemVariantsConfig;
@@ -38,15 +42,36 @@ interface MenuItem {
 
 export default function MenuManagerPage() {
   const supabase = createClient();
+  const [mounted, setMounted] = useState(false);
   const [restaurantId, setRestaurantId] = useState<string>('');
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('ALL');
+  const [dietaryFilter, setDietaryFilter] = useState<'ALL' | 'VEG' | 'NON_VEG'>('ALL');
   const [isAddingMode, setIsAddingMode] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCustomCategory, setIsCustomCategory] = useState(false);
+  const [customCategoryInput, setCustomCategoryInput] = useState('');
+
+  // Sync Search & Add modal from top header events
+  useEffect(() => {
+    const handleSearch = (e: any) => {
+      setSearchQuery(e.detail || '');
+    };
+    const handleOpenAdd = () => {
+      handleOpenCreateModal();
+    };
+    window.addEventListener('menu_search_change', handleSearch);
+    window.addEventListener('menu_open_add_modal', handleOpenAdd);
+    return () => {
+      window.removeEventListener('menu_search_change', handleSearch);
+      window.removeEventListener('menu_open_add_modal', handleOpenAdd);
+    };
+  }, []);
 
   // Form State
   const defaultForm = { name: '', category: 'Main Course', subcategory: '', base_price: '', description: '', is_veg: true, badge: null as ("CHEF_SIGNATURE" | "BESTSELLER" | "SPECIAL" | "MUST_TRY" | null) };
@@ -54,18 +79,22 @@ export default function MenuManagerPage() {
   const [variantsConfig, setVariantsConfig] = useState<ItemVariantsConfig>(getDefaultVariantsConfig(0));
   const [recipeIngredients, setRecipeIngredients] = useState<{ inventory_item_id: string; amount: string; name?: string; cost?: number }[]>([]);
 
-  // Keep the 'Full' portion in sync with base_price
+  // Keep the Base portion in sync with base_price
   useEffect(() => {
     const num = Number(form.base_price) || 0;
     setVariantsConfig(prev => ({
       ...prev,
-      portions: prev.portions.map(p => p.name.toLowerCase() === 'full' ? { ...p, price: num } : p)
+      portions: prev.portions.map((p, idx) => 
+        (idx === 0 || p.isDefault || p.name.toLowerCase() === 'full') ? { ...p, price: num } : p
+      )
     }));
   }, [form.base_price]);
 
   const handleOpenCreateModal = () => {
     setEditingItemId(null);
     setForm(defaultForm);
+    setIsCustomCategory(false);
+    setCustomCategoryInput('');
     setVariantsConfig(getDefaultVariantsConfig(0));
     setRecipeIngredients([]);
     setIsAddingMode(true);
@@ -77,17 +106,23 @@ export default function MenuManagerPage() {
   const [isQuickSaving, setIsQuickSaving] = useState(false);
 
   const loadData = async () => {
-    setIsLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    const restId = user?.user_metadata?.restaurant_id;
+    let restId = await getCanonicalRestaurantId(supabase);
+    if (!restId && typeof window !== 'undefined') {
+      restId = localStorage.getItem('tabletapy_restaurant_id') || '';
+    }
 
     if (!restId) {
-      setMenuItems([]);
-      setInventory([]);
+      if (menuItems.length === 0) {
+        setMenuItems([]);
+        setInventory([]);
+      }
       setIsLoading(false);
       return;
     }
     setRestaurantId(restId);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('tabletapy_restaurant_id', restId);
+    }
 
     // 1. Load Inventory for recipe builder (isolated per restaurant)
     let invRows: any[] | null = null;
@@ -130,40 +165,22 @@ export default function MenuManagerPage() {
       })));
     }
     
-    // 2. Load Menu Items (supports native restaurant_id + metadata isolation + shared catalog fallback)
+    // 2. Load Menu Items (combines restaurant custom dishes + shared catalog, isolates from other restaurants)
     let menuRows: any[] | null = null;
-    const { data: restMenu, error: menuScopeErr } = await supabase
+    const { data: allMenu } = await supabase
       .from('menu_items_v2')
       .select('*')
       .eq('restaurant_id', restId)
       .order('created_at', { ascending: false });
 
-    if (!menuScopeErr && restMenu && restMenu.length > 0) {
-      menuRows = restMenu;
-    } else {
-      const { data: allMenu } = await supabase.from('menu_items_v2').select('*').order('created_at', { ascending: false });
-      if (allMenu) {
-        menuRows = allMenu.filter((row: any) => {
-          if (row.restaurant_id) return row.restaurant_id === restId;
-          const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restId}`);
-          if (savedCustomMenuIds) {
-            try {
-              const ids: string[] = JSON.parse(savedCustomMenuIds);
-              if (ids.includes(row.id)) return true;
-            } catch {}
-          }
-          if (row.description && row.description.includes(`[REST:${restId}]`)) return true;
-          // Show general items if no restaurant_id attached (matching POS behavior)
-          if (!row.restaurant_id && (!row.description || !row.description.includes('[REST:'))) return true;
-          return false;
-        });
-      }
+    if (allMenu) {
+      menuRows = allMenu;
     }
 
     if (menuRows) {
        const { data: usages } = await supabase.from('inventory_recipe_usage').select('*');
        
-       setMenuItems(menuRows.map((row: any) => {
+       const mappedItems: MenuItem[] = menuRows.map((row: any) => {
          const { cleanDescription, config } = extractVariantsFromDescription(row.description, Number(row.base_price || 0));
          const itemUsages = usages?.filter(u => u.name === row.name) || [];
          const enrichedUsages = itemUsages.map(u => {
@@ -193,17 +210,98 @@ export default function MenuManagerPage() {
            is_veg: row.is_veg,
            is_available: row.is_available !== false,
            badge: itemBadge,
+           image_url: row.image_url || row.image || undefined,
            recipeUsages: enrichedUsages,
            variantsConfig: config,
          };
-       }));
+       });
+       // Merge locally created dishes with cloud dishes so local items never vanish
+       let combined = [...mappedItems];
+       if (restId) {
+         const localDishes = await LocalSqliteStore.getMenuItems(restId, false);
+         for (const ld of localDishes) {
+           if (!combined.some(c => c.id === ld.id || c.name.trim().toLowerCase() === ld.name.trim().toLowerCase())) {
+             combined.push(ld as any);
+           }
+         }
+       }
+
+       setMenuItems(combined);
+       if (restId) {
+         LocalCache.set(LocalCache.makeKey('menu_catalog', restId), combined);
+         LocalSqliteStore.saveMenuItems(
+           restId,
+           combined.map((m: any) => ({
+             id: m.id,
+             restaurant_id: restId,
+             name: m.name,
+             category: m.category,
+             subcategory: m.subcategory,
+             base_price: m.base_price,
+             is_veg: m.is_veg,
+             is_available: m.is_available,
+             description: m.description,
+             image_url: m.image_url,
+             badge: m.badge,
+             variantsConfig: m.variantsConfig,
+             updated_at: new Date().toISOString(),
+           })),
+           false
+         ).catch((e) => console.warn('[Menu] Failed to cache into SQLite:', e));
+       }
+       LocalCache.set('menu_catalog', combined);
     } else {
-      setMenuItems([]);
+       // If offline / cloud returns null, NEVER wipe dishes! Preserve from SQLite
+       if (restId) {
+         const localDishes = await LocalSqliteStore.getMenuItems(restId, false);
+         if (localDishes && localDishes.length > 0) {
+           setMenuItems(localDishes as any);
+         }
+       }
     }
     setIsLoading(false);
   };
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    setMounted(true);
+    // Optimistically hydrate from local cache on client mount to eliminate layout jump
+    const restId = typeof window !== 'undefined' ? localStorage.getItem('tabletapy_restaurant_id') || '' : '';
+    if (restId) {
+      LocalSqliteStore.getMenuItems(restId).then((cached) => {
+        if (cached && cached.length > 0) {
+          setMenuItems(cached as any);
+          setIsLoading(false);
+        }
+      }).catch(() => {});
+      setRestaurantId(restId);
+      const scoped = LocalCache.get<MenuItem[]>(LocalCache.makeKey('menu_catalog', restId));
+      if (scoped?.data && Array.isArray(scoped.data) && scoped.data.length > 0) {
+        setMenuItems(scoped.data);
+        setIsLoading(false);
+      }
+    } else {
+      const anyCached = LocalCache.getAny<MenuItem[]>('menu_catalog');
+      if (anyCached && Array.isArray(anyCached) && anyCached.length > 0) {
+        setMenuItems(anyCached);
+        setIsLoading(false);
+      }
+    }
+    loadData();
+
+    // Silently re-hydrate when background sync finishes
+    const handleSyncComplete = () => {
+      const activeId = localStorage.getItem('tabletapy_restaurant_id') || '';
+      if (activeId) {
+        LocalSqliteStore.getMenuItems(activeId).then((cached) => {
+          if (cached && cached.length > 0) {
+            setMenuItems(cached as any);
+          }
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener("tabletapy_sync_completed", handleSyncComplete);
+    return () => window.removeEventListener("tabletapy_sync_completed", handleSyncComplete);
+  }, []);
 
   const formatCurrency = (amount: number, showDecimals: boolean = false) => {
     if (isNaN(amount) || !isFinite(amount)) return '₹0';
@@ -218,7 +316,18 @@ export default function MenuManagerPage() {
   const toggleAvailability = async (item: MenuItem, e: React.MouseEvent) => {
     e.stopPropagation();
     const newStatus = !item.is_available;
-    setMenuItems(prev => prev.map(i => i.id === item.id ? { ...i, is_available: newStatus } : i));
+    // 0ms instant local SQLite update
+    if (restaurantId) {
+      LocalSqliteStore.updateMenuItem({ id: item.id, restaurant_id: restaurantId, is_available: newStatus });
+    }
+    setMenuItems(prev => {
+      const updated = prev.map(i => i.id === item.id ? { ...i, is_available: newStatus } : i);
+      if (restaurantId) {
+        LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
+      }
+      LocalCache.set('menu_catalog', updated);
+      return updated;
+    });
     if (selectedItem?.id === item.id) setSelectedItem({ ...selectedItem, is_available: newStatus });
     
     const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).eq('id', item.id);
@@ -229,7 +338,14 @@ export default function MenuManagerPage() {
     const anyAvailable = itemsToToggle.some(i => i.is_available);
     const newStatus = !anyAvailable;
     const ids = itemsToToggle.map(i => i.id);
-    setMenuItems(prev => prev.map(i => ids.includes(i.id) ? { ...i, is_available: newStatus } : i));
+    setMenuItems(prev => {
+      const updated = prev.map(i => ids.includes(i.id) ? { ...i, is_available: newStatus } : i);
+      if (restaurantId) {
+        LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
+      }
+      LocalCache.set('menu_catalog', updated);
+      return updated;
+    });
     
     const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).in('id', ids);
     if (error) console.warn("Could not save category availability to DB, state updated locally. Add 'is_available' column to fix.");
@@ -273,8 +389,10 @@ export default function MenuManagerPage() {
     const stockNum = parseFloat(quickMaterial.stock) || 0;
     const threshNum = parseFloat(quickMaterial.threshold);
 
+    const trimmedName = quickMaterial.name.trim();
     const { data, error } = await supabase.from('inventory_items').insert([{
-      name: quickMaterial.name.trim(),
+      name: restaurantId ? `[REST:${restaurantId}] ${trimmedName}` : trimmedName,
+      restaurant_id: restaurantId || null,
       category: quickMaterial.category,
       storage_unit: quickMaterial.storageUnit,
       vendor_unit: quickMaterial.vendorUnit,
@@ -300,6 +418,16 @@ export default function MenuManagerPage() {
     }
 
     if (data) {
+      if (restaurantId) {
+        try {
+          const savedCustomIds = localStorage.getItem(`tabletapy_inventory_${restaurantId}`);
+          const list: string[] = savedCustomIds ? JSON.parse(savedCustomIds) : [];
+          if (!list.includes(data.id)) {
+            list.push(data.id);
+            localStorage.setItem(`tabletapy_inventory_${restaurantId}`, JSON.stringify(list));
+          }
+        } catch {}
+      }
       if (stockNum > 0) {
         await supabase.from('inventory_ledgers').insert([{
           inventory_item_id: data.id,
@@ -320,100 +448,139 @@ export default function MenuManagerPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
     
+    const finalCategory = isCustomCategory ? customCategoryInput.trim() : form.category;
+    const dishId = editingItemId || ('dish_' + Date.now());
     const taggedDesc = buildTaggedDescription(form.description, variantsConfig, restaurantId);
-    let menuErr: any = null;
-    let savedMenuId: string | null = editingItemId;
 
-    if (editingItemId) {
-      const { error } = await supabase.from('menu_items_v2').update({
-        name: form.name,
-        category: form.category,
-        subcategory: form.subcategory || '',
-        base_price: Number(form.base_price),
-        description: taggedDesc,
-        is_veg: form.is_veg,
-      }).eq('id', editingItemId);
-      menuErr = error;
-    } else {
-      const { data: insertedMenu, error } = await supabase.from('menu_items_v2').insert([{
-        name: form.name,
-        category: form.category,
-        subcategory: form.subcategory || '',
-        base_price: Number(form.base_price),
-        description: taggedDesc,
-        is_veg: form.is_veg,
-        restaurant_id: restaurantId || null
-      }]).select().single();
-      menuErr = error;
-      savedMenuId = insertedMenu?.id || null;
+    const localDish: LocalMenuItem = {
+      id: dishId,
+      restaurant_id: restaurantId,
+      name: form.name.trim(),
+      category: finalCategory,
+      subcategory: form.subcategory || '',
+      base_price: Number(form.base_price),
+      description: form.description,
+      is_veg: form.is_veg,
+      is_available: true,
+      badge: form.badge || null,
+      variantsConfig,
+      updated_at: new Date().toISOString()
+    };
+
+    // 1. Instant 0ms Local SQLite persistence
+    if (restaurantId) {
+      await LocalSqliteStore.saveSingleMenuItem(localDish);
     }
 
-    // Persist badge to dish badges storage
-    if (savedMenuId && restaurantId) {
+    // 2. Instant UI update & modal close (Never freezes or waits on network)
+    setMenuItems(prev => {
+      const filtered = prev.filter(m => m.id !== dishId);
+      const updated = [localDish as any, ...filtered];
+      if (restaurantId) {
+        LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
+      }
+      LocalCache.set('menu_catalog', updated);
+      return updated;
+    });
+
+    if (form.badge && restaurantId) {
       try {
         const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${restaurantId}`);
         const parsed = savedBadges ? JSON.parse(savedBadges) : {};
-        if (form.badge) {
-          parsed[savedMenuId] = form.badge;
-        } else {
-          delete parsed[savedMenuId];
-        }
+        parsed[dishId] = form.badge;
         localStorage.setItem(`tabletapy_dish_badges_${restaurantId}`, JSON.stringify(parsed));
       } catch {}
     }
 
-    if (savedMenuId && restaurantId) {
-      try {
-        const savedIds = localStorage.getItem(`tabletapy_menu_${restaurantId}`);
-        const list: string[] = savedIds ? JSON.parse(savedIds) : [];
-        if (!list.includes(savedMenuId)) {
-          list.push(savedMenuId);
-          localStorage.setItem(`tabletapy_menu_${restaurantId}`, JSON.stringify(list));
+    setIsAddingMode(false);
+    setEditingItemId(null);
+    setIsSubmitting(false);
+
+    // 3. Silent background push to Supabase if online, otherwise queue mutation
+    const runCloudSync = async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (restaurantId) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now(),
+            restaurant_id: restaurantId,
+            entity: 'MENU_ITEM',
+            action: editingItemId ? 'UPDATE' : 'INSERT',
+            payload: { ...localDish, description: taggedDesc },
+            created_at: new Date().toISOString()
+          });
         }
-      } catch {}
-    }
-
-    if (menuErr) {
-      alert("Error saving dish: " + menuErr.message);
-      setIsSubmitting(false);
-      return;
-    }
-
-    if (recipeIngredients.length > 0) {
-      // Clear old usages if editing
-      if (editingItemId) {
-        await supabase.from('inventory_recipe_usage').delete().eq('name', form.name);
+        OfflineSyncEngine.triggerSync();
+        return;
       }
 
-      const usageInserts = recipeIngredients.map(ing => {
-        const inv = inventory.find(i => i.id === ing.inventory_item_id);
-        const conversion = inv && inv.vendorToStorage > 0 ? inv.vendorToStorage : 1;
-        const rawCost = inv ? (inv.costPerVendorUnit / conversion) : 0;
-        const yieldPct = inv && inv.yieldPercentage > 0 ? inv.yieldPercentage : 100;
-        const usableCostPerStorage = rawCost / (yieldPct / 100);
-        let costPerRecipeUnit = usableCostPerStorage;
-        if (inv && inv.storageUnit === 'kg' && inv.recipeUnit === 'g') costPerRecipeUnit /= 1000;
-        if (inv && inv.storageUnit === 'L' && inv.recipeUnit === 'ml') costPerRecipeUnit /= 1000;
-        const totalIngredientCost = Number(ing.amount) * costPerRecipeUnit;
+      try {
+        if (editingItemId) {
+          const { error } = await supabase.from('menu_items_v2').update({
+            name: form.name.trim(),
+            category: finalCategory,
+            subcategory: form.subcategory || '',
+            base_price: Number(form.base_price),
+            description: taggedDesc,
+            is_veg: form.is_veg,
+          }).eq('id', editingItemId);
+          if (error && restaurantId) {
+            await LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now(),
+              restaurant_id: restaurantId,
+              entity: 'MENU_ITEM',
+              action: 'UPDATE',
+              payload: { ...localDish, description: taggedDesc },
+              created_at: new Date().toISOString()
+            });
+          }
+        } else {
+          const { error } = await supabase.from('menu_items_v2').insert([{
+            id: dishId,
+            name: form.name.trim(),
+            category: finalCategory,
+            subcategory: form.subcategory || '',
+            base_price: Number(form.base_price),
+            description: taggedDesc,
+            is_veg: form.is_veg,
+            is_available: true,
+            restaurant_id: restaurantId || null
+          }]);
+          if (error && restaurantId) {
+            await LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now(),
+              restaurant_id: restaurantId,
+              entity: 'MENU_ITEM',
+              action: 'INSERT',
+              payload: { ...localDish, description: taggedDesc },
+              created_at: new Date().toISOString()
+            });
+          }
+        }
+      } catch (cloudErr) {
+        console.warn('[Menu] Cloud sync deferred:', cloudErr);
+        if (restaurantId) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now(),
+            restaurant_id: restaurantId,
+            entity: 'MENU_ITEM',
+            action: editingItemId ? 'UPDATE' : 'INSERT',
+            payload: { ...localDish, description: taggedDesc },
+            created_at: new Date().toISOString()
+          }).catch(() => {});
+        }
+      } finally {
+        OfflineSyncEngine.triggerSync();
+      }
+    };
+    runCloudSync();
 
-        return {
-          name: form.name,
-          inventory_item_id: ing.inventory_item_id,
-          amount_per_order: Number(ing.amount),
-          ingredient_cost_per_order: totalIngredientCost,
-          times_ordered: 0,
-          dish_price: Number(form.base_price) || 0,
-          profit_impact: form.base_price && Number(form.base_price) > 0 ? `${((totalIngredientCost / Number(form.base_price)) * 100).toFixed(1)}%` : '0%'
-        };
-      });
-      const { error: usageErr } = await supabase.from('inventory_recipe_usage').insert(usageInserts);
-      if (usageErr) alert('Recipe save error: ' + usageErr.message);
-    }
-
-    await loadData();
+    setSelectedCategoryFilter('ALL');
+    setDietaryFilter('ALL');
+    setSearchQuery('');
     setForm(defaultForm);
+    setIsCustomCategory(false);
+    setCustomCategoryInput('');
     setVariantsConfig(getDefaultVariantsConfig(0));
     setEditingItemId(null);
     setRecipeIngredients([]);
@@ -421,46 +588,142 @@ export default function MenuManagerPage() {
     setIsSubmitting(false);
   };
 
+  const categoryOrder = ["Soups", "Quick Start", "Appetizers", "Main Course", "Breads", "Desserts", "Beverages"];
+
+  const allCategories = useMemo(() => {
+    const set = new Set<string>();
+    menuItems.forEach((i) => {
+      const trimmed = (i.category || '').trim();
+      if (trimmed) set.add(trimmed);
+    });
+    return Array.from(set).sort((a, b) => {
+      const idxA = categoryOrder.findIndex(c => c.toLowerCase() === a.toLowerCase());
+      const idxB = categoryOrder.findIndex(c => c.toLowerCase() === b.toLowerCase());
+      if (idxA === -1 && idxB === -1) return a.localeCompare(b);
+      if (idxA === -1) return 1;
+      if (idxB === -1) return -1;
+      return idxA - idxB;
+    });
+  }, [menuItems]);
+
   // --- HIERARCHY LOGIC ---
-  const filteredItems = menuItems.filter(item => 
-    item.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    item.category.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    item.subcategory?.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredItems = useMemo(() => {
+    return menuItems.filter((item) => {
+      if (dietaryFilter === "VEG" && !item.is_veg) return false;
+      if (dietaryFilter === "NON_VEG" && item.is_veg) return false;
+      if (selectedCategoryFilter !== "ALL") {
+        const itemCat = (item.category || "").trim().toLowerCase();
+        const selCat = selectedCategoryFilter.trim().toLowerCase();
+        if (itemCat !== selCat) return false;
+      }
+
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const matchName = (item.name || "").toLowerCase().includes(q);
+        const matchCat = (item.category || "").toLowerCase().includes(q);
+        const matchSub = (item.subcategory || "").toLowerCase().includes(q);
+        const matchDesc = (item.description || "").toLowerCase().includes(q);
+        return matchName || matchCat || matchSub || matchDesc;
+      }
+      return true;
+    });
+  }, [menuItems, searchQuery, selectedCategoryFilter, dietaryFilter]);
+
+  const groupedHierarchy = useMemo(() => {
+    return filteredItems.reduce((acc, item) => {
+      const cat = (item.category || "General").trim();
+      if (!acc[cat]) acc[cat] = {};
+      const rawSub = (item.subcategory || "").trim();
+      const isJunk = !rawSub || rawSub.toLowerCase() === "general" || rawSub.toLowerCase() === "empty" || rawSub.toLowerCase() === "hjk";
+      const sub = isJunk ? "General" : rawSub;
+      if (!acc[cat][sub]) acc[cat][sub] = [];
+      acc[cat][sub].push(item);
+      return acc;
+    }, {} as Record<string, Record<string, MenuItem[]>>);
+  }, [filteredItems]);
+
+  const sortedCategories = useMemo(() => {
+    return Object.keys(groupedHierarchy).sort((a, b) => {
+      const idxA = categoryOrder.findIndex(c => c.toLowerCase() === a.toLowerCase());
+      const idxB = categoryOrder.findIndex(c => c.toLowerCase() === b.toLowerCase());
+      if (idxA === -1 && idxB === -1) return a.localeCompare(b);
+      if (idxA === -1) return 1;
+      if (idxB === -1) return -1;
+      return idxA - idxB;
+    });
+  }, [groupedHierarchy]);
+
+  const allCategoriesOptions = useMemo(() => {
+    const set = new Set([...categoryOrder, ...allCategories]);
+    if (form.category) set.add(form.category.trim());
+    return Array.from(set);
+  }, [allCategories, form.category]);
+
+  const handleOpenEditItem = (item: MenuItem, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setEditingItemId(item.id);
+    setIsCustomCategory(false);
+    setCustomCategoryInput('');
+    setForm({
+      name: item.name,
+      category: item.category,
+      subcategory: item.subcategory || '',
+      base_price: item.base_price.toString(),
+      description: item.description || '',
+      is_veg: item.is_veg,
+      badge: item.badge || null,
+    });
+    setVariantsConfig(item.variantsConfig || getDefaultVariantsConfig(item.base_price));
+    setRecipeIngredients(
+      item.recipeUsages?.map((u) => ({
+        inventory_item_id: u.inventory_item_id,
+        amount: u.amount_per_order.toString(),
+        name: u.inventory_name,
+        cost: u.ingredient_cost_per_order / (u.amount_per_order || 1),
+      })) || []
+    );
+    setIsAddingMode(true);
+    setSelectedItem(null);
+  };
+
+  const DietaryIndicator = ({ isVeg }: { isVeg: boolean }) => (
+    <div
+      className={`w-3.5 h-3.5 border flex items-center justify-center rounded-[3px] shrink-0 ${
+        isVeg ? 'border-emerald-600 bg-white' : 'border-[#8B2500] bg-white'
+      }`}
+      title={isVeg ? 'Vegetarian' : 'Non-Vegetarian'}
+    >
+      <div
+        className={`w-1.5 h-1.5 rounded-full ${
+          isVeg ? 'bg-emerald-600' : 'bg-[#8B2500]'
+        }`}
+      />
+    </div>
   );
 
-  const groupedHierarchy = filteredItems.reduce((acc, item) => {
-    if (!acc[item.category]) acc[item.category] = {};
-    const sub = item.subcategory || 'EMPTY';
-    if (!acc[item.category][sub]) acc[item.category][sub] = [];
-    acc[item.category][sub].push(item);
-    return acc;
-  }, {} as Record<string, Record<string, MenuItem[]>>);
-
-  const categoryOrder = ["Soups", "Quick Start", "Appetizers", "Main Course", "Breads", "Desserts", "Beverages"];
-  const sortedCategories = Object.keys(groupedHierarchy).sort((a, b) => {
-    const idxA = categoryOrder.indexOf(a); const idxB = categoryOrder.indexOf(b);
-    if (idxA === -1 && idxB === -1) return a.localeCompare(b);
-    if (idxA === -1) return 1; if (idxB === -1) return -1;
-    return idxA - idxB;
-  });
-
   const IOSToggle = ({ active, onClick }: { active: boolean, onClick: (e: React.MouseEvent) => void }) => (
-    <button onClick={onClick} className={`relative inline-flex h-[20px] w-[36px] shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${active ? 'bg-[#34C759]' : 'bg-gray-200'}`}>
-      <span className={`pointer-events-none inline-block h-[16px] w-[16px] transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${active ? 'translate-x-[16px]' : 'translate-x-0'}`} />
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative inline-flex h-[18px] w-[32px] shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${active ? 'bg-[#E46254]' : 'bg-zinc-200'}`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-[14px] w-[14px] transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${active ? 'translate-x-[14px]' : 'translate-x-0'}`}
+      />
     </button>
   );
 
   return (
-    <div className="flex h-screen flex-col bg-[#F9FAFB] overflow-hidden text-gray-900 font-sans relative">
+    <div className="w-full min-h-full bg-[#FBFBFC] dark:bg-transparent text-zinc-900 dark:text-zinc-100 font-sans relative">
       
       {/* CENTERED POPUP FOR ADDING NEW OFFERING */}
       {isAddingMode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
           <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setIsAddingMode(false)} />
-          <div className="relative w-full max-w-2xl max-h-[90vh] bg-white rounded-[24px] shadow-2xl flex flex-col animate-in zoom-in-95 duration-300 overflow-hidden">
+          <div className="relative w-full max-w-2xl max-h-[90vh] bg-white dark:bg-[#1C1D26] border border-transparent dark:border-white/[0.08] rounded-[24px] shadow-2xl flex flex-col animate-in zoom-in-95 duration-300 overflow-hidden">
              
              {/* Modal Header (Back to Menu style) */}
-             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white z-10 relative">
+             <div className="px-6 py-4 border-b border-gray-100 dark:border-white/[0.07] flex items-center justify-between bg-white dark:bg-[#16171F] z-10 relative">
                <div className="flex items-center gap-3">
                  <button type="button" onClick={() => setIsAddingMode(false)} className="p-2 -ml-2 bg-gray-50 hover:bg-gray-100 text-gray-500 hover:text-gray-900 rounded-full transition-colors flex items-center justify-center">
                    <ArrowLeft size={18} /> 
@@ -493,11 +756,51 @@ export default function MenuManagerPage() {
 
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Primary Category</label>
-                          <select value={form.category} onChange={e=>setForm({...form, category: e.target.value})} className="w-full px-4 py-2.5 border border-gray-200 bg-gray-50/50 rounded-xl text-[13px] font-medium focus:border-[#E46254] outline-none">
-                            {categoryOrder.map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label className="block text-[13px] font-medium text-gray-700">Primary Category</label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsCustomCategory(!isCustomCategory);
+                                if (!isCustomCategory) {
+                                  setCustomCategoryInput('');
+                                }
+                              }}
+                              className="text-[11px] font-semibold text-[#E46254] hover:underline cursor-pointer"
+                            >
+                              {isCustomCategory ? "Choose Existing" : "+ Custom"}
+                            </button>
                           </div>
+                          {isCustomCategory ? (
+                            <input
+                              type="text"
+                              required
+                              value={customCategoryInput}
+                              onChange={e => {
+                                setCustomCategoryInput(e.target.value);
+                                setForm({ ...form, category: e.target.value });
+                              }}
+                              placeholder="e.g. Biryani, Combos, Chaat"
+                              className="w-full px-4 py-2.5 border border-[#E46254] bg-white rounded-xl text-[13px] font-medium focus:border-[#E46254] outline-none"
+                            />
+                          ) : (
+                            <select
+                              value={form.category}
+                              onChange={e => {
+                                if (e.target.value === '__NEW__') {
+                                  setIsCustomCategory(true);
+                                  setCustomCategoryInput('');
+                                } else {
+                                  setForm({ ...form, category: e.target.value });
+                                }
+                              }}
+                              className="w-full px-4 py-2.5 border border-gray-200 bg-gray-50/50 rounded-xl text-[13px] font-medium focus:border-[#E46254] outline-none"
+                            >
+                              {allCategoriesOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                              <option value="__NEW__">+ Add Custom Category...</option>
+                            </select>
+                          )}
+                        </div>
                         <div>
                           <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Sub-Category (Optional)</label>
                           <input type="text" value={form.subcategory} onChange={e=>setForm({...form, subcategory: e.target.value})} placeholder="e.g. Vegetarian" className="w-full px-4 py-2.5 border border-gray-200 bg-gray-50/50 rounded-xl text-[13px] font-medium focus:border-[#E46254] focus:bg-white outline-none transition-colors" />
@@ -625,23 +928,22 @@ export default function MenuManagerPage() {
                             </div>
 
                             {variantsConfig.portions.map((portion, idx) => {
-                              const isFull = portion.name.toLowerCase() === "full";
+                              const isBasePortion = idx === 0 || portion.isDefault || portion.name.toLowerCase() === "full";
                               return (
                                 <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                                   <div className="col-span-6 relative">
                                     <input
                                       type="text"
                                       value={portion.name}
-                                      disabled={isFull}
                                       onChange={(e) => {
                                         const next = [...variantsConfig.portions];
                                         next[idx].name = e.target.value;
                                         setVariantsConfig({ ...variantsConfig, portions: next });
                                       }}
-                                      className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-800 outline-none focus:border-[#E46254] disabled:bg-gray-100 disabled:text-gray-500"
-                                      placeholder="e.g. Half"
+                                      className="w-full px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-800 outline-none focus:border-[#E46254]"
+                                      placeholder={isBasePortion ? "e.g. Full / Regular / Base" : "e.g. Half / Small"}
                                     />
-                                    {isFull && (
+                                    {isBasePortion && (
                                       <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9.5px] font-bold text-gray-400 uppercase bg-gray-200/60 px-1.5 py-0.5 rounded">
                                         Base
                                       </span>
@@ -651,8 +953,8 @@ export default function MenuManagerPage() {
                                   <div className="col-span-5">
                                     <input
                                       type="number"
-                                      value={isFull ? form.base_price : portion.price}
-                                      disabled={isFull}
+                                      value={isBasePortion ? form.base_price : portion.price}
+                                      disabled={isBasePortion}
                                       onChange={(e) => {
                                         const next = [...variantsConfig.portions];
                                         next[idx].price = Number(e.target.value) || 0;
@@ -664,7 +966,7 @@ export default function MenuManagerPage() {
                                   </div>
 
                                   <div className="col-span-1 flex justify-center">
-                                    {!isFull && variantsConfig.portions.length > 1 && (
+                                    {!isBasePortion && variantsConfig.portions.length > 1 && (
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -898,115 +1200,251 @@ export default function MenuManagerPage() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto px-6 md:px-12 w-full pb-20">
+      <div className="px-4 sm:px-8 lg:px-10 w-full pb-20">
         
-        {/* TOP HEADER */}
-        <div className="sticky top-0 z-20 pt-8 pb-4 bg-[#F9FAFB]/95 backdrop-blur-md flex flex-col md:flex-row items-center justify-between gap-4 border-b border-gray-200/60">
-          <div className="flex items-end gap-3 w-full">
-             <h1 className="text-[24px] font-bold text-gray-900 tracking-tight">Menu Availability</h1>
-             <span className="text-[12px] text-gray-500 mb-1.5 font-medium">Toggle item availability</span>
-          </div>
-          
-          <div className="flex items-center gap-3 w-full md:w-auto">
-            <div className="relative w-full md:w-64 group">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-[#E46254] transition-colors" size={16} />
-              <input 
-                value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search dishes..."
-                className="w-full bg-white border border-gray-200 rounded-xl pl-9 pr-3 py-2 text-[13px] font-medium text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#E46254] transition-all shadow-sm"
-              />
-            </div>
-            <button onClick={handleOpenCreateModal} className="shrink-0 bg-[#E46254] hover:bg-[#D35546] text-white px-4 py-2 rounded-xl transition-all font-medium text-[13px] tracking-tight flex items-center justify-center gap-2 shadow-sm cursor-pointer">
-              <Plus size={16} /> New Offering
+        {/* CATEGORY & DIETARY FILTERS BAR */}
+        <div className="sticky top-0 z-20 pt-3 pb-3 bg-[#FBFBFC]/95 dark:bg-[#070709]/85 backdrop-blur-2xl border-b border-transparent dark:border-white/[0.06] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-4 pointer-events-auto">
+          {/* Category Tabs */}
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 relative z-20">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setSelectedCategoryFilter('ALL');
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer relative z-20 ${
+                selectedCategoryFilter === 'ALL'
+                  ? 'bg-gradient-to-r from-[#E46254] to-[#C2410C] text-white shadow-md shadow-[#E46254]/30 font-bold border-transparent'
+                  : 'bg-white dark:bg-white/[0.03] text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-white/[0.08] hover:border-zinc-300 dark:hover:border-white/[0.2] hover:text-zinc-900 dark:hover:text-white dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)]'
+              }`}
+            >
+              All Items ({menuItems.length})
             </button>
+            {allCategories.map(cat => {
+              const count = menuItems.filter(i => (i.category || '').trim().toLowerCase() === cat.trim().toLowerCase()).length;
+              const isSelected = selectedCategoryFilter.trim().toLowerCase() === cat.trim().toLowerCase();
+              return (
+                <button
+                  type="button"
+                  key={cat}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelectedCategoryFilter(cat);
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer relative z-20 ${
+                    isSelected
+                      ? 'bg-gradient-to-r from-[#E46254] to-[#C2410C] text-white shadow-md shadow-[#E46254]/30 font-bold border-transparent'
+                      : 'bg-white dark:bg-white/[0.03] text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-white/[0.08] hover:border-zinc-300 dark:hover:border-white/[0.2] hover:text-zinc-900 dark:hover:text-white dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)]'
+                  }`}
+                >
+                  {cat} ({count})
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Secondary Controls: Veg/Non-Veg */}
+          <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+            {searchQuery && (
+              <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-medium text-zinc-500 bg-zinc-100 px-2.5 py-1 rounded-lg">
+                Searching &ldquo;{searchQuery}&rdquo;
+              </span>
+            )}
+            <div className="flex items-center p-0.5 bg-zinc-100/90 dark:bg-[#1C1D26] rounded-xl border border-zinc-200/60 dark:border-white/[0.07]">
+              <button
+                type="button"
+                onClick={() => setDietaryFilter('ALL')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                  dietaryFilter === 'ALL'
+                    ? 'bg-white dark:bg-[#2A2B38] text-zinc-900 dark:text-white shadow-2xs'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4]'
+                }`}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => setDietaryFilter('VEG')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
+                  dietaryFilter === 'VEG'
+                    ? 'bg-white text-emerald-700 shadow-2xs'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4]'
+                }`}
+              >
+                <div className="w-3 h-3 border border-emerald-600 flex items-center justify-center rounded-[2px] bg-white">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+                </div>
+                <span>Veg</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDietaryFilter('NON_VEG')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
+                  dietaryFilter === 'NON_VEG'
+                    ? 'bg-white text-rose-700 shadow-2xs'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4]'
+                }`}
+              >
+                <div className="w-3 h-3 border border-[#8B2500] flex items-center justify-center rounded-[2px] bg-white">
+                  <div className="w-1.5 h-1.5 rounded-full bg-[#8B2500]" />
+                </div>
+                <span>Non-Veg</span>
+              </button>
+            </div>
           </div>
         </div>
 
+
         {/* EMPTY STATE */}
         {!isLoading && sortedCategories.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-32 text-center animate-in fade-in">
-            <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-6">
-              <span className="text-[32px] opacity-50 filter grayscale">🍽️</span>
+          <div className="flex flex-col items-center justify-center py-28 text-center animate-in fade-in">
+            <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center text-zinc-400 mb-4 shadow-inner">
+              <ChefHat size={32} strokeWidth={1.75} />
             </div>
-            <h3 className="text-[18px] font-bold text-gray-900 mb-2">No menu offerings found</h3>
-            <p className="text-[14px] text-gray-500 max-w-sm mb-6">Your menu is currently empty or no dishes match your search query.</p>
-            <button onClick={handleOpenCreateModal} className="bg-[#E46254] text-white px-5 py-2.5 rounded-xl font-medium text-[13px] shadow-sm hover:bg-[#D35546] transition-colors cursor-pointer">
-              Create your first offering
-            </button>
+            <h3 className="text-base font-semibold text-zinc-900 mb-1">No menu items found</h3>
+            <p className="text-xs text-zinc-500 max-w-sm mb-5">
+              {searchQuery || selectedCategoryFilter !== 'ALL' || dietaryFilter !== 'ALL'
+                ? 'No dishes match the selected category or filters. Try adjusting your search.'
+                : 'Your menu catalog is currently empty. Get started by adding your first dish.'}
+            </p>
+            <div className="flex items-center gap-3">
+              {(searchQuery || selectedCategoryFilter !== 'ALL' || dietaryFilter !== 'ALL') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedCategoryFilter('ALL');
+                    setDietaryFilter('ALL');
+                    setSearchQuery('');
+                  }}
+                  className="px-4 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-800 rounded-xl font-medium text-xs transition-colors cursor-pointer"
+                >
+                  Clear All Filters
+                </button>
+              )}
+              <button
+                onClick={handleOpenCreateModal}
+                className="bg-[#E46254] hover:bg-[#d04e41] text-white px-4 py-2 rounded-xl font-medium text-xs shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <Plus size={14} /> Add First Dish
+              </button>
+            </div>
           </div>
         )}
 
-        {/* MENU LIST */}
-        <div className="flex flex-col gap-8 mt-6">
+        {/* MENU CATEGORIES & CARDS */}
+        <div className="flex flex-col gap-6">
           {sortedCategories.map(category => {
             const subCategories = groupedHierarchy[category];
             const allItemsInCategory = Object.values(subCategories).flat();
             const isCatAvailable = allItemsInCategory.some(i => i.is_available);
             
             return (
-              <div key={category} className="flex flex-col gap-4">
-                <div className="flex items-center gap-3">
-                  <h2 className="text-[17px] font-semibold text-gray-900 tracking-tight">{category}</h2>
-                  <IOSToggle active={isCatAvailable} onClick={() => toggleCategoryAvailability(allItemsInCategory)} />
+              <div key={category} className="flex flex-col gap-3">
+                {/* Clean Category Header - No partition lines */}
+                <div className="flex items-center justify-between py-1">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-[15px] font-bold text-zinc-900 dark:text-white tracking-tight">{category}</h2>
+                    <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 bg-zinc-100 dark:bg-white/[0.06] px-2 py-0.5 rounded-full">
+                      {allItemsInCategory.length}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-medium text-zinc-400">All available</span>
+                    <IOSToggle active={isCatAvailable} onClick={() => toggleCategoryAvailability(allItemsInCategory)} />
+                  </div>
                 </div>
 
-                <div className="flex flex-col gap-5">
+                <div className="flex flex-col gap-3">
                   {Object.keys(subCategories).map(subcat => {
                     const items = subCategories[subcat];
                     const isSubAvailable = items.some(i => i.is_available);
-                    const showSubcatHeader = subcat && subcat !== 'General' && subcat !== 'EMPTY';
+                    const showSubcatHeader = subcat && subcat !== 'General' && subcat !== 'EMPTY' && subcat.toLowerCase() !== 'hjk';
                     
                     return (
-                      <div key={subcat} className="flex flex-col gap-3">
+                      <div key={subcat} className="flex flex-col gap-2">
                          {showSubcatHeader && (
-                           <div className="flex items-center gap-3 pl-1">
-                              <h3 className="text-[13px] font-medium text-gray-600">{subcat}</h3>
-                              <IOSToggle active={isSubAvailable} onClick={() => toggleCategoryAvailability(items)} />
+                           <div className="flex items-center justify-between">
+                              <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">{subcat}</h3>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-zinc-400">Subcategory</span>
+                                <IOSToggle active={isSubAvailable} onClick={() => toggleCategoryAvailability(items)} />
+                              </div>
                            </div>
                          )}
                          
-                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-3.5">
+                         {/* Compact Horizontal Cards: 4 to 6 columns to decrease horizontal width */}
+                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-2.5">
                            {items.map(item => {
-                             let cost = 0;
-                             item.recipeUsages?.forEach(r => cost += r.ingredient_cost_per_order);
-                             const marginVal = item.base_price > 0 ? ((item.base_price - cost) / item.base_price) * 100 : 0;
+                             const hasPortions = item.variantsConfig?.hasPortions && item.variantsConfig.portions.length > 0;
                              
                              return (
-                               <div key={item.id} onClick={() => setSelectedItem(item)} className={`cursor-pointer flex items-center p-3.5 bg-white rounded-2xl transition-all duration-300 ${item.is_available ? 'shadow-[0_2px_10px_rgba(0,0,0,0.03)] border border-gray-200/60 hover:shadow-[0_8px_20px_rgba(0,0,0,0.06)] hover:-translate-y-0.5' : 'border border-gray-200/40 opacity-60 hover:opacity-100'}`}>
-                                  <div className="shrink-0 mr-4 flex items-center justify-center">
-                                     <span className="text-[32px] drop-shadow-sm filter">🍽️</span>
-                                  </div>
-                                  <div className="flex flex-col flex-1">
-                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                        <span className="text-[14px] font-semibold text-gray-900 tracking-tight">{item.name}</span>
-                                        {item.badge && (
-                                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                            item.badge === 'BESTSELLER' ? 'bg-amber-50 text-amber-700 border-amber-300' :
-                                            item.badge === 'CHEF_SIGNATURE' ? 'bg-purple-50 text-purple-700 border-purple-300' :
-                                            item.badge === 'SPECIAL' ? 'bg-blue-50 text-blue-700 border-blue-300' :
-                                            'bg-rose-50 text-rose-700 border-rose-300'
-                                          }`}>
-                                            {item.badge.replace('_', ' ')}
-                                          </span>
-                                        )}
-                                        <span className="text-[14px] font-semibold text-gray-600">- {formatCurrency(item.base_price)}</span>
+                               <div
+                                 key={item.id}
+                                 onClick={() => setSelectedItem(item)}
+                                 className={`group relative bg-white rounded-xl p-3 border transition-all duration-200 cursor-pointer flex flex-col justify-between gap-2.5 hover:border-[#E46254]/50 hover:shadow-xs ${
+                                   item.is_available
+                                     ? 'border-zinc-200/80 bg-white'
+                                     : 'border-zinc-200/50 bg-zinc-50/70 opacity-60 hover:opacity-100'
+                                 }`}
+                               >
+                                 {/* Top Row: FSSAI Indicator + Dish Title + Quick Edit */}
+                                 <div className="flex items-start justify-between gap-1.5">
+                                   <div className="flex items-start gap-1.5 min-w-0 flex-1">
+                                     <div className="mt-0.5 shrink-0">
+                                       <DietaryIndicator isVeg={item.is_veg} />
                                      </div>
-                                     {item.recipeUsages && item.recipeUsages.length > 0 ? (
-                                       <span className="text-[12px] font-medium text-gray-400 mt-0.5">Linked to {item.recipeUsages.length} ingredients</span>
+                                     <div className="min-w-0 flex-1">
+                                       <h3 className={`text-[13px] font-bold tracking-tight truncate leading-snug transition-colors ${
+                                         item.is_available ? 'text-zinc-900 dark:text-white group-hover:text-[#E46254]' : 'text-zinc-500 dark:text-zinc-400'
+                                       }`}>
+                                         {item.name}
+                                       </h3>
+                                       {item.badge && (
+                                         <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider bg-[#E46254]/10 text-[#E46254] inline-block mt-0.5">
+                                           {item.badge === 'CHEF_SIGNATURE' ? "Chef's" : item.badge === 'MUST_TRY' ? 'Must Try' : item.badge}
+                                         </span>
+                                       )}
+                                     </div>
+                                   </div>
+
+                                   <button
+                                     type="button"
+                                     onClick={(e) => handleOpenEditItem(item, e)}
+                                     className="p-1 rounded-md text-zinc-400 hover:text-[#E46254] hover:bg-[#E46254]/10 transition-colors cursor-pointer shrink-0"
+                                     title="Edit Dish"
+                                   >
+                                     <Pencil size={12} strokeWidth={2.2} />
+                                   </button>
+                                 </div>
+
+                                 {/* Bottom Row: Price on left, Toggle + Available/Unavailable on right */}
+                                 <div className="flex items-center justify-between gap-1.5 pt-0.5">
+                                   <div className="min-w-0 truncate">
+                                     {hasPortions && item.variantsConfig?.portions ? (
+                                       <span className="text-[11px] font-semibold text-zinc-700 truncate block">
+                                         {item.variantsConfig.portions
+                                           .filter(p => p && p.price !== undefined && p.price !== null)
+                                           .map(p => `₹${p.price}`)
+                                           .join(' · ') || formatCurrency(item.base_price)}
+                                       </span>
                                      ) : (
-                                       <span className="text-[12px] font-medium text-amber-500/80 mt-0.5">No Recipe Linked</span>
+                                       <span className="text-[13px] font-bold text-zinc-900 dark:text-white font-mono tracking-tight">
+                                         {formatCurrency(item.base_price)}
+                                       </span>
                                      )}
-                                     <div className="flex items-center gap-1.5 mt-1.5">
-                                        <span className="text-[12px] font-medium text-gray-500">Status:</span>
-                                        <span className={`text-[12px] font-semibold ${item.is_available ? 'text-[#34C759]' : 'text-[#FF3B30]'}`}>{item.is_available ? 'Available' : 'Unavailable'}</span>
-                                     </div>
-                                     <div className="flex items-center gap-3 mt-1">
-                                        <span className="text-[11px] font-medium text-gray-400">Margin: {marginVal.toFixed(1)}%</span>
-                                        <span className="text-[11px] font-medium text-gray-400">Cost: {formatCurrency(cost, true)}</span>
-                                     </div>
-                                  </div>
-                                  <div className="shrink-0 pl-2">
+                                   </div>
+
+                                   <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
                                      <IOSToggle active={item.is_available} onClick={(e) => toggleAvailability(item, e)} />
-                                  </div>
+                                     <span className={`text-[10px] font-semibold select-none ${
+                                       item.is_available ? 'text-zinc-600' : 'text-zinc-400'
+                                     }`}>
+                                       {item.is_available ? 'Available' : 'Unavailable'}
+                                     </span>
+                                   </div>
+                                 </div>
                                </div>
                              );
                            })}
@@ -1024,67 +1462,61 @@ export default function MenuManagerPage() {
         {selectedItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-gray-900/30 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setSelectedItem(null)} />
-            <div className="relative bg-white rounded-[24px] shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 fade-in slide-in-from-bottom-8 duration-300">
+            <div className="relative bg-white dark:bg-[#1C1D26] border border-transparent dark:border-white/[0.08] rounded-[24px] shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 fade-in slide-in-from-bottom-8 duration-300 text-zinc-900 dark:text-white">
                
-               <div className="relative h-32 bg-gradient-to-b from-gray-50 to-white flex items-center justify-center border-b border-gray-100">
-                  <span className="text-[72px] drop-shadow-md animate-in zoom-in duration-500 delay-100">🍽️</span>
+               <div className="relative h-28 bg-gradient-to-b from-zinc-50 dark:from-[#22232E] to-white dark:to-[#1C1D26] flex items-center justify-center border-b border-zinc-100 dark:border-white/[0.07]">
+                  <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center text-zinc-600 shadow-inner">
+                    <ChefHat size={34} strokeWidth={1.75} />
+                  </div>
                   <div className="absolute top-4 right-4 flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        setEditingItemId(selectedItem.id);
-                        setForm({
-                          name: selectedItem.name,
-                          category: selectedItem.category,
-                          subcategory: selectedItem.subcategory || '',
-                          base_price: selectedItem.base_price.toString(),
-                          description: selectedItem.description || '',
-                          is_veg: selectedItem.is_veg,
-                          badge: selectedItem.badge || null,
-                        });
-                        setVariantsConfig(selectedItem.variantsConfig || getDefaultVariantsConfig(selectedItem.base_price));
-                        setRecipeIngredients(
-                          selectedItem.recipeUsages?.map((u) => ({
-                            inventory_item_id: u.inventory_item_id,
-                            amount: u.amount_per_order.toString(),
-                            name: u.inventory_name,
-                            cost: u.ingredient_cost_per_order / (u.amount_per_order || 1),
-                          })) || []
-                        );
-                        setIsAddingMode(true);
-                        setSelectedItem(null);
-                      }}
-                      className="p-2 bg-white/80 hover:bg-white text-gray-500 hover:text-[#E46254] rounded-full shadow-sm transition-all cursor-pointer"
+                      onClick={() => handleOpenEditItem(selectedItem)}
+                      className="p-2 bg-white/90 hover:bg-white text-zinc-500 hover:text-[#E46254] rounded-full shadow-2xs border border-zinc-200/60 transition-all cursor-pointer"
                       title="Edit Dish"
                     >
-                      <Edit2 size={16}/>
+                      <Edit2 size={15}/>
                     </button>
-                    <button onClick={() => setSelectedItem(null)} className="p-2 bg-white/80 hover:bg-white text-gray-500 hover:text-gray-900 rounded-full shadow-sm transition-all cursor-pointer">
-                      <X size={16}/>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedItem(null)}
+                      className="p-2 bg-white/90 hover:bg-white text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4] rounded-full shadow-2xs border border-zinc-200/60 transition-all cursor-pointer"
+                    >
+                      <X size={15}/>
                     </button>
                   </div>
                </div>
                
-               <div className="p-7">
-                  <div className="flex justify-between items-start mb-4">
+               <div className="p-6">
+                  <div className="flex justify-between items-start mb-3">
                      <div>
-                       <h2 className="text-[22px] font-bold text-gray-900 tracking-tight leading-tight">{selectedItem.name}</h2>
-                       <p className="text-[13px] text-gray-500 font-medium mt-1">
+                       <div className="flex items-center gap-2">
+                         <DietaryIndicator isVeg={selectedItem.is_veg} />
+                         <h2 className="text-xl font-bold text-zinc-900 tracking-tight leading-tight">{selectedItem.name}</h2>
+                       </div>
+                       <p className="text-xs text-zinc-500 font-medium mt-1">
                          {selectedItem.category} {selectedItem.subcategory && selectedItem.subcategory !== 'General' && selectedItem.subcategory !== 'EMPTY' ? ` • ${selectedItem.subcategory}` : ''}
                        </p>
                      </div>
-                     <span className="text-[22px] font-bold text-gray-900 tabular-nums">{formatCurrency(selectedItem.base_price)}</span>
+                     <span className="text-xl font-bold text-zinc-900 tabular-nums font-mono">{formatCurrency(selectedItem.base_price)}</span>
                   </div>
                   
-                  <div className="flex items-center gap-3 mb-6">
-                     <div className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold ${selectedItem.is_available ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
-                        {selectedItem.is_available ? 'Active on Menu' : '86\'d (Unavailable)'}
+                  <div className="flex items-center gap-2 mb-5">
+                     <div className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${selectedItem.is_available ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                        {selectedItem.is_available ? 'In Stock (Active)' : "Unavailable"}
                      </div>
-                     <div className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 ${selectedItem.is_veg ? 'bg-emerald-50 text-emerald-700' : 'bg-[#E46254]/10 text-[#C2410C]'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${selectedItem.is_veg ? 'bg-emerald-500' : 'bg-[#E46254]'}`} />
-                        <span>{selectedItem.is_veg ? 'Veg' : 'Non-Veg'}</span>
-                     </div>
+                     {selectedItem.badge && (
+                       <div className="px-2.5 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-zinc-100 text-zinc-700">
+                         {selectedItem.badge.replace('_', ' ')}
+                       </div>
+                     )}
                   </div>
+
+                  {selectedItem.description && (
+                    <p className="text-xs text-zinc-600 leading-relaxed mb-4 bg-zinc-50 rounded-xl p-3 border border-zinc-100">
+                      {selectedItem.description}
+                    </p>
+                  )}
 
                   {/* Portions breakdown if present */}
                   {selectedItem.variantsConfig?.hasPortions && (
@@ -1164,20 +1596,93 @@ export default function MenuManagerPage() {
 
                   <div className="mt-8 pt-4 border-t border-gray-100 flex justify-center">
                      <button
-                       type="button"
-                       onClick={async () => {
-                         if (!confirm(`Are you sure you want to delete "${selectedItem.name}" from the menu?`)) return;
-                         try {
-                           await supabase.from('menu_items_v2').delete().eq('id', selectedItem.id);
-                           setSelectedItem(null);
-                           await loadData();
-                         } catch (err: any) {
-                           alert("Failed to delete dish: " + err.message);
-                         }
-                       }}
-                       className="text-[13px] font-semibold text-red-500 hover:text-red-600 flex items-center gap-1.5 transition-colors cursor-pointer"
-                     >
-                       <Trash2 size={14}/> Delete Dish from Menu
+                        type="button"
+                        onClick={async () => {
+                          if (!confirm(`Are you sure you want to delete "${selectedItem.name}" from the menu?`)) return;
+                          const toDeleteId = selectedItem.id;
+                          const toDeleteName = selectedItem.name;
+
+                          // 1. Instant 0ms SQLite Deletion
+                          if (restaurantId) {
+                            LocalSqliteStore.deleteMenuItem(restaurantId, toDeleteId);
+                          }
+
+                          // 2. Instant UI update
+                          setMenuItems(prev => {
+                            const next = prev.filter(i => i.id !== toDeleteId);
+                            if (restaurantId) {
+                              LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), next);
+                            }
+                            LocalCache.set('menu_catalog', next);
+                            return next;
+                          });
+                          setSelectedItem(null);
+
+                          // 3. Clean up localStorage dish badges and menu lists
+                          if (restaurantId) {
+                            try {
+                              const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${restaurantId}`);
+                              if (savedBadges) {
+                                const parsed = JSON.parse(savedBadges);
+                                delete parsed[toDeleteId];
+                                localStorage.setItem(`tabletapy_dish_badges_${restaurantId}`, JSON.stringify(parsed));
+                              }
+                              const savedMenu = localStorage.getItem(`tabletapy_menu_${restaurantId}`);
+                              if (savedMenu) {
+                                const list: string[] = JSON.parse(savedMenu);
+                                const filtered = list.filter(id => id !== toDeleteId);
+                                localStorage.setItem(`tabletapy_menu_${restaurantId}`, JSON.stringify(filtered));
+                              }
+                            } catch {}
+                          }
+
+                          // 4. Background cloud sync
+                          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                            if (restaurantId) {
+                              await LocalSqliteStore.queueMutation({
+                                id: 'mut_' + Date.now(),
+                                restaurant_id: restaurantId,
+                                entity: 'MENU_ITEM',
+                                action: 'DELETE',
+                                payload: { id: toDeleteId, name: toDeleteName },
+                                created_at: new Date().toISOString()
+                              });
+                            }
+                            OfflineSyncEngine.triggerSync();
+                          } else {
+                            try {
+                              const { error } = await supabase.from('menu_items_v2').delete().eq('id', toDeleteId);
+                              await supabase.from('inventory_recipe_usage').delete().eq('name', toDeleteName);
+                              if (error && restaurantId) {
+                                await LocalSqliteStore.queueMutation({
+                                  id: 'mut_' + Date.now(),
+                                  restaurant_id: restaurantId,
+                                  entity: 'MENU_ITEM',
+                                  action: 'DELETE',
+                                  payload: { id: toDeleteId, name: toDeleteName },
+                                  created_at: new Date().toISOString()
+                                });
+                              }
+                            } catch (e) {
+                              console.warn('[Menu] Background delete deferred:', e);
+                              if (restaurantId) {
+                                await LocalSqliteStore.queueMutation({
+                                  id: 'mut_' + Date.now(),
+                                  restaurant_id: restaurantId,
+                                  entity: 'MENU_ITEM',
+                                  action: 'DELETE',
+                                  payload: { id: toDeleteId, name: toDeleteName },
+                                  created_at: new Date().toISOString()
+                                }).catch(() => {});
+                              }
+                            } finally {
+                              OfflineSyncEngine.triggerSync();
+                            }
+                          }
+                        }}
+                        className="text-[13px] font-semibold text-red-500 hover:text-red-600 flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <Trash2 size={14}/> Delete Dish from Menu
                      </button>
                   </div>
                </div>

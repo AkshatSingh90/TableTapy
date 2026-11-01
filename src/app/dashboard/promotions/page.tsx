@@ -114,16 +114,26 @@ export default function PromotionsPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      let activeUser: any = null;
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        activeUser = sessionData?.session?.user;
+      } catch {}
 
-      if (!user) {
+      if (!activeUser && typeof navigator !== "undefined" && navigator.onLine) {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          activeUser = user;
+        } catch {}
+      }
+
+      const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
+      if (!activeUser && !isOffline) {
         router.push("/login");
         return;
       }
 
-      const restId = user.user_metadata?.restaurant_id;
+      const restId = activeUser?.user_metadata?.restaurant_id || (typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") : null);
 
       if (restId) {
         setRestaurantId(restId);

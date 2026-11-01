@@ -24,6 +24,12 @@ export interface SettlementData {
   discount: number;
   taxAmount: number;
   serviceChargeAmount?: number;
+  cgstAmount?: number;
+  sgstAmount?: number;
+  effectiveCgstRate?: number;
+  effectiveSgstRate?: number;
+  isComposition?: boolean;
+  isInclusive?: boolean;
   earnedCoins: number;
   totalCoins: number;
   previousCoins?: number;
@@ -334,14 +340,27 @@ export function ThankYouCelebrationView({
                 )}
                 {settlement.serviceChargeAmount && settlement.serviceChargeAmount > 0 ? (
                   <div className="flex justify-between">
-                    <span>Service Charge</span>
+                    <span>Dine-In Service Charge</span>
                     <span className="font-medium tabular-nums">{formatCurrency(settlement.serviceChargeAmount)}</span>
                   </div>
                 ) : null}
-                <div className="flex justify-between">
-                  <span>GST</span>
-                  <span className="font-medium tabular-nums">{formatCurrency(settlement.taxAmount)}</span>
-                </div>
+
+                {settlement.isComposition ? (
+                  <div className="flex justify-between text-zinc-500">
+                    <span>Composition Scheme</span>
+                    <span className="font-medium text-zinc-400">No GST Charged</span>
+                  </div>
+                ) : settlement.isInclusive ? (
+                  <div className="flex justify-between text-zinc-500">
+                    <span>GST (Included in price)</span>
+                    <span className="font-medium tabular-nums text-zinc-500">{formatCurrency(settlement.taxAmount)}</span>
+                  </div>
+                ) : (
+                  <div className="flex justify-between">
+                    <span>GST (CGST + SGST)</span>
+                    <span className="font-medium tabular-nums">{formatCurrency(settlement.taxAmount)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between pt-1.5 border-t border-zinc-200 text-[13px] font-black text-zinc-900">
                   <span>Grand Total</span>
                   <span className="tabular-nums">{formatCurrency(settlement.grandTotal)}</span>

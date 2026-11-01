@@ -12,6 +12,7 @@ export interface TaxSettings {
   fssai: string;
   receiptAddress: string;
   receiptFooter: string;
+  upiId?: string;
 }
 
 export const DEFAULT_TAX_SETTINGS: TaxSettings = {
@@ -28,6 +29,7 @@ export const DEFAULT_TAX_SETTINGS: TaxSettings = {
   fssai: "",
   receiptAddress: "",
   receiptFooter: "Thank you for dining with us! Visit again.",
+  upiId: "",
 };
 
 export interface RestaurantConfig {
@@ -37,6 +39,7 @@ export interface RestaurantConfig {
   paperWidth: '80MM' | '58MM';
   printCopies: 1 | 2;
   autoPrintOnSettle: boolean;
+  upiId?: string;
 }
 
 export const DEFAULT_RESTAURANT_CONFIG: RestaurantConfig = {
@@ -46,6 +49,7 @@ export const DEFAULT_RESTAURANT_CONFIG: RestaurantConfig = {
   paperWidth: '80MM',
   printCopies: 1,
   autoPrintOnSettle: false,
+  upiId: "",
 };
 
 export function parseConfigFromRestaurant(restaurantRecord?: any): RestaurantConfig {
@@ -55,13 +59,20 @@ export function parseConfigFromRestaurant(restaurantRecord?: any): RestaurantCon
         ? JSON.parse(restaurantRecord.bg_image)
         : restaurantRecord.bg_image;
       if (parsed && typeof parsed === 'object') {
+        const rawTax = parsed.taxSettings || (parsed.gstType ? parsed : null);
+        const resolvedUpi = parsed.upiId || parsed.taxSettings?.upiId || restaurantRecord.upi_id || restaurantRecord.upi_vpa || '';
         return {
-          taxSettings: { ...DEFAULT_TAX_SETTINGS, ...(parsed.taxSettings || {}) },
+          taxSettings: {
+            ...DEFAULT_TAX_SETTINGS,
+            ...(rawTax || {}),
+            upiId: resolvedUpi
+          },
           qrOrderMode: parsed.qrOrderMode === 'OPEN_STAFF_APPROVAL' ? 'OPEN_STAFF_APPROVAL' : 'PIN_DIRECT_FIRE',
           billingMode: parsed.billingMode === 'SELF_PAY' ? 'SELF_PAY' : 'STAFF_ASSISTED',
           paperWidth: parsed.paperWidth === '58MM' ? '58MM' : '80MM',
           printCopies: parsed.printCopies === 2 ? 2 : 1,
           autoPrintOnSettle: !!parsed.autoPrintOnSettle,
+          upiId: resolvedUpi
         };
       }
     } catch {}

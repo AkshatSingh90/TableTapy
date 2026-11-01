@@ -5,6 +5,8 @@ import { Search, Plus, ChevronDown, ChevronRight, Activity, ChefHat, ArrowLeft, 
 import { Sparkles, Box } from 'lucide-react';
 import IntelligenceDashboard from './IntelligenceDashboard';
 import { createClient } from "@/utils/supabase/client";
+import { LocalSqliteStore, getCanonicalRestaurantId, LocalInventoryItem } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 
 // --- DATA MODEL ---
 interface StockLog {
@@ -69,7 +71,23 @@ export default function InventoryPage() {
   const [isAddingMode, setIsAddingMode] = useState(false);
   const [dateRange, setDateRange] = useState('Last 30 Days');
   const [isDateDropdownOpen, setIsDateDropdownOpen] = useState(false);
-    const [activeTab, setActiveTab] = useState('Materials');
+  const [activeTab, setActiveTab] = useState('Intelligence');
+
+  // Sync tab with top header
+  useEffect(() => {
+    // Notify header on mount
+    window.dispatchEvent(new CustomEvent('inventory_tab_sync', { detail: activeTab }));
+    const handleTabChange = (e: any) => {
+      if (e.detail) setActiveTab(e.detail);
+    };
+    window.addEventListener('inventory_tab_change', handleTabChange);
+    return () => window.removeEventListener('inventory_tab_change', handleTabChange);
+  }, [activeTab]);
+
+  const handleTabSelect = (tab: string) => {
+    setActiveTab(tab);
+    window.dispatchEvent(new CustomEvent('inventory_tab_sync', { detail: tab }));
+  };
 
   const [filterLowStockOnly, setFilterLowStockOnly] = useState(false);
 
@@ -90,8 +108,7 @@ export default function InventoryPage() {
   // Fetch Inventory from Supabase
   const fetchInventory = async () => {
     setIsLoadingData(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    const restId = user?.user_metadata?.restaurant_id;
+    let restId = await getCanonicalRestaurantId(supabase);
 
     if (!restId) {
       setItems([]);
@@ -99,6 +116,13 @@ export default function InventoryPage() {
       return;
     }
     setRestaurantId(restId);
+
+    // Instant 0ms hydration from local SQLite
+    const localInv = await LocalSqliteStore.getInventoryItems(restId);
+    if (localInv && localInv.length > 0) {
+      setItems(localInv as any);
+      setIsLoadingData(false);
+    }
 
     // Try query with restaurant_id first (if native DB column exists)
     let invRows: any[] | null = null;
@@ -110,30 +134,7 @@ export default function InventoryPage() {
     if (!restScopedErr && restScopedData && restScopedData.length > 0) {
       invRows = restScopedData;
     } else {
-      // Fallback query + code-level metadata isolation + legacy null items
-      const { data: allData, error } = await supabase
-        .from('inventory_items')
-        .select('*, ledger:inventory_ledgers(*), usedInRecipes:inventory_recipe_usage(*)');
-
-      if (error) {
-        console.error("Error fetching inventory:", error);
-      } else if (allData) {
-        invRows = allData.filter((row: any) => {
-          if (row.category === 'STAFF_ROSTER') return false;
-          if (row.restaurant_id) return row.restaurant_id === restId;
-          const savedCustomIds = localStorage.getItem(`tabletapy_inventory_${restId}`);
-          if (savedCustomIds) {
-            try {
-              const ids: string[] = JSON.parse(savedCustomIds);
-              if (ids.includes(row.id)) return true;
-            } catch {}
-          }
-          if (row.name && row.name.startsWith(`[REST:${restId}]`)) return true;
-          // Also include legacy items if no restaurant_id attached
-          if (!row.restaurant_id && !row.name?.startsWith('[REST:')) return true;
-          return false;
-        });
-      }
+      // Strictly isolated to restaurant_id
     }
 
     if (invRows) {
@@ -180,21 +181,37 @@ export default function InventoryPage() {
             }))
           };
         });
-      setItems(mapped);
+      const localInv = await LocalSqliteStore.getInventoryItems(restId);
+      const combined = [...mapped];
+      for (const li of localInv) {
+        if (!combined.some(c => c.id === li.id || c.name.trim().toLowerCase() === li.name.trim().toLowerCase())) {
+          combined.push(li as any);
+        }
+      }
+      setItems(combined);
       
       // Update selected profile if it's currently open
       if (selectedMasterProfile) {
-        const updatedProfile = mapped.find(i => i.id === selectedMasterProfile.id);
+        const updatedProfile = combined.find(i => i.id === selectedMasterProfile.id);
         if (updatedProfile) setSelectedMasterProfile(updatedProfile);
       }
     } else {
-      setItems([]);
+      // If offline / cloud returns null, NEVER wipe out items!
+      const localInv = await LocalSqliteStore.getInventoryItems(restId);
+      if (localInv && localInv.length > 0) {
+        setItems(localInv as any);
+      }
     }
     setIsLoadingData(false);
   };
 
   useEffect(() => {
     fetchInventory();
+    const handleSyncCompleted = () => {
+      fetchInventory();
+    };
+    window.addEventListener("tabletapy_sync_completed", handleSyncCompleted);
+    return () => window.removeEventListener("tabletapy_sync_completed", handleSyncCompleted);
   }, []);
 
   const lowStockCount = items.filter(i => i.threshold != null && i.stock <= i.threshold).length;
@@ -223,7 +240,6 @@ export default function InventoryPage() {
       return;
     }
 
-    setIsAdjusting(true);
     let newStock = adjustingItem.stock;
     let ledgerAmount = 0;
     let defaultNote = '';
@@ -243,42 +259,93 @@ export default function InventoryPage() {
       defaultNote = `Physical Count Adjustment (${adjustingItem.stock} → ${qty} ${adjustingItem.storageUnit})`;
     }
 
-    // 1. Update inventory_items stock
-    const { error: stockErr } = await supabase
-      .from('inventory_items')
-      .update({ 
-        stock: newStock,
-        last_counted_at: new Date().toISOString()
-      })
-      .eq('id', adjustingItem.id);
+    const targetItem = adjustingItem;
+    const activeRestId = restaurantId || (await getCanonicalRestaurantId(supabase));
+    const nowIso = new Date().toISOString();
+    const newLog: StockLog = {
+      id: crypto.randomUUID(),
+      date: nowIso.split('T')[0],
+      type: adjustType,
+      amount: ledgerAmount,
+      note: adjustNote.trim() || defaultNote
+    };
 
-    if (stockErr) {
-      alert("Failed to update stock: " + stockErr.message);
-      setIsAdjusting(false);
-      return;
+    const updatedItem: InventoryItem = {
+      ...targetItem,
+      stock: newStock,
+      lastCountedAt: nowIso,
+      ledger: [newLog, ...(targetItem.ledger || [])]
+    };
+
+    // 1. INSTANT 0ms local state update & close modal
+    setItems(prev => prev.map(i => i.id === targetItem.id ? updatedItem : i));
+    if (selectedMasterProfile && selectedMasterProfile.id === targetItem.id) {
+      setSelectedMasterProfile(updatedItem);
     }
-
-    // 2. Insert into inventory_ledgers
-    const { error: ledgerErr } = await supabase
-      .from('inventory_ledgers')
-      .insert([{
-        inventory_item_id: adjustingItem.id,
-        date: new Date().toISOString().split('T')[0],
-        type: adjustType,
-        amount: ledgerAmount,
-        note: adjustNote.trim() || defaultNote
-      }]);
-
-    if (ledgerErr) {
-      console.error("Ledger error:", ledgerErr);
-    }
-
-    // Reset and reload
-    setIsAdjusting(false);
     setAdjustingItem(null);
     setAdjustAmount('');
     setAdjustNote('');
-    await fetchInventory();
+    setIsAdjusting(false);
+
+    // 2. INSTANT 0ms write to local SQLite store
+    if (activeRestId) {
+      await LocalSqliteStore.saveSingleInventoryItem({
+        id: targetItem.id,
+        restaurant_id: activeRestId,
+        name: targetItem.name,
+        category: targetItem.category,
+        stock: newStock,
+        threshold: targetItem.threshold != null ? targetItem.threshold : undefined,
+        vendor_unit: targetItem.vendorUnit,
+        storage_unit: targetItem.storageUnit,
+        cost_per_vendor_unit: targetItem.costPerVendorUnit,
+        yield_percentage: targetItem.yieldPercentage,
+        vendor_to_storage: targetItem.vendorToStorage,
+        is_semi_finished: targetItem.isSemiFinished,
+        expiry_date: targetItem.expiryDate || undefined,
+        recipe_unit: targetItem.recipeUnit,
+        synced: 0
+      });
+
+      LocalSqliteStore.queueMutation({
+        id: crypto.randomUUID(),
+        restaurant_id: activeRestId,
+        entity: "INVENTORY",
+        action: "UPDATE",
+        payload: { id: targetItem.id, stock: newStock },
+        created_at: nowIso
+      });
+    }
+
+    // 3. Background cloud push (fire-and-forget, never hangs UI)
+    (async () => {
+      try {
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Supabase stock update timeout")), 6000)
+        );
+        const updatePromise = supabase
+          .from('inventory_items')
+          .update({ 
+            stock: newStock,
+            last_counted_at: nowIso
+          })
+          .eq('id', targetItem.id);
+
+        await Promise.race([updatePromise, timeoutPromise]);
+
+        await supabase.from('inventory_ledgers').insert([{
+          inventory_item_id: targetItem.id,
+          date: newLog.date,
+          type: adjustType,
+          amount: ledgerAmount,
+          note: newLog.note
+        }]);
+      } catch (err) {
+        console.warn("[Inventory] Stock adjustment sync deferred (offline):", err);
+      } finally {
+        OfflineSyncEngine.triggerSync();
+      }
+    })();
   };
 
   const handleExportCSV = () => {
@@ -301,21 +368,64 @@ export default function InventoryPage() {
     document.body.removeChild(link);
   };
 
+  const handleDeleteMaterial = async (itemId: string, itemName: string) => {
+    if (!confirm(`Are you sure you want to delete "${itemName}"?`)) return;
+
+    const activeRestId = restaurantId || (await getCanonicalRestaurantId(supabase));
+
+    // 1. Instant 0ms state update
+    setItems(prev => prev.filter(i => i.id !== itemId));
+    if (selectedMasterProfile && selectedMasterProfile.id === itemId) {
+      setSelectedMasterProfile(null);
+    }
+    if (expandedId === itemId) {
+      setExpandedId(null);
+    }
+
+    // 2. Instant 0ms local SQLite delete
+    if (activeRestId) {
+      await LocalSqliteStore.deleteInventoryItem(activeRestId, itemId);
+      LocalSqliteStore.queueMutation({
+        id: crypto.randomUUID(),
+        restaurant_id: activeRestId,
+        entity: "INVENTORY",
+        action: "DELETE",
+        payload: { id: itemId },
+        created_at: new Date().toISOString()
+      });
+    }
+
+    // 3. Background cloud delete
+    (async () => {
+      try {
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Supabase delete timeout")), 6000)
+        );
+        const deletePromise = supabase
+          .from('inventory_items')
+          .delete()
+          .eq('id', itemId);
+        await Promise.race([deletePromise, timeoutPromise]);
+      } catch (err) {
+        console.warn("[Inventory] Cloud delete deferred (offline):", err);
+      } finally {
+        OfflineSyncEngine.triggerSync();
+      }
+    })();
+  };
+
   const handleAddMaterial = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
     
     const trimmedName = newMaterial.name.trim();
     if (!trimmedName) {
        alert("Item name is required.");
-       setIsSubmitting(false);
        return;
     }
     
     const conversion = parseFloat(newMaterial.vendorToStorage) || 0;
     if (conversion <= 0) {
       alert("Conversion factor must be greater than 0.");
-      setIsSubmitting(false);
       return;
     }
     
@@ -323,120 +433,189 @@ export default function InventoryPage() {
     const yieldPct = 100 - lossPct;
     if (lossPct < 0 || lossPct >= 100) {
       alert("Preparation loss must be between 0 and 99.");
-      setIsSubmitting(false);
       return;
     }
 
     const price = parseFloat(newMaterial.costPerVendorUnit) || 0;
     if (price < 0) {
       alert("Purchase price cannot be negative.");
-      setIsSubmitting(false);
       return;
     }
 
     const stockNum = parseFloat(newMaterial.stock) || 0;
     const threshNum = parseFloat(newMaterial.threshold);
     
-    const { data: itemData, error: itemError } = await supabase
-      .from('inventory_items')
-      .insert([{
-        name: restaurantId ? `[REST:${restaurantId}] ${trimmedName}` : trimmedName,
-        restaurant_id: restaurantId || null,
+    const activeRestId = restaurantId || (await getCanonicalRestaurantId(supabase));
+    if (!restaurantId && activeRestId) {
+      setRestaurantId(activeRestId);
+    }
+
+    const newItemId = crypto.randomUUID();
+    const recipeUnit = newMaterial.storageUnit === 'kg' ? 'g' : newMaterial.storageUnit === 'L' ? 'ml' : newMaterial.storageUnit;
+    const nowIso = new Date().toISOString();
+
+    const newLocalItem: InventoryItem = {
+      id: newItemId,
+      name: trimmedName,
+      category: newMaterial.category,
+      stock: stockNum,
+      threshold: !isNaN(threshNum) ? threshNum : (null as any),
+      vendorUnit: newMaterial.vendorUnit,
+      storageUnit: newMaterial.storageUnit,
+      yieldPercentage: yieldPct,
+      isSemiFinished: newMaterial.isSemiFinished,
+      expiryDate: newMaterial.expiryDate || '',
+      costPerVendorUnit: price,
+      priceLastMonth: price,
+      lastOrderedDate: 'Today',
+      nextOrderDate: 'Not Scheduled',
+      dailyBurnRate: 0,
+      estimatedDaysLeft: 999,
+      vendorToStorage: conversion,
+      recipeUnit: recipeUnit,
+      lastCountedAt: 'Just Now',
+      posExpected: stockNum,
+      actualCounted: stockNum,
+      usedInRecipes: [],
+      ledger: stockNum > 0 ? [{
+        id: crypto.randomUUID(),
+        date: nowIso.split('T')[0],
+        type: 'DELIVERY',
+        amount: stockNum,
+        note: 'Opening Stock Initialisation'
+      }] : []
+    };
+
+    // 1. INSTANT 0ms write to local SQLite store
+    if (activeRestId) {
+      await LocalSqliteStore.saveSingleInventoryItem({
+        id: newItemId,
+        restaurant_id: activeRestId,
+        name: trimmedName,
         category: newMaterial.category,
         stock: stockNum,
-        threshold: !isNaN(threshNum) ? threshNum : null,
-        storage_unit: newMaterial.storageUnit,
+        threshold: !isNaN(threshNum) ? threshNum : undefined,
         vendor_unit: newMaterial.vendorUnit,
-        vendor_to_storage: conversion,
+        storage_unit: newMaterial.storageUnit,
         cost_per_vendor_unit: price,
-        price_last_month: price,
         yield_percentage: yieldPct,
+        vendor_to_storage: conversion,
         is_semi_finished: newMaterial.isSemiFinished,
-        expiry_date: newMaterial.expiryDate || null,
-        last_ordered_date: 'Today',
-        next_order_date: 'Not Scheduled',
-        daily_burn_rate: 0,
-        estimated_days_left: 999,
-        recipe_unit: newMaterial.storageUnit === 'kg' ? 'g' : newMaterial.storageUnit === 'L' ? 'ml' : newMaterial.storageUnit,
-        last_counted_at: new Date().toISOString(),
-        pos_expected: stockNum,
-        actual_counted: stockNum
-      }])
-      .select()
-      .single();
+        expiry_date: newMaterial.expiryDate || undefined,
+        recipe_unit: recipeUnit,
+        synced: 0
+      });
 
-    if (itemError) {
-      console.error("Insert error details:", itemError);
-      alert(`Database Error: ${itemError.message || JSON.stringify(itemError)}`);
-      setIsSubmitting(false);
-      return;
+      // 2. Queue mutation for background replay
+      LocalSqliteStore.queueMutation({
+        id: crypto.randomUUID(),
+        restaurant_id: activeRestId,
+        entity: "INVENTORY",
+        action: "INSERT",
+        payload: {
+          id: newItemId,
+          name: `[REST:${activeRestId}] ${trimmedName}`,
+          restaurant_id: activeRestId,
+          category: newMaterial.category,
+          stock: stockNum,
+          threshold: !isNaN(threshNum) ? threshNum : null,
+          storage_unit: newMaterial.storageUnit,
+          vendor_unit: newMaterial.vendorUnit,
+          vendor_to_storage: conversion,
+          cost_per_vendor_unit: price,
+          price_last_month: price,
+          yield_percentage: yieldPct,
+          is_semi_finished: newMaterial.isSemiFinished,
+          expiry_date: newMaterial.expiryDate || null,
+          last_ordered_date: 'Today',
+          next_order_date: 'Not Scheduled',
+          daily_burn_rate: 0,
+          estimated_days_left: 999,
+          recipe_unit: recipeUnit,
+          last_counted_at: nowIso,
+          pos_expected: stockNum,
+          actual_counted: stockNum
+        },
+        created_at: nowIso
+      });
     }
 
-    if (stockNum > 0) {
-      await supabase
-        .from('inventory_ledgers')
-        .insert([{
-          inventory_item_id: itemData.id,
-          date: new Date().toISOString().split('T')[0],
-          type: 'DELIVERY',
-          amount: stockNum,
-          note: 'Opening Stock Initialisation'
-        }]);
-    }
+    // 3. INSTANT 0ms UI update & close form
+    setItems(prev => [newLocalItem, ...prev]);
+    setIsAddingMode(false);
+    setIsSubmitting(false);
 
+    // Reset form fields
     setNewMaterial({
       name: '', category: 'Meat & Poultry', stock: '', threshold: '',
       storageUnit: 'kg', vendorUnit: 'carton', vendorToStorage: '20', costPerVendorUnit: '4800', prepLoss: '10',
       expiryDate: '', isSemiFinished: false
     });
-    
-    if (itemData?.id && restaurantId) {
+
+    // 4. Background cloud push (never blocks or freezes the UI)
+    (async () => {
       try {
-        const savedIds = localStorage.getItem(`tabletapy_inventory_${restaurantId}`);
-        const list: string[] = savedIds ? JSON.parse(savedIds) : [];
-        if (!list.includes(itemData.id)) {
-          list.push(itemData.id);
-          localStorage.setItem(`tabletapy_inventory_${restaurantId}`, JSON.stringify(list));
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Supabase insert timeout")), 6000)
+        );
+        const insertPromise = supabase
+          .from('inventory_items')
+          .insert([{
+            id: newItemId,
+            name: activeRestId ? `[REST:${activeRestId}] ${trimmedName}` : trimmedName,
+            restaurant_id: activeRestId || null,
+            category: newMaterial.category,
+            stock: stockNum,
+            threshold: !isNaN(threshNum) ? threshNum : null,
+            storage_unit: newMaterial.storageUnit,
+            vendor_unit: newMaterial.vendorUnit,
+            vendor_to_storage: conversion,
+            cost_per_vendor_unit: price,
+            price_last_month: price,
+            yield_percentage: yieldPct,
+            is_semi_finished: newMaterial.isSemiFinished,
+            expiry_date: newMaterial.expiryDate || null,
+            last_ordered_date: 'Today',
+            next_order_date: 'Not Scheduled',
+            daily_burn_rate: 0,
+            estimated_days_left: 999,
+            recipe_unit: recipeUnit,
+            last_counted_at: nowIso,
+            pos_expected: stockNum,
+            actual_counted: stockNum
+          }]);
+
+        const res: any = await Promise.race([insertPromise, timeoutPromise]);
+        if (!res?.error) {
+          if (stockNum > 0) {
+            await supabase.from('inventory_ledgers').insert([{
+              inventory_item_id: newItemId,
+              date: nowIso.split('T')[0],
+              type: 'DELIVERY',
+              amount: stockNum,
+              note: 'Opening Stock Initialisation'
+            }]);
+          }
         }
-      } catch {}
-    }
-    setIsAddingMode(false);
-    setIsSubmitting(false);
-    await fetchInventory();
+      } catch (err) {
+        console.warn("[Inventory] Background cloud sync deferred (offline):", err);
+      } finally {
+        OfflineSyncEngine.triggerSync();
+      }
+    })();
   };
 
   return (
-    <div className="flex h-screen flex-col bg-white overflow-hidden text-gray-900 font-sans relative">
-      <div className="flex-1 overflow-y-auto slim-scrollbar px-6 md:px-10 w-full pb-10">
+    <div className="flex flex-col min-h-full bg-white dark:bg-transparent text-gray-900 dark:text-zinc-100 font-sans relative">
+      <div className="flex-1 px-6 md:px-10 w-full pb-10">
         
-        
-          {/* TOP NAV TABS */}
-          <div className="pt-6 pb-2 w-full flex items-center justify-center">
-            <div className="bg-gray-100/80 p-1 rounded-xl flex items-center gap-1 w-full max-w-sm mx-auto shadow-inner border border-gray-200/50">
-              <button 
-                onClick={() => setActiveTab('Intelligence')}
-                className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all ${activeTab === 'Intelligence' ? 'bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
-              >
-                <Sparkles size={14} className={activeTab === 'Intelligence' ? 'text-[#E46254]' : ''} />
-                Intelligence
-              </button>
-              <button 
-                onClick={() => setActiveTab('Materials')}
-                className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-2 text-[13px] font-medium transition-all ${activeTab === 'Materials' ? 'bg-white shadow-[0_1px_3px_rgba(0,0,0,0.05)] text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
-              >
-                <Box size={14} className={activeTab === 'Materials' ? 'text-[#E46254]' : ''} />
-                Materials Data
-              </button>
-            </div>
-          </div>
-          
-          {activeTab === 'Intelligence' ? (
-            <IntelligenceDashboard />
-          ) : (
-            <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+        {activeTab === 'Intelligence' ? (
+          <IntelligenceDashboard />
+        ) : (
+          <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
 
-          {/* DYNAMIC TOP HEADER */}
-        <div className="sticky top-0 z-20 pt-6 pb-1 bg-white/95 backdrop-blur-md flex flex-col md:flex-row items-center justify-between gap-4 border-b border-gray-100">
+        {/* DYNAMIC TOP HEADER */}
+        <div className="sticky top-0 z-20 pt-4 pb-1 bg-white/95 dark:bg-zinc-950/75 backdrop-blur-2xl flex flex-col md:flex-row items-center justify-between gap-4 border-b border-gray-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08)]">
           
           {isAddingMode ? (
             // HEADER - ADD MATERIAL VIEW
@@ -444,7 +623,7 @@ export default function InventoryPage() {
               <div className="flex items-center gap-4">
                 <button 
                   onClick={() => setIsAddingMode(false)}
-                  className="p-1.5 -ml-1.5 text-gray-500 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-1.5"
+                  className="p-1.5 -ml-1.5 text-gray-500 dark:text-zinc-400 hover:text-gray-900 dark:text-white hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-1.5"
                 >
                   <ArrowLeft size={16} />
                   <span className="text-[13px] font-medium">Back to List</span>
@@ -457,15 +636,15 @@ export default function InventoryPage() {
               <div className="flex items-center gap-4">
                 <button 
                   onClick={() => setSelectedMasterProfile(null)}
-                  className="p-1.5 -ml-1.5 text-gray-500 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-1.5"
+                  className="p-1.5 -ml-1.5 text-gray-500 dark:text-zinc-400 hover:text-gray-900 dark:text-white hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-1.5"
                 >
                   <ArrowLeft size={16} />
                   <span className="text-[13px] font-medium">Back to List</span>
                 </button>
                 <div className="h-4 w-[1px] bg-gray-200 hidden md:block"></div>
                 <div className="hidden md:flex items-center gap-3">
-                  <h1 className="text-[13px] font-semibold text-gray-900">{selectedMasterProfile.name}</h1>
-                  <span className="px-2 py-0.5 border border-gray-200 text-gray-500 rounded text-[11px] font-medium bg-white">
+                  <h1 className="text-[13px] font-semibold text-gray-900 dark:text-white">{selectedMasterProfile.name}</h1>
+                  <span className="px-2 py-0.5 border border-gray-200 text-gray-500 dark:text-zinc-400 rounded text-[11px] font-medium bg-white">
                     {selectedMasterProfile.id ? `ID: INV-${selectedMasterProfile.id.substring(0, 4)}` : 'Loading...'}
                   </span>
                 </div>
@@ -477,9 +656,9 @@ export default function InventoryPage() {
                     onClick={() => setIsDateDropdownOpen(!isDateDropdownOpen)}
                     className="flex items-center gap-2 px-3 py-1.5 border border-gray-200 rounded-md bg-white hover:border-[#E46254] transition-colors group"
                   >
-                    <Calendar size={14} className="text-gray-500 group-hover:text-[#E46254] transition-colors"/>
-                    <span className="text-[13px] font-medium text-gray-700">{dateRange}</span>
-                    <ChevronDown size={14} className="text-gray-500"/>
+                    <Calendar size={14} className="text-gray-500 dark:text-zinc-400 group-hover:text-[#E46254] transition-colors"/>
+                    <span className="text-[13px] font-medium text-gray-700 dark:text-zinc-200">{dateRange}</span>
+                    <ChevronDown size={14} className="text-gray-500 dark:text-zinc-400"/>
                   </button>
                   
                   {isDateDropdownOpen && (
@@ -488,7 +667,7 @@ export default function InventoryPage() {
                         <div 
                           key={range}
                           onClick={() => { setDateRange(range); setIsDateDropdownOpen(false); }}
-                          className={`px-3 py-1.5 text-[12px] font-medium cursor-pointer transition-colors ${dateRange === range ? 'bg-[#E46254]/5 text-[#E46254]' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'}`}
+                          className={`px-3 py-1.5 text-[12px] font-medium cursor-pointer transition-colors ${dateRange === range ? 'bg-[#E46254]/5 text-[#E46254]' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-white'}`}
                         >
                           {range}
                         </div>
@@ -509,8 +688,16 @@ export default function InventoryPage() {
                   <Sliders size={14} /> Adjust Stock
                 </button>
 
-                <button onClick={handleExportCSV} className="px-3 py-1.5 border border-gray-200 text-[13px] font-medium text-gray-700 bg-white hover:bg-gray-50 hover:border-gray-300 rounded-md transition-all flex items-center gap-1.5 cursor-pointer">
-                  <Download size={14} className="text-gray-500" /> Export CSV
+                <button onClick={handleExportCSV} className="px-3 py-1.5 border border-gray-200 text-[13px] font-medium text-gray-700 dark:text-zinc-200 bg-white hover:bg-gray-50 hover:border-gray-300 rounded-md transition-all flex items-center gap-1.5 cursor-pointer">
+                  <Download size={14} className="text-gray-500 dark:text-zinc-400" /> Export CSV
+                </button>
+
+                <button 
+                  onClick={() => handleDeleteMaterial(selectedMasterProfile.id, selectedMasterProfile.name)}
+                  className="px-3 py-1.5 border border-red-200 text-[13px] font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-md transition-all flex items-center gap-1.5 cursor-pointer"
+                  title="Delete this material"
+                >
+                  <Trash2 size={14} className="text-red-500" /> Delete
                 </button>
               </div>
             </div>
@@ -518,20 +705,20 @@ export default function InventoryPage() {
             // HEADER - LIST VIEW
             <>
               <div className="flex items-center gap-3">
-                 <h1 className="text-[13px] font-semibold text-gray-900 tracking-tight">Inventory OS</h1>
+                 <h1 className="text-[13px] font-semibold text-gray-900 dark:text-white tracking-tight">Inventory OS</h1>
                  {!isLoadingData && (
-                   <span className="px-2 py-0.5 border border-gray-200 text-gray-500 rounded text-[11px] font-medium bg-white">{items.length} Items</span>
+                   <span className="px-2 py-0.5 border border-gray-200 text-gray-500 dark:text-zinc-400 rounded text-[11px] font-medium bg-white">{items.length} Items</span>
                  )}
               </div>
               
               <div className="flex items-center gap-3 w-full md:w-auto">
                 <div className="relative w-full md:w-64 group">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-[#E46254] transition-colors" size={16} />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-[#5E5D72] group-focus-within:text-[#E46254] transition-colors" size={16} />
                   <input 
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search raw materials..."
-                    className="w-full bg-white border border-gray-200 rounded-lg pl-9 pr-3 py-1.5 text-[13px] font-medium text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#E46254] transition-all"
+                    className="w-full bg-white dark:bg-[#1C1D26] border border-gray-200 dark:border-white/[0.08] rounded-lg pl-9 pr-3 py-1.5 text-[13px] font-medium text-gray-900 dark:text-white placeholder:text-gray-400 dark:text-[#5E5D72] dark:placeholder-[#5E5D72] outline-none focus:border-[#E46254] transition-all"
                   />
                 </div>
                 <button onClick={() => setIsAddingMode(true)} className="shrink-0 bg-[#E46254] hover:bg-[#D35546] text-white px-3.5 py-1.5 rounded-lg active:scale-95 transition-all font-medium text-[13px] flex items-center justify-center gap-1.5">
@@ -551,15 +738,15 @@ export default function InventoryPage() {
     <div className="max-w-3xl mx-auto flex flex-col gap-6">
       
       {/* 1. Identity */}
-      <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-         <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4">1. Material Identity</h3>
+      <div className="bg-white dark:bg-[#1C1D26] rounded-xl p-5 border border-gray-100 dark:border-white/[0.07] shadow-sm dark:shadow-[0_4px_16px_rgba(0,0,0,0.35)]">
+         <h3 className="text-[11px] font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-widest mb-4">1. Material Identity</h3>
          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
            <div className="md:col-span-2">
-             <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Material Name <span className="text-[#E46254]">*</span></label>
+             <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Material Name <span className="text-[#E46254]">*</span></label>
              <input required type="text" autoFocus value={newMaterial.name} onChange={e => setNewMaterial({...newMaterial, name: e.target.value})} placeholder="e.g. Chicken breast" className="w-full text-[14px] font-medium border border-gray-200 rounded-lg px-3 py-2 focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 focus:outline-none transition-all" />
            </div>
            <div>
-             <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Category <span className="text-[#E46254]">*</span></label>
+             <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Category <span className="text-[#E46254]">*</span></label>
              <select required value={newMaterial.category} onChange={e => setNewMaterial({...newMaterial, category: e.target.value})} className="w-full text-[14px] font-medium border border-gray-200 rounded-lg px-3 py-2 focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 focus:outline-none bg-white cursor-pointer transition-all">
                <option>Meat & Poultry</option><option>Seafood</option><option>Dairy & Eggs</option><option>Vegetables & Produce</option><option>Dry Goods</option>
              </select>
@@ -568,19 +755,19 @@ export default function InventoryPage() {
       </div>
 
       {/* 2. Costing Profile */}
-      <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-         <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4">2. Costing & Conversion</h3>
+      <div className="bg-white dark:bg-[#1C1D26] rounded-xl p-5 border border-gray-100 dark:border-white/[0.07] shadow-sm dark:shadow-[0_4px_16px_rgba(0,0,0,0.35)]">
+         <h3 className="text-[11px] font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-widest mb-4">2. Costing & Conversion</h3>
          
          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <div>
-              <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Purchase Unit <span className="text-[#E46254]">*</span></label>
+              <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Purchase Unit <span className="text-[#E46254]">*</span></label>
               <input required type="text" value={newMaterial.vendorUnit} onChange={e => {
                 const isSame = e.target.value.toLowerCase() === newMaterial.storageUnit.toLowerCase();
                 setNewMaterial({...newMaterial, vendorUnit: e.target.value, vendorToStorage: isSame ? '1' : newMaterial.vendorToStorage});
               }} placeholder="e.g. carton" className="w-full text-[14px] font-medium border border-gray-200 rounded-lg px-3 py-2 focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 focus:outline-none transition-all" />
             </div>
             <div>
-              <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Base Stock Unit <span className="text-[#E46254]">*</span></label>
+              <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Base Stock Unit <span className="text-[#E46254]">*</span></label>
               <select required value={newMaterial.storageUnit} onChange={e => {
                 const isSame = e.target.value.toLowerCase() === newMaterial.vendorUnit.toLowerCase();
                 setNewMaterial({...newMaterial, storageUnit: e.target.value, vendorToStorage: isSame ? '1' : newMaterial.vendorToStorage});
@@ -589,9 +776,9 @@ export default function InventoryPage() {
               </select>
             </div>
             <div>
-              <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Purchase Price <span className="text-[#E46254]">*</span></label>
+              <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Purchase Price <span className="text-[#E46254]">*</span></label>
               <div className="relative">
-                <span className="absolute left-3 top-2.5 text-gray-500 font-medium text-[13px]">₹</span>
+                <span className="absolute left-3 top-2.5 text-gray-500 dark:text-zinc-400 font-medium text-[13px]">₹</span>
                 <input required type="number" step="any" min="0" value={newMaterial.costPerVendorUnit} onChange={e => setNewMaterial({...newMaterial, costPerVendorUnit: e.target.value})} className="w-full pl-7 text-[14px] font-medium border border-gray-200 rounded-lg px-3 py-2 focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 focus:outline-none transition-all" />
               </div>
             </div>
@@ -599,10 +786,10 @@ export default function InventoryPage() {
             <div className="md:col-span-3 flex items-center gap-3 bg-red-50/50 p-3 rounded-lg border border-red-100">
                <div className="flex-1">
                  <label className="block text-[12px] font-bold text-gray-800 mb-0.5">Conversion Factor <span className="text-[#E46254]">*</span></label>
-                 <p className="text-[11px] text-gray-500 font-medium">How many base units are in one purchase unit?</p>
+                 <p className="text-[11px] text-gray-500 dark:text-zinc-400 font-medium">How many base units are in one purchase unit?</p>
                </div>
                <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md border border-gray-200 shadow-sm">
-                 <span className="font-semibold text-gray-700 text-[13px]">1 {newMaterial.vendorUnit || '[Unit]'} =</span>
+                 <span className="font-semibold text-gray-700 dark:text-zinc-200 text-[13px]">1 {newMaterial.vendorUnit || '[Unit]'} =</span>
                  <input required type="number" step="any" min="0.001" value={newMaterial.vendorToStorage} onChange={e => setNewMaterial({...newMaterial, vendorToStorage: e.target.value})} className="w-16 text-center text-[14px] border-b-2 border-gray-300 px-1 py-1 focus:border-[#E46254] font-bold focus:outline-none bg-transparent" />
                  <span className="font-semibold text-[#E46254] text-[13px]">{newMaterial.storageUnit}</span>
                </div>
@@ -612,12 +799,12 @@ export default function InventoryPage() {
          {/* Preparation Loss & Live Cost */}
          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end border-t border-gray-100 pt-5">
             <div>
-              <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Preparation Loss % <span className="text-[#E46254]">*</span></label>
+              <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Preparation Loss % <span className="text-[#E46254]">*</span></label>
               <div className="relative">
                 <input required type="number" step="any" min="0" max="99" value={newMaterial.prepLoss} onChange={e => setNewMaterial({...newMaterial, prepLoss: e.target.value})} className="w-full text-[14px] font-medium border border-gray-200 rounded-lg px-3 py-2 focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 focus:outline-none transition-all" />
-                <span className="absolute right-3 top-2.5 text-gray-400 font-bold text-[13px]">%</span>
+                <span className="absolute right-3 top-2.5 text-gray-400 dark:text-[#5E5D72] font-bold text-[13px]">%</span>
               </div>
-              <p className="text-[10px] text-gray-400 mt-1 font-medium">Yield will be {100 - (parseFloat(newMaterial.prepLoss) || 0)}%</p>
+              <p className="text-[10px] text-gray-400 dark:text-[#5E5D72] mt-1 font-medium">Yield will be {100 - (parseFloat(newMaterial.prepLoss) || 0)}%</p>
             </div>
             
             <div className="md:col-span-2">
@@ -633,13 +820,13 @@ export default function InventoryPage() {
                   return (
                     <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 flex items-center justify-between">
                        <div>
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-0.5">Raw Cost</p>
+                          <p className="text-[10px] font-bold text-gray-400 dark:text-[#5E5D72] uppercase tracking-widest mb-0.5">Raw Cost</p>
                           <p className="text-[13px] font-semibold text-gray-600">₹{rawCost.toFixed(2)} / {newMaterial.storageUnit}</p>
                        </div>
                        <div className="h-6 w-px bg-gray-200"></div>
                        <div className="text-right">
                           <p className="text-[10px] font-bold text-[#E46254] uppercase tracking-widest mb-0.5">True Usable Cost</p>
-                          <p className="text-[15px] font-bold text-gray-900">₹{usableCost.toFixed(2)} <span className="text-[12px] text-gray-500 font-medium normal-case">/ {newMaterial.storageUnit}</span></p>
+                          <p className="text-[15px] font-bold text-gray-900 dark:text-white">₹{usableCost.toFixed(2)} <span className="text-[12px] text-gray-500 dark:text-zinc-400 font-medium normal-case">/ {newMaterial.storageUnit}</span></p>
                        </div>
                     </div>
                   );
@@ -649,21 +836,21 @@ export default function InventoryPage() {
       </div>
 
       {/* 3. Optional Settings */}
-      <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-         <h3 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4">3. Optional Tracking</h3>
+      <div className="bg-white dark:bg-[#1C1D26] rounded-xl p-5 border border-gray-100 dark:border-white/[0.07] shadow-sm dark:shadow-[0_4px_16px_rgba(0,0,0,0.35)]">
+         <h3 className="text-[11px] font-bold text-gray-500 dark:text-zinc-400 uppercase tracking-widest mb-4">3. Optional Tracking</h3>
          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Opening Stock</label>
+              <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Opening Stock</label>
               <div className="relative">
                 <input type="number" step="any" min="0" value={newMaterial.stock} onChange={e => setNewMaterial({...newMaterial, stock: e.target.value})} placeholder="0" className="w-full pl-3 pr-10 py-2 border border-gray-200 rounded-lg text-[14px] font-medium focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 outline-none transition-all" />
-                <span className="absolute right-3 top-2.5 text-[12px] text-gray-400 font-bold">{newMaterial.storageUnit}</span>
+                <span className="absolute right-3 top-2.5 text-[12px] text-gray-400 dark:text-[#5E5D72] font-bold">{newMaterial.storageUnit}</span>
               </div>
             </div>
             <div>
-              <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Low Stock Threshold</label>
+              <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Low Stock Threshold</label>
               <div className="relative">
                 <input type="number" step="any" min="0" value={newMaterial.threshold} onChange={e => setNewMaterial({...newMaterial, threshold: e.target.value})} placeholder="Alert threshold" className="w-full pl-3 pr-10 py-2 border border-gray-200 rounded-lg text-[14px] font-medium focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254]/20 outline-none transition-all" />
-                <span className="absolute right-3 top-2.5 text-[12px] text-gray-400 font-bold">{newMaterial.storageUnit}</span>
+                <span className="absolute right-3 top-2.5 text-[12px] text-gray-400 dark:text-[#5E5D72] font-bold">{newMaterial.storageUnit}</span>
               </div>
             </div>
          </div>
@@ -710,7 +897,7 @@ export default function InventoryPage() {
                    <div className="grid grid-cols-2 lg:grid-cols-4 border-b border-gray-200 divide-y lg:divide-y-0 lg:divide-x divide-gray-200 bg-white">
                      <div className="p-4 flex flex-col justify-center">
                         <div className="flex items-center justify-between">
-                          <span className="text-[12px] font-medium text-gray-500 mb-1">Live Stock Level</span>
+                          <span className="text-[12px] font-medium text-gray-500 dark:text-zinc-400 mb-1">Live Stock Level</span>
                           <button 
                             onClick={() => {
                               setAdjustingItem(selectedMasterProfile);
@@ -724,7 +911,7 @@ export default function InventoryPage() {
                           </button>
                         </div>
                         <div className="flex items-baseline gap-2">
-                          <span className={`text-[15px] font-bold tabular-nums ${isLowStock ? 'text-[#E46254]' : 'text-gray-900'}`}>
+                          <span className={`text-[15px] font-bold tabular-nums ${isLowStock ? 'text-[#E46254]' : 'text-gray-900 dark:text-white'}`}>
                             {selectedMasterProfile.stock} {selectedMasterProfile.storageUnit}
                           </span>
                         </div>
@@ -742,89 +929,89 @@ export default function InventoryPage() {
                      </div>
 
                      <div className="p-4 flex flex-col justify-center bg-gray-50/30">
-                        <span className="text-[12px] font-medium text-gray-500 mb-1">True Usable Cost</span>
+                        <span className="text-[12px] font-medium text-gray-500 dark:text-zinc-400 mb-1">True Usable Cost</span>
                         <div className="flex items-baseline gap-1">
-                          <span className="text-[15px] font-bold text-gray-900 tabular-nums">
+                          <span className="text-[15px] font-bold text-gray-900 dark:text-white tabular-nums">
                             ₹{trueUsableCost.toFixed(2)}
                           </span>
-                          <span className="text-[11px] font-medium text-gray-500">/ {selectedMasterProfile.storageUnit}</span>
+                          <span className="text-[11px] font-medium text-gray-500 dark:text-zinc-400">/ {selectedMasterProfile.storageUnit}</span>
                         </div>
-                        <span className="text-[11px] font-medium text-gray-400 mt-1">
+                        <span className="text-[11px] font-medium text-gray-400 dark:text-[#5E5D72] mt-1">
                           Raw: ₹{rawCostPerStorageUnit.toFixed(2)} ({prepLossPct}% prep loss)
                         </span>
                      </div>
 
                      <div className="p-4 flex flex-col justify-center">
-                        <span className="text-[12px] font-medium text-gray-500 mb-1">Total Consumed</span>
+                        <span className="text-[12px] font-medium text-gray-500 dark:text-zinc-400 mb-1">Total Consumed</span>
                         <div className="flex items-baseline gap-1">
-                          <span className="text-[15px] font-bold text-gray-900 tabular-nums">
+                          <span className="text-[15px] font-bold text-gray-900 dark:text-white tabular-nums">
                             {totalConsumed.toFixed(2)} {selectedMasterProfile.storageUnit}
                           </span>
                         </div>
-                        <span className="text-[11px] font-medium text-gray-400 mt-1">
+                        <span className="text-[11px] font-medium text-gray-400 dark:text-[#5E5D72] mt-1">
                           Ordered {totalOrdersCount} times across menu
                         </span>
                      </div>
 
                      <div className="p-4 flex flex-col justify-center bg-gray-50/30">
-                        <span className="text-[12px] font-medium text-gray-500 mb-1">Capital Locked</span>
+                        <span className="text-[12px] font-medium text-gray-500 dark:text-zinc-400 mb-1">Capital Locked</span>
                         <div className="flex items-baseline gap-1">
-                          <span className="text-[15px] font-bold text-gray-900 tabular-nums">
+                          <span className="text-[15px] font-bold text-gray-900 dark:text-white tabular-nums">
                             {formatCurrency(capitalLocked)}
                           </span>
                         </div>
-                        <span className="text-[11px] font-medium text-gray-400 mt-1">
+                        <span className="text-[11px] font-medium text-gray-400 dark:text-[#5E5D72] mt-1">
                           On-hand stock valuation
                         </span>
                      </div>
                    </div>
 
                    {/* 2. SPECIFICATIONS & COSTING PROFILE (REPLACED DUMMY AUDIT SNAPSHOT) */}
-                   <div className="border-b border-gray-200 p-5 bg-white">
+                   <div className="border-b border-gray-200 dark:border-white/[0.07] p-5 bg-white dark:bg-[#1C1D26]">
                      <div className="flex items-center gap-2 mb-4">
                        <Layers size={15} className="text-[#E46254]" />
-                       <h3 className="text-[13px] font-semibold text-gray-900 tracking-tight">Material Specifications & Costing Profile</h3>
+                       <h3 className="text-[13px] font-semibold text-gray-900 dark:text-white tracking-tight">Material Specifications & Costing Profile</h3>
                      </div>
 
-                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-gray-50/60 p-4 rounded-xl border border-gray-100">
+                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-gray-50/60 dark:bg-[#22232E] p-4 rounded-xl border border-gray-100 dark:border-white/[0.06]">
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Category</p>
-                         <p className="text-[13px] font-medium text-gray-900">{selectedMasterProfile.category}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Category</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">{selectedMasterProfile.category}</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Purchase Unit & Price</p>
-                         <p className="text-[13px] font-medium text-gray-900">{formatCurrency(selectedMasterProfile.costPerVendorUnit)} / {selectedMasterProfile.vendorUnit}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Purchase Unit & Price</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">{formatCurrency(selectedMasterProfile.costPerVendorUnit)} / {selectedMasterProfile.vendorUnit}</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Unit Conversion</p>
-                         <p className="text-[13px] font-medium text-gray-900">1 {selectedMasterProfile.vendorUnit} = {conversion} {selectedMasterProfile.storageUnit}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Unit Conversion</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">1 {selectedMasterProfile.vendorUnit} = {conversion} {selectedMasterProfile.storageUnit}</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Raw Unit Cost</p>
-                         <p className="text-[13px] font-medium text-gray-900">₹{rawCostPerStorageUnit.toFixed(2)} / {selectedMasterProfile.storageUnit}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Raw Unit Cost</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">₹{rawCostPerStorageUnit.toFixed(2)} / {selectedMasterProfile.storageUnit}</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Usable Yield / Prep Loss</p>
-                         <p className="text-[13px] font-medium text-gray-900">{yieldPct}% Yield ({prepLossPct}% Prep Loss)</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Usable Yield / Prep Loss</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">{yieldPct}% Yield ({prepLossPct}% Prep Loss)</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Low Stock Threshold</p>
-                         <p className="text-[13px] font-medium text-gray-900">{selectedMasterProfile.threshold != null ? `${selectedMasterProfile.threshold} ${selectedMasterProfile.storageUnit}` : 'Not configured'}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Low Stock Threshold</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">{selectedMasterProfile.threshold != null ? `${selectedMasterProfile.threshold} ${selectedMasterProfile.storageUnit}` : 'Not configured'}</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Material Classification</p>
-                         <p className="text-[13px] font-medium text-gray-900">{selectedMasterProfile.isSemiFinished ? 'Semi-Finished / Prepared' : 'Raw Ingredient'}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Material Classification</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">{selectedMasterProfile.isSemiFinished ? 'Semi-Finished / Prepared' : 'Raw Ingredient'}</p>
                        </div>
 
                        <div>
-                         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Shelf Life / Expiry</p>
-                         <p className="text-[13px] font-medium text-gray-900">{selectedMasterProfile.expiryDate || 'Standard / Non-perishable'}</p>
+                         <p className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider mb-0.5">Shelf Life / Expiry</p>
+                         <p className="text-[13px] font-medium text-gray-900 dark:text-white">{selectedMasterProfile.expiryDate || 'Standard / Non-perishable'}</p>
                        </div>
                      </div>
                    </div>
@@ -834,13 +1021,13 @@ export default function InventoryPage() {
                       <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                          <div className="flex items-center gap-2">
                            <ChefHat size={15} className="text-[#E46254]"/>
-                           <h3 className="text-[13px] font-semibold text-gray-900">Menu Profitability & Recipe Usage</h3>
+                           <h3 className="text-[13px] font-semibold text-gray-900 dark:text-white">Menu Profitability & Recipe Usage</h3>
                          </div>
-                         <span className="text-[12px] font-medium text-gray-500">{selectedMasterProfile.usedInRecipes.length} dishes linked</span>
+                         <span className="text-[12px] font-medium text-gray-500 dark:text-zinc-400">{selectedMasterProfile.usedInRecipes.length} dishes linked</span>
                       </div>
                       
                       <div className="overflow-x-auto">
-                         <div className="grid grid-cols-7 bg-white border-b border-gray-100 px-5 py-2 text-[12px] font-semibold text-gray-500 min-w-[720px]">
+                         <div className="grid grid-cols-7 bg-white border-b border-gray-100 px-5 py-2 text-[12px] font-semibold text-gray-500 dark:text-zinc-400 min-w-[720px]">
                            <div className="col-span-2">Dish / Recipe Name</div>
                            <div className="text-right">Times Ordered</div>
                            <div className="text-right">Portion per Order</div>
@@ -858,7 +1045,7 @@ export default function InventoryPage() {
                                const costSharePct = r.dishPrice > 0 ? ((portionCost / r.dishPrice) * 100).toFixed(1) : null;
                                return (
                                  <div key={i} className="grid grid-cols-7 px-5 py-3 items-center hover:bg-gray-50/50 transition-colors">
-                                    <div className="col-span-2 text-[13px] font-medium text-gray-900 truncate pr-2">
+                                    <div className="col-span-2 text-[13px] font-medium text-gray-900 dark:text-white truncate pr-2">
                                       {r.name} 
                                     </div>
                                     <div className="text-right text-[13px] font-medium text-gray-600 tabular-nums">
@@ -867,10 +1054,10 @@ export default function InventoryPage() {
                                     <div className="text-right text-[13px] font-medium text-gray-600 tabular-nums">
                                       {r.amountPerOrder} {selectedMasterProfile.recipeUnit}
                                     </div>
-                                    <div className="text-right text-[13px] font-medium text-gray-900 tabular-nums">
+                                    <div className="text-right text-[13px] font-medium text-gray-900 dark:text-white tabular-nums">
                                       {(r.amountPerOrder * r.timesOrdered).toFixed(1)} {selectedMasterProfile.recipeUnit}
                                     </div>
-                                    <div className="text-right text-[13px] font-semibold text-gray-900 tabular-nums">
+                                    <div className="text-right text-[13px] font-semibold text-gray-900 dark:text-white tabular-nums">
                                       {formatCurrency(portionCost)}
                                     </div>
                                     <div className="text-right flex justify-end">
@@ -879,7 +1066,7 @@ export default function InventoryPage() {
                                           {costSharePct}% of ₹{r.dishPrice}
                                         </span>
                                       ) : (
-                                        <span className="text-[12px] font-medium text-gray-500">
+                                        <span className="text-[12px] font-medium text-gray-500 dark:text-zinc-400">
                                           {formatCurrency(portionCost)}/order
                                         </span>
                                       )}
@@ -888,7 +1075,7 @@ export default function InventoryPage() {
                                );
                             })}
                             {selectedMasterProfile.usedInRecipes.length === 0 && (
-                              <div className="px-5 py-8 text-center text-[13px] text-gray-500 font-medium">
+                              <div className="px-5 py-8 text-center text-[13px] text-gray-500 dark:text-zinc-400 font-medium">
                                 No menu items are currently linked to this ingredient. Add it to a recipe in the Menu Builder.
                               </div>
                             )}
@@ -901,7 +1088,7 @@ export default function InventoryPage() {
                       <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                          <div className="flex items-center gap-2">
                            <Activity size={15} className="text-[#E46254]" />
-                           <h3 className="text-[13px] font-semibold text-gray-900">Live Inventory Audit Trail</h3>
+                           <h3 className="text-[13px] font-semibold text-gray-900 dark:text-white">Live Inventory Audit Trail</h3>
                          </div>
                          <div className="flex items-center gap-3 text-[11px] font-semibold">
                            <span className="text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">
@@ -924,8 +1111,8 @@ export default function InventoryPage() {
                                    <Activity size={12} className="text-[#E46254]" />}
                                </div>
                                <div className="flex items-center gap-3">
-                                 <p className="text-[13px] font-medium text-gray-900 leading-none">{log.note || 'Inventory Event'}</p>
-                                 <p className="text-[12px] font-medium text-gray-400">{log.date}</p>
+                                 <p className="text-[13px] font-medium text-gray-900 dark:text-white leading-none">{log.note || 'Inventory Event'}</p>
+                                 <p className="text-[12px] font-medium text-gray-400 dark:text-[#5E5D72]">{log.date}</p>
                                </div>
                              </div>
                              <div className="text-right">
@@ -936,7 +1123,7 @@ export default function InventoryPage() {
                            </div>
                          ))}
                          {(!selectedMasterProfile.ledger || selectedMasterProfile.ledger.length === 0) && (
-                            <div className="px-5 py-8 text-center text-[13px] text-gray-500 font-medium">
+                            <div className="px-5 py-8 text-center text-[13px] text-gray-500 dark:text-zinc-400 font-medium">
                               No inventory ledger events recorded yet.
                             </div>
                          )}
@@ -986,12 +1173,12 @@ export default function InventoryPage() {
             
             {isLoadingData ? (
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 z-10">
-                <Loader2 size={24} className="animate-spin text-gray-400 mb-3" />
-                <p className="text-[12px] font-medium text-gray-500">Syncing with database...</p>
+                <Loader2 size={24} className="animate-spin text-gray-400 dark:text-[#5E5D72] mb-3" />
+                <p className="text-[12px] font-medium text-gray-500 dark:text-zinc-400">Syncing with database...</p>
               </div>
             ) : null}
 
-            <div className="flex items-center px-6 py-3 bg-gray-50/50 border-b border-gray-200 text-[12px] font-medium text-gray-500">
+            <div className="flex items-center px-6 py-3 bg-gray-50/50 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-gray-200 dark:border-white/[0.08] text-[12px] font-medium text-gray-500 dark:text-zinc-400">
               <div className="flex-1">Material</div>
               <div className="w-32 text-right">Live Stock</div>
               <div className="w-32 text-right">Threshold</div>
@@ -1000,16 +1187,16 @@ export default function InventoryPage() {
               <div className="w-8 shrink-0"></div>
             </div>
 
-            <div className="divide-y divide-gray-100 flex flex-col bg-white">
+            <div className="divide-y divide-gray-100 dark:divide-white/[0.05] flex flex-col bg-white dark:bg-white/[0.02] dark:backdrop-blur-xl border border-gray-200 dark:border-white/[0.08] rounded-2xl overflow-hidden dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)]">
               {filteredItems.length === 0 && !isLoadingData ? (
                 <div className="px-6 py-12 flex flex-col items-center justify-center text-center">
                   <div className="w-12 h-12 rounded-full bg-gray-50 border border-gray-100 flex items-center justify-center mb-4">
                     <Activity size={20} className="text-gray-300" />
                   </div>
-                  <h3 className="text-[13px] font-semibold text-gray-900 mb-1">
+                  <h3 className="text-[13px] font-semibold text-gray-900 dark:text-white mb-1">
                     {filterLowStockOnly ? 'No Low Stock Items Found' : 'No Inventory Found'}
                   </h3>
-                  <p className="text-[12px] text-gray-500 font-medium max-w-sm">
+                  <p className="text-[12px] text-gray-500 dark:text-zinc-400 font-medium max-w-sm">
                     {filterLowStockOnly 
                       ? 'All inventory items are currently at or above their configured thresholds.'
                       : 'Your database is currently empty. Click "Add Material" above to start building your master inventory list.'
@@ -1036,14 +1223,14 @@ export default function InventoryPage() {
                       className={`flex items-center px-3 py-1.5 transition-all cursor-pointer group ${isExpanded ? 'bg-[#E46254]/[0.02]' : 'hover:bg-[#E46254]/[0.02]'}`}
                     >
                       <div className="flex-1 flex items-center gap-3">
-                        <span className="text-[13px] font-medium text-gray-900 tracking-tight">{item.name}</span>
+                        <span className="text-[13px] font-medium text-gray-900 dark:text-white tracking-tight">{item.name}</span>
                         <span className="px-2 py-0.5 rounded bg-gray-100 border border-gray-200 text-[11px] font-medium text-gray-600">
                           {item.category}
                         </span>
                       </div>
                       <div className="w-32 text-right flex items-center justify-end gap-1.5">
-                        <span className={`text-[13px] font-semibold tabular-nums ${isLow ? 'text-[#E46254]' : 'text-gray-900'}`}>
-                          {item.stock} <span className={`text-[12px] font-medium ml-0.5 ${isLow ? 'text-[#E46254]/70' : 'text-gray-400'}`}>{item.storageUnit}</span>
+                        <span className={`text-[13px] font-semibold tabular-nums ${isLow ? 'text-[#E46254]' : 'text-gray-900 dark:text-white'}`}>
+                          {item.stock} <span className={`text-[12px] font-medium ml-0.5 ${isLow ? 'text-[#E46254]/70' : 'text-gray-400 dark:text-[#5E5D72]'}`}>{item.storageUnit}</span>
                         </span>
                       </div>
                       <div className="w-32 text-right">
@@ -1052,14 +1239,14 @@ export default function InventoryPage() {
                          </span>
                       </div>
                       <div className="w-32 text-right">
-                         <span className="text-[13px] font-medium text-gray-900 tabular-nums">
-                           {itemTotalConsumed.toFixed(1)} <span className="text-[11px] text-gray-500">{item.storageUnit}</span>
+                         <span className="text-[13px] font-medium text-gray-900 dark:text-white tabular-nums">
+                           {itemTotalConsumed.toFixed(1)} <span className="text-[11px] text-gray-500 dark:text-zinc-400">{item.storageUnit}</span>
                          </span>
                       </div>
                       <div className="w-32 text-right">
-                        <span className="text-[13px] font-semibold text-gray-900 tracking-tight tabular-nums">{formatCurrency(totalValue)}</span>
+                        <span className="text-[13px] font-semibold text-gray-900 dark:text-white tracking-tight tabular-nums">{formatCurrency(totalValue)}</span>
                       </div>
-                      <div className="w-8 shrink-0 flex justify-end text-gray-400 group-hover:text-[#E46254] transition-colors">
+                      <div className="w-8 shrink-0 flex justify-end text-gray-400 dark:text-[#5E5D72] group-hover:text-[#E46254] transition-colors">
                         {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                       </div>
                     </div>
@@ -1068,7 +1255,7 @@ export default function InventoryPage() {
                       <div className="border-t border-gray-100 bg-gray-50/50 relative overflow-hidden">
                         <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-[#E46254]" />
                         <div className="px-6 py-3.5 flex justify-between items-center">
-                          <p className="text-[12px] text-gray-500 font-medium tracking-wide">
+                          <p className="text-[12px] text-gray-500 dark:text-zinc-400 font-medium tracking-wide">
                             {isLow ? (
                               <span className="text-[#E46254] font-semibold flex items-center gap-1">
                                 <AlertCircle size={13} /> Current stock ({item.stock} {item.storageUnit}) is at or below threshold ({item.threshold} {item.storageUnit})
@@ -1081,14 +1268,25 @@ export default function InventoryPage() {
                             <button 
                               onClick={(e) => {
                                 e.stopPropagation();
+                                handleDeleteMaterial(item.id, item.name);
+                              }}
+                              className="text-[12px] font-medium text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 flex items-center gap-1.5 transition-colors px-3 py-1.5 rounded-md shadow-xs cursor-pointer"
+                              title="Delete Material"
+                            >
+                              <Trash2 size={13} className="text-red-500" />
+                              Delete
+                            </button>
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
                                 setAdjustingItem(item);
                                 setAdjustType('DELIVERY');
                                 setAdjustAmount('');
                                 setAdjustNote('');
                               }}
-                              className="text-[12px] font-medium text-gray-700 bg-white border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center gap-1.5 transition-colors px-3 py-1.5 rounded-md shadow-xs cursor-pointer"
+                              className="text-[12px] font-medium text-gray-700 dark:text-zinc-200 bg-white border border-gray-200 hover:border-gray-300 hover:bg-gray-50 flex items-center gap-1.5 transition-colors px-3 py-1.5 rounded-md shadow-xs cursor-pointer"
                             >
-                              <Sliders size={13} className="text-gray-500" />
+                              <Sliders size={13} className="text-gray-500 dark:text-zinc-400" />
                               Adjust Stock
                             </button>
                             <button 
@@ -1129,15 +1327,15 @@ export default function InventoryPage() {
                   <Sliders size={16} />
                 </div>
                 <div>
-                  <h3 className="text-[14px] font-bold text-gray-900 leading-tight">Adjust Stock Level</h3>
-                  <p className="text-[12px] text-gray-500 font-medium">
-                    {adjustingItem.name} <span className="text-gray-400">({adjustingItem.category})</span>
+                  <h3 className="text-[14px] font-bold text-gray-900 dark:text-white leading-tight">Adjust Stock Level</h3>
+                  <p className="text-[12px] text-gray-500 dark:text-zinc-400 font-medium">
+                    {adjustingItem.name} <span className="text-gray-400 dark:text-[#5E5D72]">({adjustingItem.category})</span>
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setAdjustingItem(null)}
-                className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
+                className="p-1 text-gray-400 dark:text-[#5E5D72] hover:text-gray-700 dark:text-zinc-200 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
               >
                 <X size={18} />
               </button>
@@ -1149,14 +1347,14 @@ export default function InventoryPage() {
               {/* Current Stock Banner */}
               <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 flex items-center justify-between">
                 <div>
-                  <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider block">Current Live Stock</span>
-                  <span className="text-[16px] font-bold text-gray-900 tabular-nums">
+                  <span className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider block">Current Live Stock</span>
+                  <span className="text-[16px] font-bold text-gray-900 dark:text-white tabular-nums">
                     {adjustingItem.stock} {adjustingItem.storageUnit}
                   </span>
                 </div>
                 {adjustingItem.threshold != null && (
                   <div className="text-right">
-                    <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider block">Reorder Limit</span>
+                    <span className="text-[11px] font-semibold text-gray-400 dark:text-[#5E5D72] uppercase tracking-wider block">Reorder Limit</span>
                     <span className="text-[13px] font-medium text-gray-600 tabular-nums">
                       {adjustingItem.threshold} {adjustingItem.storageUnit}
                     </span>
@@ -1166,7 +1364,7 @@ export default function InventoryPage() {
 
               {/* Adjustment Mode Selector */}
               <div>
-                <label className="block text-[12px] font-semibold text-gray-700 mb-2">Operation Type</label>
+                <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-2">Operation Type</label>
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     type="button"
@@ -1177,7 +1375,7 @@ export default function InventoryPage() {
                         : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                     }`}
                   >
-                    <PackagePlus size={16} className={adjustType === 'DELIVERY' ? 'text-emerald-600' : 'text-gray-400'} />
+                    <PackagePlus size={16} className={adjustType === 'DELIVERY' ? 'text-emerald-600' : 'text-gray-400 dark:text-[#5E5D72]'} />
                     <span>Receive (+)</span>
                   </button>
 
@@ -1190,7 +1388,7 @@ export default function InventoryPage() {
                         : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                     }`}
                   >
-                    <Trash2 size={16} className={adjustType === 'WASTE' ? 'text-[#E46254]' : 'text-gray-400'} />
+                    <Trash2 size={16} className={adjustType === 'WASTE' ? 'text-[#E46254]' : 'text-gray-400 dark:text-[#5E5D72]'} />
                     <span>Waste (-)</span>
                   </button>
 
@@ -1203,7 +1401,7 @@ export default function InventoryPage() {
                         : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                     }`}
                   >
-                    <RefreshCw size={16} className={adjustType === 'MANUAL_COUNT' ? 'text-blue-600' : 'text-gray-400'} />
+                    <RefreshCw size={16} className={adjustType === 'MANUAL_COUNT' ? 'text-blue-600' : 'text-gray-400 dark:text-[#5E5D72]'} />
                     <span>Set Exact (=)</span>
                   </button>
                 </div>
@@ -1211,7 +1409,7 @@ export default function InventoryPage() {
 
               {/* Quantity Input */}
               <div>
-                <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">
+                <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">
                   {adjustType === 'DELIVERY' && `Quantity Received (Add to stock)`}
                   {adjustType === 'WASTE' && `Quantity Spoiled / Wasted (Deduct from stock)`}
                   {adjustType === 'MANUAL_COUNT' && `New Physical Verified Stock (Exact count)`}
@@ -1229,16 +1427,16 @@ export default function InventoryPage() {
                     onChange={(e) => setAdjustAmount(e.target.value)}
                     className="w-full text-[15px] font-bold border border-gray-200 rounded-xl px-3.5 py-2.5 focus:border-[#E46254] focus:ring-2 focus:ring-[#E46254]/10 focus:outline-none transition-all tabular-nums"
                   />
-                  <span className="absolute right-3.5 top-2.5 text-[13px] font-bold text-gray-400 pointer-events-none">
+                  <span className="absolute right-3.5 top-2.5 text-[13px] font-bold text-gray-400 dark:text-[#5E5D72] pointer-events-none">
                     {adjustingItem.storageUnit}
                   </span>
                 </div>
 
                 {/* Calculation Preview */}
                 {adjustAmount && !isNaN(parseFloat(adjustAmount)) && parseFloat(adjustAmount) > 0 && (
-                  <p className="text-[12px] font-medium text-gray-500 mt-1.5">
+                  <p className="text-[12px] font-medium text-gray-500 dark:text-zinc-400 mt-1.5">
                     Resulting stock will be:{' '}
-                    <span className="font-bold text-gray-900">
+                    <span className="font-bold text-gray-900 dark:text-white">
                       {adjustType === 'DELIVERY' && `${(adjustingItem.stock + parseFloat(adjustAmount)).toFixed(2)} ${adjustingItem.storageUnit}`}
                       {adjustType === 'WASTE' && `${(adjustingItem.stock - parseFloat(adjustAmount)).toFixed(2)} ${adjustingItem.storageUnit}`}
                       {adjustType === 'MANUAL_COUNT' && `${parseFloat(adjustAmount).toFixed(2)} ${adjustingItem.storageUnit}`}
@@ -1249,7 +1447,7 @@ export default function InventoryPage() {
 
               {/* Note / Reason */}
               <div>
-                <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Reason / Audit Note (Optional)</label>
+                <label className="block text-[12px] font-semibold text-gray-700 dark:text-zinc-200 mb-1.5">Reason / Audit Note (Optional)</label>
                 <input
                   type="text"
                   placeholder={
