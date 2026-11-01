@@ -36,7 +36,8 @@ export default async function MarketingHomepage() {
   const { data: { user } } = await supabase.auth.getUser();
 
   return (
-    <div className="min-h-screen bg-[#070709] text-zinc-100 antialiased selection:bg-[#E46254]/30 font-sans relative overflow-x-hidden">
+    <div className="min-h-screen bg-[#070709] text-zinc-100 antialiased selection:bg-[#E46254]/30 font-sans relative overflow-x-clip">
+
       
       {/* ========================================================
           MULTI-LAYERED AMBIENT REFRACTION ORBS & CAUSTIC LIGHTS

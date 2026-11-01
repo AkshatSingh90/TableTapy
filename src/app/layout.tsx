@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider, ThemeScript } from "@/components/ThemeProvider";
 
 // Injecting a crisp, enterprise-grade sans-serif font
 const inter = Inter({ 
@@ -16,10 +17,9 @@ export const metadata: Metadata = {
 export const viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
   viewportFit: "cover",
 };
+
 
 export default function RootLayout({
   children,
@@ -27,9 +27,17 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark" suppressHydrationWarning>
-      <body suppressHydrationWarning className={`${inter.className} bg-zinc-950 text-zinc-50 antialiased selection:bg-[#E46254]/30`}>
-        {children}
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <ThemeScript />
+      </head>
+      <body
+        suppressHydrationWarning
+        className={`${inter.className} bg-[#FBFBFC] dark:bg-[#070709] text-zinc-900 dark:text-zinc-100 antialiased selection:bg-[#E46254]/30`}
+      >
+        <ThemeProvider>
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );
