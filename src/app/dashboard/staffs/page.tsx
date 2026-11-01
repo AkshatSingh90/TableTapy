@@ -373,7 +373,7 @@ export default function StaffsDashboardPage() {
             <div>
               <p className="text-[12px] font-bold text-zinc-900">Visit Terminal URL</p>
               <p className="text-[11.5px] text-zinc-500 mt-0.5">
-                Open <span className="font-mono font-semibold text-[#E46254]">captain.tabletapy.in</span> on floor devices or mobile phones
+                Open <span className="font-mono font-semibold text-[#E46254]">captain.tabletapy.online</span> on floor devices or mobile phones
               </p>
             </div>
           </div>

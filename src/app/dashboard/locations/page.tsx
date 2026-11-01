@@ -519,7 +519,7 @@ export default function TableManagerPage() {
 
   const getPortalUrl = (code: string) => {
     const slug = restaurantSlug || 'menu';
-    return `https://${slug}.tabletapy.in/r/${code}?scan=true`;
+    return `https://${slug}.tabletapy.online/r/${code}?scan=true`;
   };
 
   const filteredLocations = locations.filter(loc => {
