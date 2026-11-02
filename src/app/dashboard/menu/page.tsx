@@ -714,16 +714,16 @@ export default function MenuManagerPage() {
   );
 
   return (
-    <div className="w-full min-h-full bg-[#FBFBFC] dark:bg-transparent text-zinc-900 dark:text-zinc-100 font-sans relative">
+    <div className="w-full min-h-full bg-[#FBFBFC] text-zinc-900 font-sans relative">
       
       {/* CENTERED POPUP FOR ADDING NEW OFFERING */}
       {isAddingMode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
           <div className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setIsAddingMode(false)} />
-          <div className="relative w-full max-w-2xl max-h-[90vh] bg-white dark:bg-[#1C1D26] border border-transparent dark:border-white/[0.08] rounded-[24px] shadow-2xl flex flex-col animate-in zoom-in-95 duration-300 overflow-hidden">
+          <div className="relative w-full max-w-2xl max-h-[90vh] bg-white border border-transparent rounded-[24px] shadow-2xl flex flex-col animate-in zoom-in-95 duration-300 overflow-hidden">
              
              {/* Modal Header (Back to Menu style) */}
-             <div className="px-6 py-4 border-b border-gray-100 dark:border-white/[0.07] flex items-center justify-between bg-white dark:bg-[#16171F] z-10 relative">
+             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white z-10 relative">
                <div className="flex items-center gap-3">
                  <button type="button" onClick={() => setIsAddingMode(false)} className="p-2 -ml-2 bg-gray-50 hover:bg-gray-100 text-gray-500 hover:text-gray-900 rounded-full transition-colors flex items-center justify-center">
                    <ArrowLeft size={18} /> 
@@ -1203,7 +1203,7 @@ export default function MenuManagerPage() {
       <div className="px-4 sm:px-8 lg:px-10 w-full pb-20">
         
         {/* CATEGORY & DIETARY FILTERS BAR */}
-        <div className="sticky top-0 z-20 pt-3 pb-3 bg-[#FBFBFC]/95 dark:bg-[#070709]/85 backdrop-blur-2xl border-b border-transparent dark:border-white/[0.06] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-4 pointer-events-auto">
+        <div className="sticky top-0 z-20 pt-3 pb-3 bg-[#FBFBFC]/95 backdrop-blur-2xl border-b border-transparent flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-4 pointer-events-auto">
           {/* Category Tabs */}
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 relative z-20">
             <button
@@ -1216,7 +1216,7 @@ export default function MenuManagerPage() {
               className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer relative z-20 ${
                 selectedCategoryFilter === 'ALL'
                   ? 'bg-gradient-to-r from-[#E46254] to-[#C2410C] text-white shadow-md shadow-[#E46254]/30 font-bold border-transparent'
-                  : 'bg-white dark:bg-white/[0.03] text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-white/[0.08] hover:border-zinc-300 dark:hover:border-white/[0.2] hover:text-zinc-900 dark:hover:text-white dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)]'
+                  : 'bg-white text-zinc-600 border border-zinc-200/80 hover:border-zinc-300 hover:text-zinc-900 '
               }`}
             >
               All Items ({menuItems.length})
@@ -1236,7 +1236,7 @@ export default function MenuManagerPage() {
                   className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer relative z-20 ${
                     isSelected
                       ? 'bg-gradient-to-r from-[#E46254] to-[#C2410C] text-white shadow-md shadow-[#E46254]/30 font-bold border-transparent'
-                      : 'bg-white dark:bg-white/[0.03] text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-white/[0.08] hover:border-zinc-300 dark:hover:border-white/[0.2] hover:text-zinc-900 dark:hover:text-white dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)]'
+                      : 'bg-white text-zinc-600 border border-zinc-200/80 hover:border-zinc-300 hover:text-zinc-900 '
                   }`}
                 >
                   {cat} ({count})
@@ -1252,14 +1252,14 @@ export default function MenuManagerPage() {
                 Searching &ldquo;{searchQuery}&rdquo;
               </span>
             )}
-            <div className="flex items-center p-0.5 bg-zinc-100/90 dark:bg-[#1C1D26] rounded-xl border border-zinc-200/60 dark:border-white/[0.07]">
+            <div className="flex items-center p-0.5 bg-zinc-100/90 rounded-xl border border-zinc-200/60">
               <button
                 type="button"
                 onClick={() => setDietaryFilter('ALL')}
                 className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
                   dietaryFilter === 'ALL'
-                    ? 'bg-white dark:bg-[#2A2B38] text-zinc-900 dark:text-white shadow-2xs'
-                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4]'
+                    ? 'bg-white text-zinc-900 shadow-2xs'
+                    : 'text-zinc-500 hover:text-zinc-900 '
                 }`}
               >
                 All
@@ -1270,7 +1270,7 @@ export default function MenuManagerPage() {
                 className={`px-2.5 py-1 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
                   dietaryFilter === 'VEG'
                     ? 'bg-white text-emerald-700 shadow-2xs'
-                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4]'
+                    : 'text-zinc-500 hover:text-zinc-900 '
                 }`}
               >
                 <div className="w-3 h-3 border border-emerald-600 flex items-center justify-center rounded-[2px] bg-white">
@@ -1284,7 +1284,7 @@ export default function MenuManagerPage() {
                 className={`px-2.5 py-1 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
                   dietaryFilter === 'NON_VEG'
                     ? 'bg-white text-rose-700 shadow-2xs'
-                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4]'
+                    : 'text-zinc-500 hover:text-zinc-900 '
                 }`}
               >
                 <div className="w-3 h-3 border border-[#8B2500] flex items-center justify-center rounded-[2px] bg-white">
@@ -1345,8 +1345,8 @@ export default function MenuManagerPage() {
                 {/* Clean Category Header - No partition lines */}
                 <div className="flex items-center justify-between py-1">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-[15px] font-bold text-zinc-900 dark:text-white tracking-tight">{category}</h2>
-                    <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 bg-zinc-100 dark:bg-white/[0.06] px-2 py-0.5 rounded-full">
+                    <h2 className="text-[15px] font-bold text-zinc-900 tracking-tight">{category}</h2>
+                    <span className="text-[10px] font-semibold text-zinc-500 bg-zinc-100 px-2 py-0.5 rounded-full">
                       {allItemsInCategory.length}
                     </span>
                   </div>
@@ -1397,7 +1397,7 @@ export default function MenuManagerPage() {
                                      </div>
                                      <div className="min-w-0 flex-1">
                                        <h3 className={`text-[13px] font-bold tracking-tight truncate leading-snug transition-colors ${
-                                         item.is_available ? 'text-zinc-900 dark:text-white group-hover:text-[#E46254]' : 'text-zinc-500 dark:text-zinc-400'
+                                         item.is_available ? 'text-zinc-900 group-hover:text-[#E46254]' : 'text-zinc-500 '
                                        }`}>
                                          {item.name}
                                        </h3>
@@ -1430,7 +1430,7 @@ export default function MenuManagerPage() {
                                            .join(' · ') || formatCurrency(item.base_price)}
                                        </span>
                                      ) : (
-                                       <span className="text-[13px] font-bold text-zinc-900 dark:text-white font-mono tracking-tight">
+                                       <span className="text-[13px] font-bold text-zinc-900 font-mono tracking-tight">
                                          {formatCurrency(item.base_price)}
                                        </span>
                                      )}
@@ -1462,9 +1462,9 @@ export default function MenuManagerPage() {
         {selectedItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-gray-900/30 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setSelectedItem(null)} />
-            <div className="relative bg-white dark:bg-[#1C1D26] border border-transparent dark:border-white/[0.08] rounded-[24px] shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 fade-in slide-in-from-bottom-8 duration-300 text-zinc-900 dark:text-white">
+            <div className="relative bg-white border border-transparent rounded-[24px] shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 fade-in slide-in-from-bottom-8 duration-300 text-zinc-900">
                
-               <div className="relative h-28 bg-gradient-to-b from-zinc-50 dark:from-[#22232E] to-white dark:to-[#1C1D26] flex items-center justify-center border-b border-zinc-100 dark:border-white/[0.07]">
+               <div className="relative h-28 bg-gradient-to-b from-zinc-50 to-white flex items-center justify-center border-b border-zinc-100">
                   <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center text-zinc-600 shadow-inner">
                     <ChefHat size={34} strokeWidth={1.75} />
                   </div>
@@ -1480,7 +1480,7 @@ export default function MenuManagerPage() {
                     <button
                       type="button"
                       onClick={() => setSelectedItem(null)}
-                      className="p-2 bg-white/90 hover:bg-white text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-[#F0EEF4] rounded-full shadow-2xs border border-zinc-200/60 transition-all cursor-pointer"
+                      className="p-2 bg-white/90 hover:bg-white text-zinc-500 hover:text-zinc-900 rounded-full shadow-2xs border border-zinc-200/60 transition-all cursor-pointer"
                     >
                       <X size={15}/>
                     </button>

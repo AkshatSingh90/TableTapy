@@ -355,7 +355,8 @@ export default function PosPage() {
         // B. Tables from SQLite
         const localTables = await LocalSqliteStore.getTables(restId);
         if (localTables && localTables.length > 0) {
-          const enriched = localTables.map((loc) => ({
+          const validTables = localTables.filter((loc) => !loc.restaurant_id || loc.restaurant_id === restId);
+          const enriched = validTables.map((loc) => ({
             ...loc,
             zone: loadedTableZones[loc.id] || loc.zone || "Main Floor",
           }));
@@ -481,7 +482,8 @@ export default function PosPage() {
             name: l.name,
             type: l.type,
             zone: currentZones[l.id] || "Main Floor",
-          }))
+          })),
+          true // replaceAll = true to flush out old stale/demo tables
         );
       }
 
@@ -515,7 +517,8 @@ export default function PosPage() {
             description: d.description,
             variantsConfig: extractVariantsFromDescription(d.description, Number(d.base_price || 0)).config,
             updated_at: new Date().toISOString(),
-          }))
+          })),
+          true // replaceAll = true to flush out old stale/demo items
         );
       }
 
@@ -2653,10 +2656,10 @@ export default function PosPage() {
 
   /* ─── Render View ────────────────────────────────────────────────── */
   return (
-    <div className="flex flex-col h-full bg-white dark:bg-transparent text-zinc-900 dark:text-zinc-100 select-none overflow-hidden font-sans">
+    <div className="flex flex-col h-full bg-white text-zinc-900 select-none overflow-hidden font-sans">
       
       {/* ── FLOOR GRID VIEW ── */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6 slim-scrollbar bg-[#FAF8F7]/40 dark:bg-transparent">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 slim-scrollbar bg-[#FAF8F7]/40">
         {loading ? (
           <div className="h-64 flex flex-col items-center justify-center gap-3 text-zinc-400">
             <div className="w-8 h-8 border-2 border-zinc-200 border-t-[#E46254] rounded-full animate-spin" />
@@ -2674,13 +2677,13 @@ export default function PosPage() {
             {/* ── Floor Zone Filter Bar (Apple Milled Glass Dock) ── */}
             {allZones.length > 1 && (
               <div className="flex items-center overflow-x-auto pb-2 scrollbar-none">
-                <div className="p-1 rounded-2xl bg-zinc-200/60 dark:bg-zinc-950/70 backdrop-blur-2xl border border-zinc-200/80 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.1),0_8px_24px_rgba(0,0,0,0.5)] inline-flex items-center gap-1 max-w-full">
+                <div className="p-1 rounded-2xl bg-zinc-200/60 backdrop-blur-2xl border border-zinc-200/80 inline-flex items-center gap-1 max-w-full">
                   <button
                     onClick={() => setSelectedZone("ALL")}
                     className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
                       selectedZone === "ALL"
-                        ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-zinc-900 dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30 border border-zinc-200/60 dark:border-transparent"
-                        : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/60 dark:hover:bg-white/[0.05]"
+                        ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/60 "
+                        : "text-zinc-600 hover:text-zinc-900 hover:bg-white/60 "
                     }`}
                   >
                     All Zones ({locations.length})
@@ -2695,8 +2698,8 @@ export default function PosPage() {
                         onClick={() => setSelectedZone(z)}
                         className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
                           selectedZone === z
-                            ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] text-zinc-900 dark:text-white shadow-xs dark:shadow-md dark:shadow-[#E46254]/30 border border-zinc-200/60 dark:border-transparent"
-                            : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-white/60 dark:hover:bg-white/[0.05]"
+                            ? "bg-white text-zinc-900 shadow-xs border border-zinc-200/60 "
+                            : "text-zinc-600 hover:text-zinc-900 hover:bg-white/60 "
                         }`}
                       >
                         {z} ({count})
@@ -2724,10 +2727,10 @@ export default function PosPage() {
 
                   return (
                     <div key={zoneName} className="space-y-2.5">
-                      <div className="flex items-center justify-between pb-2 border-b border-zinc-200/70 dark:border-white/[0.07]">
+                      <div className="flex items-center justify-between pb-2 border-b border-zinc-200/70">
                         <div className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full bg-[#E46254] dark:shadow-[0_0_8px_#E46254]" />
-                          <h3 className="text-xs sm:text-sm font-bold tracking-tight text-zinc-900 dark:text-white uppercase">
+                          <div className="w-2 h-2 rounded-full bg-[#E46254]" />
+                          <h3 className="text-xs sm:text-sm font-bold tracking-tight text-zinc-900 uppercase">
                             {zoneName}
                           </h3>
                           <span className="text-[11px] font-semibold text-zinc-400">
@@ -2765,39 +2768,39 @@ export default function PosPage() {
                                 onClick={() => handleOpenTableCommand(table.name, table.id)}
                                 className={`group relative rounded-2xl p-3.5 sm:p-4 flex flex-col justify-between cursor-pointer min-h-[140px] transition-all duration-200 select-none active:scale-[0.98] ${
                                   hasNewRound
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-[#E46254]/[0.18] dark:via-[#E46254]/[0.05] dark:to-transparent border-2 border-[#E46254] shadow-lg shadow-[#E46254]/20 dark:shadow-[inset_0_1px_2px_0_rgba(255,255,255,0.25),0_0_36px_rgba(228,98,84,0.35),0_8px_24px_rgba(0,0,0,0.6)] ring-2 ring-[#E46254]/30 dark:ring-[#E46254]/40 table-attention-shake"
+                                    ? "bg-white border-2 border-[#E46254] shadow-lg shadow-[#E46254]/20 ring-2 ring-[#E46254]/30 table-attention-shake"
                                     : hasBillRequest
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-rose-500/[0.12] dark:via-rose-500/[0.03] dark:to-transparent border-2 border-amber-400 dark:border-rose-500/50 shadow-md shadow-amber-400/20 dark:shadow-[inset_0_1px_1px_0_rgba(255,180,190,0.2),0_0_32px_rgba(244,63,94,0.2),0_8px_24px_rgba(0,0,0,0.6)] table-attention-shake"
+                                    ? "bg-white border-2 border-amber-400 shadow-md shadow-amber-400/20 table-attention-shake"
                                     : isPaid
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-emerald-500/[0.1] dark:via-emerald-500/[0.02] dark:to-transparent border-2 border-emerald-500/80 dark:border-emerald-500/50 shadow-xs hover:border-emerald-600 dark:hover:border-emerald-400 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(160,255,200,0.2),0_0_24px_rgba(16,185,129,0.18),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    ? "bg-white border-2 border-emerald-500/80 shadow-xs hover:border-emerald-600 hover:shadow-md "
                                     : hasUpiVerifyRequest
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-blue-500/[0.1] dark:via-blue-500/[0.02] dark:to-transparent border-2 border-blue-400 dark:border-blue-500/50 shadow-xs hover:border-blue-500 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(180,220,255,0.2),0_0_24px_rgba(59,130,246,0.15),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    ? "bg-white border-2 border-blue-400 shadow-xs hover:border-blue-500 hover:shadow-md "
                                     : isOccupied
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-amber-500/[0.08] dark:via-amber-500/[0.025] dark:to-transparent border border-[#E46254]/75 dark:border-amber-500/35 shadow-[0_2px_12px_-2px_rgba(228,98,84,0.18),0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[inset_0_1px_1px_0_rgba(255,210,130,0.18),0_0_24px_rgba(245,158,11,0.12),0_8px_24px_rgba(0,0,0,0.6)] ring-1 ring-[#E46254]/25 dark:ring-transparent hover:border-[#E46254] dark:hover:border-amber-500/60 hover:shadow-[0_4px_18px_-2px_rgba(228,98,84,0.25)]"
-                                    : "bg-white/90 dark:bg-gradient-to-b dark:from-white/[0.04] dark:via-white/[0.015] dark:to-transparent backdrop-blur-2xl border border-zinc-200/80 dark:border-white/[0.08] shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08),0_8px_24px_rgba(0,0,0,0.5)] hover:bg-white dark:hover:from-white/[0.07] dark:hover:border-white/[0.22] hover:border-zinc-300 hover:shadow-md dark:hover:shadow-[0_12px_32px_rgba(0,0,0,0.7)]"
+                                    ? "bg-white border border-[#E46254]/75 shadow-[0_2px_12px_-2px_rgba(228,98,84,0.18),0_1px_3px_rgba(0,0,0,0.04)] ring-1 ring-[#E46254]/25 hover:border-[#E46254] hover:shadow-[0_4px_18px_-2px_rgba(228,98,84,0.25)]"
+                                    : "bg-white/90 backdrop-blur-2xl border border-zinc-200/80 shadow-xs hover:bg-white hover:border-zinc-300 hover:shadow-md "
                                 }`}
                               >
                                 {/* Top Specular Edge Glow for Running & Alert Cards */}
                                 {hasNewRound && (
-                                  <div className="absolute top-0 left-4 right-4 h-1 bg-[#E46254] rounded-b-full shadow-xs dark:shadow-[0_0_10px_#E46254]" />
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-[#E46254] rounded-b-full shadow-xs" />
                                 )}
                                 {hasBillRequest && !hasNewRound && (
-                                  <div className="absolute top-0 left-4 right-4 h-1 bg-amber-400 dark:bg-rose-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#f43f5e]" />
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-amber-400 rounded-b-full shadow-xs" />
                                 )}
                                 {isPaid && !hasNewRound && (
-                                  <div className="absolute top-0 left-4 right-4 h-1 bg-emerald-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#10b981]" />
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-emerald-500 rounded-b-full shadow-xs" />
                                 )}
                                 {isOccupied && !hasNewRound && !hasBillRequest && !isPaid && (
-                                  <div className="absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-[#E46254] dark:via-amber-400/80 to-transparent rounded-full opacity-90" />
+                                  <div className="absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-[#E46254] to-transparent rounded-full opacity-90" />
                                 )}
 
                                 {/* ── 1. Top Row: Table Name + Capacity & Status Chip ── */}
                                 <div className="flex items-start justify-between gap-1.5">
                                   <div>
-                                    <span className="font-black text-lg sm:text-xl tracking-tight text-zinc-900 dark:text-white group-hover:text-[#E46254] dark:group-hover:text-amber-300 transition-colors leading-none">
+                                    <span className="font-black text-lg sm:text-xl tracking-tight text-zinc-900 group-hover:text-[#E46254] transition-colors leading-none">
                                       {table.name}
                                     </span>
-                                    <div className="flex items-center gap-1 mt-1 text-zinc-400 dark:text-zinc-500">
+                                    <div className="flex items-center gap-1 mt-1 text-zinc-400">
                                       <Users size={11} strokeWidth={2} />
                                       <span className="text-[11px] font-semibold tracking-tight">{capacityCount}</span>
                                     </div>
@@ -2806,31 +2809,31 @@ export default function PosPage() {
                                   {/* Status Badges: True Translucent Crystal Badges */}
                                   <div>
                                     {hasNewRound ? (
-                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wider shadow-xs dark:shadow-[0_0_12px_rgba(228,98,84,0.5)] animate-pulse">
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wider shadow-xs animate-pulse">
                                         New Order
                                       </span>
                                     ) : isPaid ? (
-                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/80 text-[10px] font-bold tracking-wide">
                                         <CheckCircle2 size={10} />
                                         <span>Paid</span>
                                       </span>
                                     ) : hasBillRequest ? (
-                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-50 dark:bg-rose-500/15 text-amber-800 dark:text-rose-300 border border-amber-200/80 dark:border-rose-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(244,63,94,0.2)]">
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200/80 text-[10px] font-bold tracking-wide">
                                         <Receipt size={10} />
                                         <span>Bill</span>
                                       </span>
                                     ) : hasUpiVerifyRequest ? (
-                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-500/30 text-[10px] font-bold tracking-wide">
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80 text-[10px] font-bold tracking-wide">
                                         <CreditCard size={10} />
                                         <span>UPI</span>
                                       </span>
                                     ) : isOccupied ? (
-                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#E46254] dark:text-amber-300 bg-[#E46254]/10 dark:bg-amber-500/15 border border-[#E46254]/20 dark:border-amber-500/30 dark:shadow-[0_0_10px_rgba(245,158,11,0.2)]">
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#E46254] bg-[#E46254]/10 border border-[#E46254]/20">
                                         Running
                                       </span>
                                     ) : (
-                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-100/80 dark:bg-emerald-500/10 text-zinc-500 dark:text-emerald-400 border border-zinc-200/60 dark:border-emerald-500/20 text-[10px] font-semibold dark:shadow-[0_0_8px_rgba(16,185,129,0.15)]">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-emerald-400" />
+                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-100/80 text-zinc-500 border border-zinc-200/60 text-[10px] font-semibold">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
                                         <span>Free</span>
                                       </span>
                                     )}
@@ -2841,20 +2844,20 @@ export default function PosPage() {
                                 <div className="my-2">
                                   {isOccupied ? (
                                     <div className="space-y-0.5">
-                                      <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-200">
-                                        <User size={11} className="text-zinc-400 dark:text-zinc-500 shrink-0" />
+                                      <div className="flex items-center gap-1.5 text-zinc-800">
+                                        <User size={11} className="text-zinc-400 shrink-0" />
                                         <span className="text-[12px] font-bold truncate">
                                           {session?.customerName || `Seated Guest`}
                                         </span>
                                       </div>
-                                      <p className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 pl-4">
+                                      <p className="text-[11px] font-medium text-zinc-400 pl-4">
                                         {session?.rounds?.length || 0} {(session?.rounds?.length || 0) === 1 ? "round" : "rounds"} · {session?.allItems?.length || 0} items
                                       </p>
                                     </div>
                                   ) : (
                                     <div className="py-1">
-                                      <span className="text-[11.5px] font-medium text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-700 dark:group-hover:text-[#E46254] transition-colors flex items-center gap-1">
-                                        <Plus size={12} className="text-zinc-300 dark:text-zinc-600 group-hover:text-[#E46254] transition-colors" />
+                                      <span className="text-[11.5px] font-medium text-zinc-400 group-hover:text-zinc-700 transition-colors flex items-center gap-1">
+                                        <Plus size={12} className="text-zinc-300 group-hover:text-[#E46254] transition-colors" />
                                         <span>Tap to Seat</span>
                                       </span>
                                     </div>
@@ -2862,27 +2865,27 @@ export default function PosPage() {
                                 </div>
 
                                 {/* ── 3. Bottom Row: Bill Total + Live Elapsed Time ── */}
-                                <div className="pt-2 flex items-baseline justify-between border-t border-zinc-100/80 dark:border-white/[0.05]">
+                                <div className="pt-2 flex items-baseline justify-between border-t border-zinc-100/80">
                                   {isOccupied ? (
                                     <>
-                                      <span className="text-[17px] font-black text-zinc-900 dark:text-white font-mono tracking-tight tabular-nums">
+                                      <span className="text-[17px] font-black text-zinc-900 font-mono tracking-tight tabular-nums">
                                         {totalFormatted}
                                       </span>
                                       {elapsedMinutes > 0 ? (
-                                        <span className="flex items-center gap-1 text-[10.5px] font-mono text-zinc-600 dark:text-zinc-300 font-semibold bg-zinc-100/90 dark:bg-white/[0.06] px-1.5 py-0.5 rounded-md border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_rgba(255,255,255,0.06)]">
-                                          <Clock size={10} className="text-zinc-400 dark:text-zinc-400" />
+                                        <span className="flex items-center gap-1 text-[10.5px] font-mono text-zinc-600 font-semibold bg-zinc-100/90 px-1.5 py-0.5 rounded-md border border-zinc-200/60">
+                                          <Clock size={10} className="text-zinc-400" />
                                           <span>{elapsedMinutes}m</span>
                                         </span>
                                       ) : (
-                                        <span className="text-[10px] font-mono text-emerald-700 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-500/15 px-1.5 py-0.5 rounded-md border border-emerald-200/60 dark:border-emerald-500/25">
+                                        <span className="text-[10px] font-mono text-emerald-700 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded-md border border-emerald-200/60">
                                           Just in
                                         </span>
                                       )}
                                     </>
                                   ) : (
                                     <>
-                                      <span className="text-xs font-mono text-zinc-400 dark:text-zinc-600 font-medium">Ready</span>
-                                      <span className="text-[11px] font-semibold text-zinc-400 dark:text-zinc-400 group-hover:text-zinc-700 dark:group-hover:text-white flex items-center gap-0.5 transition-colors">
+                                      <span className="text-xs font-mono text-zinc-400 font-medium">Ready</span>
+                                      <span className="text-[11px] font-semibold text-zinc-400 group-hover:text-zinc-700 flex items-center gap-0.5 transition-colors">
                                         <span>Open</span>
                                         <ArrowUpRight size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
                                       </span>
@@ -2928,39 +2931,39 @@ export default function PosPage() {
                                 onClick={() => handleOpenTableCommand(table.name, table.id)}
                                 className={`group relative rounded-2xl p-3.5 sm:p-4 flex flex-col justify-between cursor-pointer min-h-[140px] transition-all duration-200 select-none active:scale-[0.98] ${
                                   hasNewRound
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-[#E46254]/[0.18] dark:via-[#E46254]/[0.05] dark:to-transparent border-2 border-[#E46254] shadow-lg shadow-[#E46254]/20 dark:shadow-[inset_0_1px_2px_0_rgba(255,255,255,0.25),0_0_36px_rgba(228,98,84,0.35),0_8px_24px_rgba(0,0,0,0.6)] ring-2 ring-[#E46254]/30 dark:ring-[#E46254]/40 table-attention-shake"
+                                    ? "bg-white border-2 border-[#E46254] shadow-lg shadow-[#E46254]/20 ring-2 ring-[#E46254]/30 table-attention-shake"
                                     : hasBillRequest
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-rose-500/[0.12] dark:via-rose-500/[0.03] dark:to-transparent border-2 border-amber-400 dark:border-rose-500/50 shadow-md shadow-amber-400/20 dark:shadow-[inset_0_1px_1px_0_rgba(255,180,190,0.2),0_0_32px_rgba(244,63,94,0.2),0_8px_24px_rgba(0,0,0,0.6)] table-attention-shake"
+                                    ? "bg-white border-2 border-amber-400 shadow-md shadow-amber-400/20 table-attention-shake"
                                     : isPaid
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-emerald-500/[0.1] dark:via-emerald-500/[0.02] dark:to-transparent border-2 border-emerald-500/80 dark:border-emerald-500/50 shadow-xs hover:border-emerald-600 dark:hover:border-emerald-400 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(160,255,200,0.2),0_0_24px_rgba(16,185,129,0.18),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    ? "bg-white border-2 border-emerald-500/80 shadow-xs hover:border-emerald-600 hover:shadow-md "
                                     : hasUpiVerifyRequest
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-blue-500/[0.1] dark:via-blue-500/[0.02] dark:to-transparent border-2 border-blue-400 dark:border-blue-500/50 shadow-xs hover:border-blue-500 hover:shadow-md dark:shadow-[inset_0_1px_1px_0_rgba(180,220,255,0.2),0_0_24px_rgba(59,130,246,0.15),0_8px_24px_rgba(0,0,0,0.6)]"
+                                    ? "bg-white border-2 border-blue-400 shadow-xs hover:border-blue-500 hover:shadow-md "
                                     : isOccupied
-                                    ? "bg-white dark:bg-gradient-to-b dark:from-amber-500/[0.08] dark:via-amber-500/[0.025] dark:to-transparent border border-[#E46254]/75 dark:border-amber-500/35 shadow-[0_2px_12px_-2px_rgba(228,98,84,0.18),0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[inset_0_1px_1px_0_rgba(255,210,130,0.18),0_0_24px_rgba(245,158,11,0.12),0_8px_24px_rgba(0,0,0,0.6)] ring-1 ring-[#E46254]/25 dark:ring-transparent hover:border-[#E46254] dark:hover:border-amber-500/60 hover:shadow-[0_4px_18px_-2px_rgba(228,98,84,0.25)]"
-                                    : "bg-white/90 dark:bg-gradient-to-b dark:from-white/[0.04] dark:via-white/[0.015] dark:to-transparent backdrop-blur-2xl border border-zinc-200/80 dark:border-white/[0.08] shadow-xs dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08),0_8px_24px_rgba(0,0,0,0.5)] hover:bg-white dark:hover:from-white/[0.07] dark:hover:border-white/[0.22] hover:border-zinc-300 hover:shadow-md dark:hover:shadow-[0_12px_32px_rgba(0,0,0,0.7)]"
+                                    ? "bg-white border border-[#E46254]/75 shadow-[0_2px_12px_-2px_rgba(228,98,84,0.18),0_1px_3px_rgba(0,0,0,0.04)] ring-1 ring-[#E46254]/25 hover:border-[#E46254] hover:shadow-[0_4px_18px_-2px_rgba(228,98,84,0.25)]"
+                                    : "bg-white/90 backdrop-blur-2xl border border-zinc-200/80 shadow-xs hover:bg-white hover:border-zinc-300 hover:shadow-md "
                                 }`}
                               >
                                 {/* Top Specular Edge Glow for Running & Alert Cards */}
                                 {hasNewRound && (
-                                  <div className="absolute top-0 left-4 right-4 h-1 bg-[#E46254] rounded-b-full shadow-xs dark:shadow-[0_0_10px_#E46254]" />
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-[#E46254] rounded-b-full shadow-xs" />
                                 )}
                                 {hasBillRequest && !hasNewRound && (
-                                  <div className="absolute top-0 left-4 right-4 h-1 bg-amber-400 dark:bg-rose-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#f43f5e]" />
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-amber-400 rounded-b-full shadow-xs" />
                                 )}
                                 {isPaid && !hasNewRound && (
-                                  <div className="absolute top-0 left-4 right-4 h-1 bg-emerald-500 rounded-b-full shadow-xs dark:shadow-[0_0_10px_#10b981]" />
+                                  <div className="absolute top-0 left-4 right-4 h-1 bg-emerald-500 rounded-b-full shadow-xs" />
                                 )}
                                 {isOccupied && !hasNewRound && !hasBillRequest && !isPaid && (
-                                  <div className="absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-[#E46254] dark:via-amber-400/80 to-transparent rounded-full opacity-90" />
+                                  <div className="absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-[#E46254] to-transparent rounded-full opacity-90" />
                                 )}
 
                                 {/* ── 1. Top Row: Table Name + Capacity & Status Chip ── */}
                                 <div className="flex items-start justify-between gap-1.5">
                                   <div>
-                                    <span className="font-black text-lg sm:text-xl tracking-tight text-zinc-900 dark:text-white group-hover:text-[#E46254] dark:group-hover:text-amber-300 transition-colors leading-none">
+                                    <span className="font-black text-lg sm:text-xl tracking-tight text-zinc-900 group-hover:text-[#E46254] transition-colors leading-none">
                                       {table.name}
                                     </span>
-                                    <div className="flex items-center gap-1 mt-1 text-zinc-400 dark:text-zinc-500">
+                                    <div className="flex items-center gap-1 mt-1 text-zinc-400">
                                       <Users size={11} strokeWidth={2} />
                                       <span className="text-[11px] font-semibold tracking-tight">{capacityCount}</span>
                                     </div>
@@ -2969,31 +2972,31 @@ export default function PosPage() {
                                   {/* Status Badges: True Translucent Crystal Badges */}
                                   <div>
                                     {hasNewRound ? (
-                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wider shadow-xs dark:shadow-[0_0_12px_rgba(228,98,84,0.5)] animate-pulse">
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[#E46254] text-white text-[10px] font-black tracking-wider shadow-xs animate-pulse">
                                         New Order
                                       </span>
                                     ) : isPaid ? (
-                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/80 text-[10px] font-bold tracking-wide">
                                         <CheckCircle2 size={10} />
                                         <span>Paid</span>
                                       </span>
                                     ) : hasBillRequest ? (
-                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-50 dark:bg-rose-500/15 text-amber-800 dark:text-rose-300 border border-amber-200/80 dark:border-rose-500/30 text-[10px] font-bold tracking-wide dark:shadow-[0_0_10px_rgba(244,63,94,0.2)]">
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200/80 text-[10px] font-bold tracking-wide">
                                         <Receipt size={10} />
                                         <span>Bill</span>
                                       </span>
                                     ) : hasUpiVerifyRequest ? (
-                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-500/30 text-[10px] font-bold tracking-wide">
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80 text-[10px] font-bold tracking-wide">
                                         <CreditCard size={10} />
                                         <span>UPI</span>
                                       </span>
                                     ) : isOccupied ? (
-                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#E46254] dark:text-amber-300 bg-[#E46254]/10 dark:bg-amber-500/15 border border-[#E46254]/20 dark:border-amber-500/30 dark:shadow-[0_0_10px_rgba(245,158,11,0.2)]">
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold text-[#E46254] bg-[#E46254]/10 border border-[#E46254]/20">
                                         Running
                                       </span>
                                     ) : (
-                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-100/80 dark:bg-emerald-500/10 text-zinc-500 dark:text-emerald-400 border border-zinc-200/60 dark:border-emerald-500/20 text-[10px] font-semibold dark:shadow-[0_0_8px_rgba(16,185,129,0.15)]">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-emerald-400" />
+                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-100/80 text-zinc-500 border border-zinc-200/60 text-[10px] font-semibold">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
                                         <span>Free</span>
                                       </span>
                                     )}
@@ -3004,20 +3007,20 @@ export default function PosPage() {
                                 <div className="my-2">
                                   {isOccupied ? (
                                     <div className="space-y-0.5">
-                                      <div className="flex items-center gap-1.5 text-zinc-800 dark:text-zinc-200">
-                                        <User size={11} className="text-zinc-400 dark:text-zinc-500 shrink-0" />
+                                      <div className="flex items-center gap-1.5 text-zinc-800">
+                                        <User size={11} className="text-zinc-400 shrink-0" />
                                         <span className="text-[12px] font-bold truncate">
                                           {session?.customerName || `Seated Guest`}
                                         </span>
                                       </div>
-                                      <p className="text-[11px] font-medium text-zinc-400 dark:text-zinc-500 pl-4">
+                                      <p className="text-[11px] font-medium text-zinc-400 pl-4">
                                         {session?.rounds?.length || 0} {(session?.rounds?.length || 0) === 1 ? "round" : "rounds"} · {session?.allItems?.length || 0} items
                                       </p>
                                     </div>
                                   ) : (
                                     <div className="py-1">
-                                      <span className="text-[11.5px] font-medium text-zinc-400 dark:text-zinc-500 group-hover:text-zinc-700 dark:group-hover:text-[#E46254] transition-colors flex items-center gap-1">
-                                        <Plus size={12} className="text-zinc-300 dark:text-zinc-600 group-hover:text-[#E46254] transition-colors" />
+                                      <span className="text-[11.5px] font-medium text-zinc-400 group-hover:text-zinc-700 transition-colors flex items-center gap-1">
+                                        <Plus size={12} className="text-zinc-300 group-hover:text-[#E46254] transition-colors" />
                                         <span>Tap to Seat</span>
                                       </span>
                                     </div>
@@ -3025,27 +3028,27 @@ export default function PosPage() {
                                 </div>
 
                                 {/* ── 3. Bottom Row: Bill Total + Live Elapsed Time ── */}
-                                <div className="pt-2 flex items-baseline justify-between border-t border-zinc-100/80 dark:border-white/[0.05]">
+                                <div className="pt-2 flex items-baseline justify-between border-t border-zinc-100/80">
                                   {isOccupied ? (
                                     <>
-                                      <span className="text-[17px] font-black text-zinc-900 dark:text-white font-mono tracking-tight tabular-nums">
+                                      <span className="text-[17px] font-black text-zinc-900 font-mono tracking-tight tabular-nums">
                                         {totalFormatted}
                                       </span>
                                       {elapsedMinutes > 0 ? (
-                                        <span className="flex items-center gap-1 text-[10.5px] font-mono text-zinc-600 dark:text-zinc-300 font-semibold bg-zinc-100/90 dark:bg-white/[0.06] px-1.5 py-0.5 rounded-md border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_rgba(255,255,255,0.06)]">
-                                          <Clock size={10} className="text-zinc-400 dark:text-zinc-400" />
+                                        <span className="flex items-center gap-1 text-[10.5px] font-mono text-zinc-600 font-semibold bg-zinc-100/90 px-1.5 py-0.5 rounded-md border border-zinc-200/60">
+                                          <Clock size={10} className="text-zinc-400" />
                                           <span>{elapsedMinutes}m</span>
                                         </span>
                                       ) : (
-                                        <span className="text-[10px] font-mono text-emerald-700 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-500/15 px-1.5 py-0.5 rounded-md border border-emerald-200/60 dark:border-emerald-500/25">
+                                        <span className="text-[10px] font-mono text-emerald-700 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded-md border border-emerald-200/60">
                                           Just in
                                         </span>
                                       )}
                                     </>
                                   ) : (
                                     <>
-                                      <span className="text-xs font-mono text-zinc-400 dark:text-zinc-600 font-medium">Ready</span>
-                                      <span className="text-[11px] font-semibold text-zinc-400 dark:text-zinc-400 group-hover:text-zinc-700 dark:group-hover:text-white flex items-center gap-0.5 transition-colors">
+                                      <span className="text-xs font-mono text-zinc-400 font-medium">Ready</span>
+                                      <span className="text-[11px] font-semibold text-zinc-400 group-hover:text-zinc-700 flex items-center gap-0.5 transition-colors">
                                         <span>Open</span>
                                         <ArrowUpRight size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
                                       </span>
@@ -3149,7 +3152,7 @@ export default function PosPage() {
                     className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer whitespace-nowrap select-none ${
                       selectedDrawerCat === cat
                         ? "bg-[#E46254] text-white shadow-xs shadow-[#E46254]/25 scale-[1.02]"
-                        : "bg-white dark:bg-[#1C1D26] hover:bg-[#E46254]/10 text-zinc-700 dark:text-zinc-400 hover:text-[#E46254] dark:hover:text-[#E46254] border border-zinc-200/80 dark:border-white/[0.08] hover:border-[#E46254]/30 shadow-2xs"
+                        : "bg-white hover:bg-[#E46254]/10 text-zinc-700 hover:text-[#E46254] border border-zinc-200/80 hover:border-[#E46254]/30 shadow-2xs"
                     }`}
                   >
                     {cat === "ALL" ? "All Items" : cat}
@@ -3325,7 +3328,7 @@ export default function PosPage() {
                   }`}
                 >
                   <span>Current Order</span>
-                  <span className="font-mono text-[11px] text-[#E46254] font-bold">
+                  <span suppressHydrationWarning className="font-mono text-[11px] text-[#E46254] font-bold">
                     #{currentToken}
                   </span>
                 </button>
@@ -3924,17 +3927,17 @@ export default function PosPage() {
       {/* ── FULL-SCREEN TABLE COMMAND STATION MODAL ── */}
       {/* ═════════════════════════════════════════════════════════════════ */}
       {activeTableModal && (
-        <div className="fixed inset-0 z-50 bg-white dark:bg-[#070709] text-zinc-900 dark:text-white flex flex-col animate-in fade-in duration-100">
+        <div className="fixed inset-0 z-50 bg-white text-zinc-900 flex flex-col animate-in fade-in duration-100">
           
           {/* 1. Command Station Header Deck (Luxury Architectural Minimalist) */}
-          <div className="h-16 bg-white dark:bg-zinc-950/80 backdrop-blur-2xl border-b border-zinc-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.1),0_8px_32px_rgba(0,0,0,0.6)] px-4 sm:px-6 flex items-center justify-between shrink-0">
+          <div className="h-16 bg-white backdrop-blur-2xl border-b border-zinc-100 px-4 sm:px-6 flex items-center justify-between shrink-0">
             
             {/* Left: Back button + Table identification with typography luxury */}
             <div className="flex items-center gap-3 sm:gap-4">
               <button
                 type="button"
                 onClick={() => setActiveTableModal(null)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-50 dark:bg-[#22232E] hover:bg-[#E46254]/10 text-zinc-600 dark:text-zinc-400 hover:text-[#E46254] dark:hover:text-[#E46254] text-xs font-bold transition-all cursor-pointer border border-zinc-200/60 dark:border-white/[0.08] active:scale-95 shadow-2xs"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-50 hover:bg-[#E46254]/10 text-zinc-600 hover:text-[#E46254] text-xs font-bold transition-all cursor-pointer border border-zinc-200/60 active:scale-95 shadow-2xs"
                 title="Return to floor overview (Esc)"
               >
                 <ChevronLeft size={15} />
@@ -3944,7 +3947,7 @@ export default function PosPage() {
               <div className="h-5 w-px bg-zinc-200/60" />
 
               <div className="flex items-center gap-2.5">
-                <span className="text-lg sm:text-xl font-black text-zinc-900 dark:text-white tracking-tight">
+                <span className="text-lg sm:text-xl font-black text-zinc-900 tracking-tight">
                   {activeTableModal}
                 </span>
 
@@ -4020,10 +4023,10 @@ export default function PosPage() {
           <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
             
             {/* ── LEFT PANEL (63%): High-Speed Menu Catalog ── */}
-            <div className="w-full lg:w-[63%] flex flex-col border-r border-zinc-100 dark:border-white/[0.07] bg-zinc-50/40 dark:bg-transparent overflow-hidden">
+            <div className="w-full lg:w-[63%] flex flex-col border-r border-zinc-100 bg-zinc-50/40 overflow-hidden">
               
               {/* Top Search Bar & Category Tabs */}
-              <div className="bg-white/95 dark:bg-zinc-950/70 backdrop-blur-2xl border-b border-zinc-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06)] shrink-0">
+              <div className="bg-white/95 backdrop-blur-2xl border-b border-zinc-100 shrink-0">
                 {/* Search Row */}
                 <div className="px-4 pt-3.5 pb-2">
                   <div className="relative">
@@ -4033,7 +4036,7 @@ export default function PosPage() {
                       placeholder="Search dishes..."
                       value={dishSearchQuery}
                       onChange={(e) => setDishSearchQuery(e.target.value)}
-                      className="w-full pl-8 pr-7 py-1.5 bg-zinc-50 dark:bg-[#22232E] border border-zinc-200/70 dark:border-white/[0.08] rounded-xl text-xs font-medium outline-none focus:border-[#E46254]/60 focus:bg-white dark:focus:bg-[#2A2B38] text-zinc-900 dark:text-white transition-all placeholder-zinc-400 dark:placeholder-[#5E5D72]"
+                      className="w-full pl-8 pr-7 py-1.5 bg-zinc-50 border border-zinc-200/70 rounded-xl text-xs font-medium outline-none focus:border-[#E46254]/60 focus:bg-white text-zinc-900 transition-all placeholder-zinc-400"
                     />
                     {dishSearchQuery && (
                       <button
@@ -4072,7 +4075,7 @@ export default function PosPage() {
                         className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer whitespace-nowrap select-none ${
                           selectedDrawerCat === cat
                             ? "bg-[#E46254] text-white shadow-xs shadow-[#E46254]/25 scale-[1.02]"
-                            : "bg-white dark:bg-[#1C1D26] hover:bg-[#E46254]/10 text-zinc-700 dark:text-zinc-400 hover:text-[#E46254] dark:hover:text-[#E46254] border border-zinc-200/80 dark:border-white/[0.08] hover:border-[#E46254]/30 shadow-2xs"
+                            : "bg-white hover:bg-[#E46254]/10 text-zinc-700 hover:text-[#E46254] border border-zinc-200/80 hover:border-[#E46254]/30 shadow-2xs"
                         }`}
                       >
                         {cat === "ALL" ? "All Items" : cat}
@@ -4235,7 +4238,7 @@ export default function PosPage() {
             </div>
 
             {/* ── RIGHT PANEL (37%): Table Ticket, Unfired Batch, Rounds & Payment / Settle Button ── */}
-            <div className="w-full lg:w-[37%] flex flex-col bg-white dark:bg-[#16171F] border-l border-zinc-100 dark:border-white/[0.07] overflow-hidden">
+            <div className="w-full lg:w-[37%] flex flex-col bg-white border-l border-zinc-100 overflow-hidden">
               <div className="flex-1 overflow-y-auto p-4 space-y-3.5 slim-scrollbar">
                 
                 {/* Header status bar */}
@@ -4454,7 +4457,7 @@ export default function PosPage() {
                           {round.items.map((it) => (
                             <div
                               key={it.itemIndex}
-                              className="py-2 px-3 rounded-xl bg-white dark:bg-[#22232E] hover:bg-zinc-50 dark:hover:bg-[#2A2B38] border border-zinc-100 dark:border-white/[0.06] flex items-center justify-between text-xs transition-all shadow-2xs"
+                              className="py-2 px-3 rounded-xl bg-white hover:bg-zinc-50 border border-zinc-100 flex items-center justify-between text-xs transition-all shadow-2xs"
                             >
                               <div className="flex items-start gap-2.5 flex-1 pr-2 min-w-0">
                                 <span className="font-mono font-black text-[#E46254] bg-[#E46254]/10 border border-[#E46254]/20 px-1.5 py-0.5 rounded-md text-[11px] shrink-0 mt-0.5">
@@ -4520,9 +4523,9 @@ export default function PosPage() {
 
 {/* 3. PREMIUM EDITORIAL BILL SUMMARY (No Grey Dullness) */}
                 {subtotal > 0 && (
-                  <div className="rounded-2xl border border-zinc-200/80 dark:border-white/[0.08] bg-white dark:bg-[#1C1D26] overflow-hidden text-xs shadow-xs transition-all">
+                  <div className="rounded-2xl border border-zinc-200/80 bg-white overflow-hidden text-xs shadow-xs transition-all">
                     {/* Compact Primary Bar — Clean Luxury White & Soft Brand */}
-                    <div className="px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-r from-white dark:from-[#1C1D26] via-zinc-50/30 dark:via-[#22232E] to-white dark:to-[#1C1D26]">
+                    <div className="px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-r from-white via-zinc-50/30 to-white">
                       <div className="flex items-center gap-2">
                         <button
                           type="button"

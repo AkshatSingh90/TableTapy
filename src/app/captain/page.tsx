@@ -280,31 +280,6 @@ export default function CaptainAppPage() {
 
         if (locData && locData.length > 0) {
           foundTables = locData;
-        } else {
-          // If no tables found under this exact restaurant_id, check logged-in auth user or any locations created by the owner
-          const { data: { user } } = await supabase.auth.getUser();
-          const authRestId = user?.user_metadata?.restaurant_id;
-          if (authRestId && authRestId !== restaurant.id) {
-            const { data: userLocs } = await supabase
-              .from('locations')
-              .select('id, name')
-              .eq('restaurant_id', authRestId)
-              .order('name', { ascending: true });
-            if (userLocs && userLocs.length > 0) {
-              foundTables = userLocs;
-            }
-          }
-
-          // If still empty, fetch any active dining tables from the locations table so the terminal is immediately operational
-          if (foundTables.length === 0) {
-            const { data: anyLocs } = await supabase
-              .from('locations')
-              .select('id, name')
-              .order('name', { ascending: true });
-            if (anyLocs && anyLocs.length > 0) {
-              foundTables = anyLocs;
-            }
-          }
         }
       } catch (err) {
         console.error("Error fetching locations:", err);
@@ -313,10 +288,11 @@ export default function CaptainAppPage() {
       setTables(foundTables);
       setupTablePresenceListeners(foundTables);
 
-      // 2. Load Active Orders and Historical Orders for Customer Intelligence
+      // 2. Load Active Orders strictly for this restaurant
       const { data: ordData } = await supabase
         .from('orders')
         .select('*')
+        .eq('restaurant_id', restaurant.id)
         .neq('payment_status', 'PAID')
         .neq('status', 'CANCELLED')
         .order('created_at', { ascending: false });
@@ -337,43 +313,16 @@ export default function CaptainAppPage() {
         setPastOrdersHistory(pastData);
       }
 
-      // 3. Load Menu Items for Quick Order (restaurant isolated + unscoped catalog fallback)
-      let menuRows: any[] | null = null;
-      const { data: scopedMenu, error: scopeErr } = await supabase
+      // 3. Load Menu Items strictly for this restaurant
+      const { data: scopedMenu } = await supabase
         .from('menu_items_v2')
         .select('id, name, base_price, category, is_veg, is_available, description, restaurant_id')
         .eq('restaurant_id', restaurant.id)
         .eq('is_available', true)
         .order('name');
 
-      if (!scopeErr && scopedMenu && scopedMenu.length > 0) {
-        menuRows = scopedMenu;
-      } else {
-        const { data: allMenu } = await supabase
-          .from('menu_items_v2')
-          .select('id, name, base_price, category, is_veg, is_available, description, restaurant_id')
-          .eq('is_available', true)
-          .order('name');
-        if (allMenu) {
-          menuRows = allMenu.filter((row: any) => {
-            if (row.restaurant_id) return row.restaurant_id === restaurant.id;
-            const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restaurant.id}`);
-            if (savedCustomMenuIds) {
-              try {
-                const ids: string[] = JSON.parse(savedCustomMenuIds);
-                if (ids.includes(row.id)) return true;
-              } catch {}
-            }
-            if (row.description && row.description.includes(`[REST:${restaurant.id}]`)) return true;
-            // Fallback for catalog/shared dishes without restaurant_id or tag (matches POS)
-            if (!row.restaurant_id && (!row.description || !row.description.includes('[REST:'))) return true;
-            return false;
-          });
-        }
-      }
-
-      if (menuRows) {
-        setMenuItems(menuRows);
+      if (scopedMenu) {
+        setMenuItems(scopedMenu);
       }
 
       // 4. Real-time Subscription for Kitchen, Tables & Locations status updates

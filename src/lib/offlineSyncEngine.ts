@@ -418,16 +418,16 @@ class OfflineSyncManager {
   }
 
   /**
-   * 4. Inbound Delta Pull: Safely pulls latest cloud records into SQLite without wiping local items
+   * 4. Inbound Delta Pull: Safely pulls latest cloud records strictly for this restaurant
    */
   private async inboundDeltaPull(restaurantId: string): Promise<void> {
     try {
-      // Pull fresh menu dishes and merge
+      // Pull fresh menu dishes strictly for this restaurant
       const { data: dishes } = await this.withTimeout(
         this.supabase
           .from("menu_items_v2")
           .select("id, name, category, subcategory, base_price, is_veg, is_available, description")
-          .or(`restaurant_id.eq.${restaurantId},restaurant_id.is.null`)
+          .eq("restaurant_id", restaurantId)
       );
       if (dishes && dishes.length > 0) {
         await LocalSqliteStore.saveMenuItems(
@@ -444,16 +444,16 @@ class OfflineSyncManager {
             description: d.description,
             updated_at: new Date().toISOString(),
           })),
-          false // replaceAll = false (NEVER WIPE)
+          true // replaceAll = true to flush out old stale/demo items
         );
       }
 
-      // Pull fresh locations/tables and merge
+      // Pull fresh locations/tables strictly for this restaurant
       const { data: tables } = await this.withTimeout(
         this.supabase
           .from("locations")
           .select("id, name, type, secure_code")
-          .or(`restaurant_id.eq.${restaurantId},restaurant_id.is.null`)
+          .eq("restaurant_id", restaurantId)
       );
       if (tables && tables.length > 0) {
         await LocalSqliteStore.saveTables(
@@ -465,7 +465,7 @@ class OfflineSyncManager {
             type: t.type || "TABLE",
             is_active: true,
           })),
-          false // replaceAll = false (NEVER WIPE)
+          true // replaceAll = true to flush out old stale/demo tables
         );
       }
     } catch (inboundErr) {

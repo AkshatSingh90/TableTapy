@@ -28,7 +28,6 @@ import { useEffect, useState, useRef } from "react";
 import { WaterBottleSetupModal } from "@/components/WaterBottleSetupModal";
 import { getCanonicalRestaurantId } from "@/lib/localSqliteStore";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
-import { ThemeToggle } from "@/components/ThemeToggle";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -268,7 +267,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         ];
 
   return (
-    <div className="h-screen flex flex-col bg-[#FBFBFC] dark:bg-[#13141A] text-zinc-900 dark:text-[#F0EEF4] overflow-hidden relative">
+    <div className="h-screen flex flex-col bg-[#FBFBFC] text-zinc-900 overflow-hidden relative">
       {/* Precision Scrollbar Styles for the Drawer */}
       <style jsx global>{`
         .aesthetic-bar::-webkit-scrollbar-button,
@@ -308,7 +307,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       `}</style>
 
       {/* Multi-layered Atmospheric Lighting (Homepage Caustics & Grid in Dark Mode) */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden z-0 hidden dark:block">
+      <div className="fixed inset-0 pointer-events-none overflow-hidden z-0 hidden">
         <div className="absolute -top-32 -left-32 w-[34rem] h-[34rem] bg-gradient-to-br from-[#E46254]/18 via-[#C2410C]/10 to-transparent rounded-full blur-[140px] transform-gpu" />
         <div className="absolute top-20 -right-24 w-[38rem] h-[38rem] bg-gradient-to-bl from-amber-500/12 via-[#E46254]/08 to-transparent rounded-full blur-[160px] transform-gpu" />
         <div className="absolute top-[45%] left-1/2 -translate-x-1/2 w-[45rem] h-[45rem] bg-gradient-to-tr from-[#E46254]/08 via-rose-600/06 to-transparent rounded-full blur-[180px] transform-gpu" />
@@ -317,25 +316,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </div>
 
       {/* Clean Aesthetic Top Header */}
-      <header className="h-14 px-4 sm:px-6 border-b border-zinc-200/70 dark:border-white/[0.08] bg-white/95 dark:bg-zinc-950/75 backdrop-blur-2xl shrink-0 z-30 flex items-center justify-between overflow-hidden dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.1),0_8px_32px_rgba(0,0,0,0.5)]">
+      <header className="h-14 px-4 sm:px-6 border-b border-zinc-200/70 bg-white/95 backdrop-blur-2xl shrink-0 z-30 flex items-center justify-between overflow-hidden">
         {/* Left Side: 2-Line Minimalist Toggle + Logo */}
         <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={() => setIsOpen(!isOpen)}
-            className="group relative w-9 h-9 -ml-1.5 rounded-lg flex items-center justify-center hover:bg-zinc-100/80 dark:hover:bg-white/[0.06] active:bg-zinc-200/70 dark:active:bg-white/[0.1] transition-colors duration-150 cursor-pointer outline-none"
+            className="group relative w-9 h-9 -ml-1.5 rounded-lg flex items-center justify-center hover:bg-zinc-100/80 active:bg-zinc-200/70 transition-colors duration-150 cursor-pointer outline-none"
             title="Toggle Menu"
             aria-label="Toggle navigation menu"
           >
             <div className="w-[18px] h-[10px] relative flex flex-col justify-between">
               <span
-                className={`h-[1.75px] bg-zinc-700 dark:bg-zinc-300 group-hover:bg-zinc-950 dark:group-hover:white rounded-full transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                className={`h-[1.75px] bg-zinc-700 group-hover:bg-zinc-950 rounded-full transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                   isOpen
                     ? "w-[18px] translate-y-[4.25px] rotate-45"
                     : "w-[18px] group-hover:w-[14px]"
                 }`}
               />
               <span
-                className={`h-[1.75px] bg-zinc-700 dark:bg-zinc-300 group-hover:bg-zinc-950 dark:group-hover:white rounded-full transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                className={`h-[1.75px] bg-zinc-700 group-hover:bg-zinc-950 rounded-full transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                   isOpen
                     ? "w-[18px] -translate-y-[4px] -rotate-45"
                     : "w-[12px] group-hover:w-[18px]"
@@ -352,7 +351,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <img
               src="/logo-header.png"
               alt="TableTapy"
-              className="h-7 sm:h-8 w-auto max-w-[160px] object-contain select-none pointer-events-none dark:brightness-110"
+              className="h-7 sm:h-8 w-auto max-w-[160px] object-contain select-none pointer-events-none"
               style={{ imageRendering: "-webkit-optimize-contrast" }}
             />
           </Link>
@@ -360,17 +359,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Center: Dine-In / Takeaway Toggle (ONLY for /dashboard/pos) */}
         {pathname === "/dashboard/pos" && (
-          <div className="backdrop-blur-2xl bg-zinc-100/90 dark:bg-zinc-950/70 p-1 rounded-xl flex items-center gap-1 border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.12),inset_0_-1px_1px_0_rgba(0,0,0,0.6)]">
+          <div className="backdrop-blur-2xl bg-zinc-100/90 p-1 rounded-xl flex items-center gap-1 border border-zinc-200/60">
             <button
               type="button"
               onClick={() => handleSwitchPosMode("DINE_IN")}
               className={`py-1 px-3 rounded-lg flex items-center gap-1.5 text-xs transition-all cursor-pointer ${
                 posMode === "DINE_IN"
-                  ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] shadow-xs text-zinc-900 dark:text-white font-bold dark:shadow-md dark:shadow-[#E46254]/30"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-white font-medium hover:bg-white/[0.04]"
+                  ? "bg-white shadow-xs text-zinc-900 font-bold "
+                  : "text-zinc-500 hover:text-zinc-800 font-medium hover:bg-white/[0.04]"
               }`}
             >
-              <UtensilsCrossed size={13} className={posMode === "DINE_IN" ? "text-[#E46254] dark:text-white" : "text-zinc-400"} />
+              <UtensilsCrossed size={13} className={posMode === "DINE_IN" ? "text-[#E46254] " : "text-zinc-400"} />
               <span>Dine-In</span>
             </button>
             <button
@@ -378,11 +377,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               onClick={() => handleSwitchPosMode("TAKEAWAY")}
               className={`py-1 px-3 rounded-lg flex items-center gap-1.5 text-xs transition-all cursor-pointer ${
                 posMode === "TAKEAWAY"
-                  ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] shadow-xs text-zinc-900 dark:text-white font-bold dark:shadow-md dark:shadow-[#E46254]/30"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-white font-medium hover:bg-white/[0.04]"
+                  ? "bg-white shadow-xs text-zinc-900 font-bold "
+                  : "text-zinc-500 hover:text-zinc-800 font-medium hover:bg-white/[0.04]"
               }`}
             >
-              <ShoppingBag size={13} className={posMode === "TAKEAWAY" ? "text-[#E46254] dark:text-white" : "text-zinc-400"} />
+              <ShoppingBag size={13} className={posMode === "TAKEAWAY" ? "text-[#E46254] " : "text-zinc-400"} />
               <span>Takeaway</span>
             </button>
           </div>
@@ -390,17 +389,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Center: Inventory Nav Toggle (ONLY for /dashboard/inventory) */}
         {pathname === "/dashboard/inventory" && (
-          <div className="backdrop-blur-2xl bg-zinc-100/90 dark:bg-zinc-950/70 p-1 rounded-xl flex items-center gap-1 border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.12),inset_0_-1px_1px_0_rgba(0,0,0,0.6)]">
+          <div className="backdrop-blur-2xl bg-zinc-100/90 p-1 rounded-xl flex items-center gap-1 border border-zinc-200/60">
             <button
               type="button"
               onClick={() => handleSwitchInventoryTab("Intelligence")}
               className={`py-1 px-3 rounded-lg flex items-center gap-1.5 text-xs transition-all cursor-pointer ${
                 inventoryTab === "Intelligence"
-                  ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] shadow-xs text-zinc-900 dark:text-white font-bold dark:shadow-md dark:shadow-[#E46254]/30"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-white font-medium hover:bg-white/[0.04]"
+                  ? "bg-white shadow-xs text-zinc-900 font-bold "
+                  : "text-zinc-500 hover:text-zinc-800 font-medium hover:bg-white/[0.04]"
               }`}
             >
-              <Sparkles size={13} className={inventoryTab === "Intelligence" ? "text-[#E46254] dark:text-white" : "text-zinc-400"} />
+              <Sparkles size={13} className={inventoryTab === "Intelligence" ? "text-[#E46254] " : "text-zinc-400"} />
               <span>Intelligence</span>
             </button>
             <button
@@ -408,11 +407,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               onClick={() => handleSwitchInventoryTab("Materials")}
               className={`py-1 px-3 rounded-lg flex items-center gap-1.5 text-xs transition-all cursor-pointer ${
                 inventoryTab === "Materials"
-                  ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] shadow-xs text-zinc-900 dark:text-white font-bold dark:shadow-md dark:shadow-[#E46254]/30"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-white font-medium hover:bg-white/[0.04]"
+                  ? "bg-white shadow-xs text-zinc-900 font-bold "
+                  : "text-zinc-500 hover:text-zinc-800 font-medium hover:bg-white/[0.04]"
               }`}
             >
-              <Box size={13} className={inventoryTab === "Materials" ? "text-[#E46254] dark:text-white" : "text-zinc-400"} />
+              <Box size={13} className={inventoryTab === "Materials" ? "text-[#E46254] " : "text-zinc-400"} />
               <span>Materials Data</span>
             </button>
           </div>
@@ -420,17 +419,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Center: Customers Nav Toggle (ONLY for /dashboard/customers) */}
         {pathname === "/dashboard/customers" && (
-          <div className="backdrop-blur-2xl bg-zinc-100/90 dark:bg-zinc-950/70 p-1 rounded-xl flex items-center gap-1 border border-zinc-200/60 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.12),inset_0_-1px_1px_0_rgba(0,0,0,0.6)]">
+          <div className="backdrop-blur-2xl bg-zinc-100/90 p-1 rounded-xl flex items-center gap-1 border border-zinc-200/60">
             <button
               type="button"
               onClick={() => handleSwitchCustomersTab("Intelligence")}
               className={`py-1 px-3 rounded-lg flex items-center gap-1.5 text-xs transition-all cursor-pointer ${
                 customersTab === "Intelligence"
-                  ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] shadow-xs text-zinc-900 dark:text-white font-bold dark:shadow-md dark:shadow-[#E46254]/30"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-white font-medium hover:bg-white/[0.04]"
+                  ? "bg-white shadow-xs text-zinc-900 font-bold "
+                  : "text-zinc-500 hover:text-zinc-800 font-medium hover:bg-white/[0.04]"
               }`}
             >
-              <Sparkles size={13} className={customersTab === "Intelligence" ? "text-[#E46254] dark:text-white" : "text-zinc-400"} />
+              <Sparkles size={13} className={customersTab === "Intelligence" ? "text-[#E46254] " : "text-zinc-400"} />
               <span>Intelligence</span>
             </button>
             <button
@@ -438,11 +437,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               onClick={() => handleSwitchCustomersTab("All Customers")}
               className={`py-1 px-3 rounded-lg flex items-center gap-1.5 text-xs transition-all cursor-pointer ${
                 customersTab === "All Customers"
-                  ? "bg-white dark:bg-gradient-to-r dark:from-[#E46254] dark:to-[#C2410C] shadow-xs text-zinc-900 dark:text-white font-bold dark:shadow-md dark:shadow-[#E46254]/30"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-white font-medium hover:bg-white/[0.04]"
+                  ? "bg-white shadow-xs text-zinc-900 font-bold "
+                  : "text-zinc-500 hover:text-zinc-800 font-medium hover:bg-white/[0.04]"
               }`}
             >
-              <Users size={13} className={customersTab === "All Customers" ? "text-[#E46254] dark:text-white" : "text-zinc-400"} />
+              <Users size={13} className={customersTab === "All Customers" ? "text-[#E46254] " : "text-zinc-400"} />
               <span>All Customers</span>
             </button>
           </div>
@@ -459,13 +458,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 value={menuSearch}
                 onChange={(e) => handleMenuSearchChange(e.target.value)}
                 placeholder="Search dishes... (/)"
-                className="w-full bg-zinc-100/90 dark:bg-white/[0.03] hover:bg-zinc-100 dark:hover:bg-white/[0.06] focus:bg-white dark:focus:bg-white/[0.06] border border-zinc-200/70 dark:border-white/[0.1] focus:border-[#E46254] dark:focus:border-[#E46254] rounded-xl pl-8.5 pr-7 py-1.5 text-xs font-medium text-zinc-900 dark:text-white placeholder:text-zinc-400 dark:placeholder:text-zinc-500 outline-none transition-all shadow-2xs dark:shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)]"
+                className="w-full bg-zinc-100/90 hover:bg-zinc-100 focus:bg-white border border-zinc-200/70 focus:border-[#E46254] rounded-xl pl-8.5 pr-7 py-1.5 text-xs font-medium text-zinc-900 placeholder:text-zinc-400 outline-none transition-all shadow-2xs"
               />
               {menuSearch && (
                 <button
                   type="button"
                   onClick={() => handleMenuSearchChange("")}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-white p-0.5 cursor-pointer"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 p-0.5 cursor-pointer"
                 >
                   <X size={12} />
                 </button>
@@ -485,17 +484,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Right Side: Status Pill & Sign Out */}
         <div className="flex items-center gap-2 sm:gap-2.5">
-          {/* Prominent Header Theme Toggle */}
-          <ThemeToggle variant="pill" />
+          
 
-          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-100/70 dark:bg-emerald-500/10 border border-transparent dark:border-emerald-500/25 rounded-full text-[12px] text-zinc-600 dark:text-emerald-400 font-semibold select-none dark:shadow-[0_0_16px_rgba(16,185,129,0.15)]">
+          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-100/70 border border-transparent rounded-full text-[12px] text-zinc-600 font-semibold select-none">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
             <span className="hidden xs:inline">Live</span>
           </div>
           <button
             onClick={handleSignOut}
             title="Sign Out"
-            className="p-1.5 text-zinc-400 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-white hover:bg-zinc-100/80 dark:hover:bg-white/[0.06] rounded-lg transition-colors cursor-pointer border border-transparent dark:hover:border-white/[0.1]"
+            className="p-1.5 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100/80 rounded-lg transition-colors cursor-pointer border border-transparent"
           >
             <LogOut size={16} />
           </button>
@@ -505,28 +503,28 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       {/* Backdrop overlay */}
       <div
         onClick={() => setIsOpen(false)}
-        className={`fixed inset-0 bg-black/25 dark:bg-black/70 backdrop-blur-[4px] z-40 transition-opacity duration-300 ${
+        className={`fixed inset-0 bg-black/25 backdrop-blur-[4px] z-40 transition-opacity duration-300 ${
           isOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
         }`}
       />
 
       {/* Slide-out Sidebar Drawer (240px width) */}
       <aside
-        className={`fixed top-0 left-0 bottom-0 w-[240px] bg-white dark:bg-zinc-950/92 backdrop-blur-3xl border-r border-zinc-200/80 dark:border-white/[0.08] text-zinc-900 dark:text-zinc-100 z-50 flex flex-col shadow-2xl dark:shadow-[0_24px_64px_rgba(0,0,0,0.85)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`fixed top-0 left-0 bottom-0 w-[240px] bg-white backdrop-blur-3xl border-r border-zinc-200/80 text-zinc-900 z-50 flex flex-col shadow-2xl transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
           isOpen ? "translate-x-0 pointer-events-auto" : "-translate-x-full pointer-events-none"
         }`}
       >
         {/* Sidebar Header with Original Logo */}
-        <div className="h-16 flex items-center justify-between px-4 shrink-0 overflow-hidden relative border-b border-zinc-100 dark:border-white/[0.06]">
+        <div className="h-16 flex items-center justify-between px-4 shrink-0 overflow-hidden relative border-b border-zinc-100">
           <img
             src="/logo.png"
             alt="TableTapy"
-            className="w-[170px] max-w-none h-auto select-none dark:brightness-110"
+            className="w-[170px] max-w-none h-auto select-none"
             style={{ imageRendering: "-webkit-optimize-contrast" }}
           />
           <button
             onClick={() => setIsOpen(false)}
-            className="p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-white rounded-lg hover:bg-zinc-100 dark:hover:bg-white/[0.06] transition-colors"
+            className="p-1 text-zinc-400 hover:text-zinc-700 rounded-lg hover:bg-zinc-100 transition-colors"
           >
             <X size={15} />
           </button>
@@ -536,7 +534,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <nav className="px-3 py-3 flex-1 overflow-y-auto aesthetic-bar">
           {navGroups.map((group, idx) => (
             <div key={group.title} className={idx !== 0 ? "mt-5" : ""}>
-              <h3 className="px-2.5 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 tracking-wider mb-1 uppercase">
+              <h3 className="px-2.5 text-[11px] font-semibold text-zinc-400 tracking-wider mb-1 uppercase">
                 {group.title}
               </h3>
               <div className="space-y-0.5">
@@ -548,10 +546,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     return (
                       <span
                         key={item.name}
-                        className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-zinc-300 dark:text-zinc-700 cursor-not-allowed opacity-40 select-none"
+                        className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-zinc-300 cursor-not-allowed opacity-40 select-none"
                         title="Complete store setup first"
                       >
-                        <item.icon size={15} strokeWidth={1.5} className="text-zinc-300 dark:text-zinc-700" />
+                        <item.icon size={15} strokeWidth={1.5} className="text-zinc-300" />
                         {item.name}
                       </span>
                     );
@@ -564,8 +562,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       onClick={() => setIsOpen(false)}
                       className={`group w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium transition-all duration-150 cursor-pointer text-left relative ${
                         isActive
-                          ? "bg-[#E46254]/[0.08] dark:bg-gradient-to-r dark:from-[#E46254]/20 dark:to-transparent text-[#E46254] dark:text-[#ff7869] font-bold dark:border-l-2 dark:border-[#E46254]"
-                          : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-white hover:bg-zinc-50 dark:hover:bg-white/[0.04]"
+                          ? "bg-[#E46254]/[0.08] text-[#E46254] font-bold "
+                          : "text-zinc-600 hover:text-zinc-950 hover:bg-zinc-50 "
                       }`}
                     >
                       <item.icon
@@ -573,8 +571,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         strokeWidth={isActive ? 2.1 : 1.75}
                         className={`transition-colors duration-150 ${
                           isActive
-                            ? "text-[#E46254] dark:text-[#ff7869]"
-                            : "text-zinc-400 dark:text-zinc-500 group-hover:text-[#E46254] dark:group-hover:text-white"
+                            ? "text-[#E46254] "
+                            : "text-zinc-400 group-hover:text-[#E46254] "
                         }`}
                       />
                       <span>{item.name}</span>
@@ -587,21 +585,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <div className="h-4" />
         </nav>
 
-        {/* Sidebar Footer with Prominent Appearance Switcher */}
-        <div className="p-3 border-t border-zinc-100 dark:border-white/[0.07] shrink-0 bg-zinc-50/80 dark:bg-zinc-950/80 backdrop-blur-xl">
-          <div className="px-1 mb-1.5 flex items-center justify-between">
-            <span className="text-[10px] font-bold tracking-wider uppercase text-zinc-400 dark:text-zinc-500">
-              Appearance
-            </span>
-          </div>
-          <ThemeToggle variant="sidebar" />
-        </div>
+        
       </aside>
 
       {/* Main Content Area */}
       <main
         className={`flex-1 min-h-0 relative w-full ${
-          pathname === "/dashboard/pos" ? "overflow-hidden bg-[#FAFAFA] dark:bg-[#070709]" : "overflow-y-auto bg-[#FAFAFA] dark:bg-[#070709]"
+          pathname === "/dashboard/pos" ? "overflow-hidden bg-[#FAFAFA] " : "overflow-y-auto bg-[#FAFAFA] "
         }`}
       >
         {children}

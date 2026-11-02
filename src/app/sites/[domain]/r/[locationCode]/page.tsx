@@ -2387,9 +2387,8 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
 
             
 
-            // 3. Shared catalog default item (no restaurant_id) -> show
-
-            return true;
+            // 3. Item must strictly belong to this restaurant
+            return false;
 
           });
 
@@ -2397,25 +2396,7 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
 
 
 
-        // If no items found in menu_items_v2, fallback to legacy menu_items table
-
-        if (!menuRows || menuRows.length === 0) {
-
-          const { data: legacyItems } = await supabase
-
-            .from('menu_items')
-
-            .select('*')
-
-            .or(`restaurant_id.eq.${rest.id},restaurant_id.is.null`);
-
-          if (legacyItems && legacyItems.length > 0) {
-
-            menuRows = legacyItems;
-
-          }
-
-        }
+        // Strictly use menu_items_v2 items belonging to this restaurant
 
         const menuData = menuRows || [];
 

@@ -228,32 +228,27 @@ function openLocalDb(): Promise<IDBDatabase> {
 
 export async function getCanonicalRestaurantId(supabaseClient?: any): Promise<string> {
   let restId = "";
-  if (typeof window !== "undefined") {
-    restId =
-      localStorage.getItem("tabletapy_restaurant_id") ||
-      localStorage.getItem("tabletapy_last_active_restaurant_id") ||
-      "";
 
-    const savedCaptain = localStorage.getItem("tabletapy_captain_restaurant");
-    if (savedCaptain) {
-      try {
-        const parsed = JSON.parse(savedCaptain);
-        if (parsed?.id) restId = parsed.id;
-      } catch {}
-    }
-  }
-
+  // 1. If supabaseClient is available, prioritize authenticated session first (ground truth)
   if (supabaseClient) {
     try {
       const { data } = await supabaseClient.auth.getSession();
-      if (data?.session?.user) {
-        const u = data.session.user;
-        const candidate = u.user_metadata?.restaurant_id || u.id;
-        if (candidate) restId = candidate;
+      const sessionUser = data?.session?.user;
+      if (sessionUser?.user_metadata?.restaurant_id) {
+        restId = sessionUser.user_metadata.restaurant_id;
       }
     } catch {}
   }
 
+  // 2. If no authenticated session metadata, fallback to owner-specific localStorage
+  if (!restId && typeof window !== "undefined") {
+    restId =
+      localStorage.getItem("tabletapy_restaurant_id") ||
+      localStorage.getItem("tabletapy_last_active_restaurant_id") ||
+      "";
+  }
+
+  // 3. Persist valid resolved restaurant ID
   if (restId && typeof window !== "undefined") {
     localStorage.setItem("tabletapy_restaurant_id", restId);
     localStorage.setItem("tabletapy_last_active_restaurant_id", restId);
@@ -277,6 +272,7 @@ export const LocalSqliteStore = {
     replaceAll: boolean = false
   ): Promise<void> {
     if (!restaurantId) return;
+    const cleanItems = items.filter((i) => i && (!i.restaurant_id || i.restaurant_id === restaurantId));
     try {
       const db = await openLocalDb();
       return new Promise((resolve, reject) => {
@@ -293,7 +289,7 @@ export const LocalSqliteStore = {
               store.delete(cursor.primaryKey);
               cursor.continue();
             } else {
-              for (const item of items) {
+              for (const item of cleanItems) {
                 store.put({ ...item, restaurant_id: restaurantId });
               }
             }
@@ -301,7 +297,7 @@ export const LocalSqliteStore = {
           req.onerror = () => reject(req.error);
         } else {
           // Merge mode: upsert incoming items without destroying locally-created dishes
-          for (const item of items) {
+          for (const item of cleanItems) {
             store.put({ ...item, restaurant_id: restaurantId });
           }
         }
@@ -313,7 +309,7 @@ export const LocalSqliteStore = {
       console.warn("[Local SQLite Store] Fallback to localStorage for saveMenuItems:", err);
       if (typeof window !== "undefined") {
         try {
-          localStorage.setItem(`tt_offline_menu_${restaurantId}`, JSON.stringify(items));
+          localStorage.setItem(`tt_offline_menu_${restaurantId}`, JSON.stringify(cleanItems));
         } catch {}
       }
     }
@@ -485,6 +481,7 @@ export const LocalSqliteStore = {
     replaceAll: boolean = false
   ): Promise<void> {
     if (!restaurantId) return;
+    const cleanTables = tables.filter((t) => t && (!t.restaurant_id || t.restaurant_id === restaurantId));
     try {
       const db = await openLocalDb();
       return new Promise((resolve, reject) => {
@@ -501,7 +498,7 @@ export const LocalSqliteStore = {
               store.delete(cursor.primaryKey);
               cursor.continue();
             } else {
-              for (const table of tables) {
+              for (const table of cleanTables) {
                 store.put({ ...table, restaurant_id: restaurantId });
               }
             }
@@ -509,7 +506,7 @@ export const LocalSqliteStore = {
           req.onerror = () => reject(req.error);
         } else {
           // Merge mode: upsert without wiping locally-created tables
-          for (const table of tables) {
+          for (const table of cleanTables) {
             store.put({ ...table, restaurant_id: restaurantId });
           }
         }
@@ -520,7 +517,7 @@ export const LocalSqliteStore = {
     } catch (err) {
       if (typeof window !== "undefined") {
         try {
-          localStorage.setItem(`tt_offline_tables_${restaurantId}`, JSON.stringify(tables));
+          localStorage.setItem(`tt_offline_tables_${restaurantId}`, JSON.stringify(cleanTables));
         } catch {}
       }
     }

@@ -1574,15 +1574,8 @@ export default function LiveOrdersPage() {
           .eq('restaurant_id', restId)
           .eq('is_available', true)
           .order('name');
-        if (menuData && menuData.length > 0) {
+        if (menuData) {
           setMenuCatalog(menuData);
-        } else {
-          const { data: legacyMenu } = await supabase
-            .from('menu_items')
-            .select('id, name, base_price, category, is_veg')
-            .eq('restaurant_id', restId)
-            .order('name');
-          if (legacyMenu) setMenuCatalog(legacyMenu);
         }
 
         ch = supabase.channel(`orders_${restId}_${Date.now()}`)

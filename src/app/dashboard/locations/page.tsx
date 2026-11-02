@@ -158,10 +158,17 @@ export default function TableManagerPage() {
           zone: loadedTableZones[loc.id] || (loc as any).zone || finalZones[0] || 'Main Floor'
         }));
 
-        // Merge local tables not yet in cloud so they never vanish
+        // Only merge locally created tables that have pending unsynced mutations
+        const pendingMutations = await LocalSqliteStore.getPendingMutations(restId).catch(() => []);
+        const pendingTableIds = new Set(
+          (pendingMutations || [])
+            .filter((m: any) => m.entity === 'TABLE' && m.action === 'INSERT')
+            .map((m: any) => m.payload?.id)
+        );
+
         const combined = [...mappedCloud];
         for (const lt of localTables) {
-          if (!combined.some(c => c.id === lt.id || c.name.trim().toLowerCase() === lt.name.trim().toLowerCase())) {
+          if (pendingTableIds.has(lt.id) && !combined.some(c => c.id === lt.id)) {
             combined.push({
               id: lt.id,
               restaurant_id: restId,
@@ -186,7 +193,7 @@ export default function TableManagerPage() {
             zone: l.zone || 'Main Floor',
             is_active: l.isActive !== false
           })),
-          false
+          true
         ).catch(() => {});
       }
     } catch (err) {
@@ -531,7 +538,7 @@ export default function TableManagerPage() {
   });
 
   return (
-    <div className="flex h-screen flex-col bg-white dark:bg-transparent overflow-hidden text-gray-900 dark:text-zinc-100 font-sans relative">
+    <div className="flex h-screen flex-col bg-white overflow-hidden text-gray-900 font-sans relative">
       
       {/* BRAND TOAST NOTIFICATION */}
       <div className={`absolute bottom-8 right-8 z-50 transition-all duration-300 ease-out ${toast.visible ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0 pointer-events-none'}`}>
@@ -544,7 +551,7 @@ export default function TableManagerPage() {
       <div className="flex-1 overflow-y-auto slim-scrollbar px-6 md:px-12 w-full relative">
         
         {/* COMPACT FLOATING SEARCH & ADD BAR */}
-        <div className="sticky top-0 z-30 pt-6 pb-4 bg-white/90 dark:bg-zinc-950/75 backdrop-blur-2xl flex flex-col gap-3 border-b border-gray-100 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.08)]">
+        <div className="sticky top-0 z-30 pt-6 pb-4 bg-white/90 backdrop-blur-2xl flex flex-col gap-3 border-b border-gray-100">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="relative w-full max-w-sm">
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
@@ -552,7 +559,7 @@ export default function TableManagerPage() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={`Search ${locations.length} tables...`}
-                className="w-full bg-gray-50 dark:bg-[#1C1D26] border border-gray-200 dark:border-white/[0.08] rounded-lg pl-10 pr-4 py-2.5 text-[13px] font-medium text-gray-900 dark:text-white placeholder:text-gray-400 dark:placeholder-[#5E5D72] outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all"
+                className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-10 pr-4 py-2.5 text-[13px] font-medium text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all"
               />
             </div>
 
@@ -574,8 +581,8 @@ export default function TableManagerPage() {
                 onClick={() => setSelectedZoneFilter('ALL')}
                 className={`px-3 py-1 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer ${
                   selectedZoneFilter === 'ALL'
-                    ? 'bg-zinc-900 dark:bg-[#E46254] text-white shadow-xs'
-                    : 'bg-gray-100 dark:bg-[#1C1D26] text-gray-600 dark:text-[#8B8A9E] hover:text-gray-900 dark:hover:text-[#F0EEF4] border border-transparent dark:border-white/[0.06] hover:bg-gray-200 dark:hover:bg-[#22232E]'
+                    ? 'bg-zinc-900 text-white shadow-xs'
+                    : 'bg-gray-100 text-gray-600 hover:text-gray-900 border border-transparent hover:bg-gray-200 '
                 }`}
               >
                 All Zones ({locations.length})
@@ -588,8 +595,8 @@ export default function TableManagerPage() {
                     onClick={() => setSelectedZoneFilter(z)}
                     className={`px-3 py-1 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer ${
                       selectedZoneFilter === z
-                        ? 'bg-zinc-900 dark:bg-[#E46254] text-white shadow-xs'
-                        : 'bg-gray-100 dark:bg-[#1C1D26] text-gray-600 dark:text-[#8B8A9E] hover:text-gray-900 dark:hover:text-[#F0EEF4] border border-transparent dark:border-white/[0.06] hover:bg-gray-200 dark:hover:bg-[#22232E]'
+                        ? 'bg-zinc-900 text-white shadow-xs'
+                        : 'bg-gray-100 text-gray-600 hover:text-gray-900 border border-transparent hover:bg-gray-200 '
                     }`}
                   >
                     {z} ({count})
@@ -631,7 +638,7 @@ export default function TableManagerPage() {
             filteredLocations.map((loc) => (
               <div 
                 key={loc.id} 
-                className={`rounded-2xl p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-6 border transition-all duration-300 ${loc.isActive ? 'bg-white dark:bg-white/[0.025] dark:backdrop-blur-xl border-gray-200 dark:border-white/[0.08] dark:shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.06),0_8px_24px_rgba(0,0,0,0.4)] hover:shadow-md dark:hover:border-white/[0.18]' : 'border-gray-100 dark:border-white/[0.05] bg-white/60 dark:bg-white/[0.01] opacity-70'} group`}
+                className={`rounded-2xl p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-6 border transition-all duration-300 ${loc.isActive ? 'bg-white border-gray-200 hover:shadow-md ' : 'border-gray-100 bg-white/60 opacity-70'} group`}
               >
                 
                 {/* 1. Left: Explicit Toggle & Name */}
@@ -653,7 +660,7 @@ export default function TableManagerPage() {
 
                   <div>
                     <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                      <h3 className="text-lg font-bold text-gray-900 dark:text-white tracking-tight leading-none">{loc.name}</h3>
+                      <h3 className="text-lg font-bold text-gray-900 tracking-tight leading-none">{loc.name}</h3>
                       {loc.zone && (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#E46254]/10 text-[#E46254] border border-[#E46254]/20">
                           {loc.zone}
@@ -758,9 +765,9 @@ export default function TableManagerPage() {
       {/* REUSABLE ADD/EDIT DIALOG */}
       {(showAddModal || showEditModal) && (
         <div className="fixed inset-0 z-50 bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-[#1C1D26] border border-transparent dark:border-white/[0.08] rounded-2xl shadow-xl max-w-sm w-full overflow-hidden text-gray-900 dark:text-white">
-            <div className="px-6 py-5 border-b border-gray-100 dark:border-white/[0.07]">
-              <h2 className="text-lg font-bold text-gray-900 dark:text-white">
+          <div className="bg-white border border-transparent rounded-2xl shadow-xl max-w-sm w-full overflow-hidden text-gray-900">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <h2 className="text-lg font-bold text-gray-900">
                 {showAddModal ? `Add New ${businessType === 'HOTEL' ? 'Room' : 'Table'}` : `Edit Settings`}
               </h2>
             </div>
@@ -774,7 +781,7 @@ export default function TableManagerPage() {
                   value={formData.name} 
                   onChange={e => setFormData({...formData, name: e.target.value.toUpperCase()})} 
                   placeholder="e.g. TABLE 12"
-                  className="w-full bg-white dark:bg-[#22232E] border border-gray-300 dark:border-white/[0.08] rounded-lg px-3 py-2.5 text-[13px] font-medium text-gray-900 dark:text-white outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all font-mono" 
+                  className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-[13px] font-medium text-gray-900 outline-none focus:border-[#E46254] focus:ring-1 focus:ring-[#E46254] transition-all font-mono" 
                 />
               </div>
 

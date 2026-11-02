@@ -1,7 +1,5 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *));
-
 @theme {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
@@ -24,33 +22,11 @@
   --foreground: #171717;
 }
 
-.dark {
-  --tt-bg: #070709;
-  --tt-surface: rgba(18, 18, 24, 0.75);
-  --tt-surface-2: rgba(26, 26, 35, 0.85);
-  --tt-surface-3: #22232E;
-  --tt-border: rgba(255, 255, 255, 0.08);
-  --tt-border-strong: rgba(255, 255, 255, 0.16);
-  --tt-text-primary: #FFFFFF;
-  --tt-text-secondary: #D4D4D8;
-  --tt-text-muted: #71717A;
-  --tt-accent: #E46254;
-  --tt-accent-glow: rgba(228, 98, 84, 0.35);
-  --tt-header-bg: rgba(7, 7, 9, 0.82);
-  --tt-sidebar-bg: rgba(9, 9, 13, 0.94);
-  --background: #070709;
-  --foreground: #F4F4F5;
-}
-
 html {
   scrollbar-width: thin;
   scrollbar-color: rgba(156, 163, 175, 0.3) transparent;
   width: 100%;
   -webkit-text-size-adjust: 100%;
-}
-
-html.dark {
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
 body {
@@ -60,7 +36,6 @@ body {
   overflow-x: clip;
   transition: background-color 0.25s cubic-bezier(0.16, 1, 0.3, 1), color 0.25s ease;
 }
-
 
 /* Premium SaaS Scrollbar for Main Content */
 ::-webkit-scrollbar {
@@ -81,14 +56,6 @@ body {
   background: rgba(156, 163, 175, 0.6);
 }
 
-.dark ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
-}
-
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
-}
-
 /* Aesthetic Slim Scrollbar for Sidebar */
 .slim-scrollbar {
   scrollbar-width: thin;
@@ -105,16 +72,6 @@ body {
   border-radius: 10px;
 }
 .slim-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #E46254;
-}
-
-.dark .slim-scrollbar {
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
-}
-.dark .slim-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-}
-.dark .slim-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #E46254;
 }
 
@@ -153,7 +110,7 @@ body {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   HOMEPAGE-GRADE LUXURY OBSIDIAN TOKENS & UTILITIES
+   HOMEPAGE-GRADE LUXURY OBSIDIAN TOKENS & UTILITIES (LIGHT MODE)
    ══════════════════════════════════════════════════════════════════════ */
 
 /* 1. Frosted Glass Panel (Header, Dock, Segmented Navigation Bars) */
@@ -164,13 +121,6 @@ body {
   border: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
 }
-.dark .tt-glass-panel {
-  background-color: rgba(10, 10, 15, 0.75);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 1px 0 rgba(255, 255, 255, 0.12), inset 0 -1px 1px 0 rgba(0, 0, 0, 0.5), 0 12px 32px -4px rgba(0, 0, 0, 0.7);
-}
 
 /* 2. Frosted Glass Interactive Card */
 .tt-glass-card {
@@ -178,19 +128,6 @@ body {
   border: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.dark .tt-glass-card {
-  background-color: rgba(255, 255, 255, 0.025);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.dark .tt-glass-card:hover {
-  background-color: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.18);
-  box-shadow: inset 0 1px 1px 0 rgba(255, 255, 255, 0.1), 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
 /* 3. Luxury Coral Hero CTA Gradient Button */

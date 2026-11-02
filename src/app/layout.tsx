@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import { ThemeProvider, ThemeScript } from "../components/ThemeProvider";
 
 // Injecting a crisp, enterprise-grade sans-serif font
 const inter = Inter({ 
@@ -29,16 +28,13 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <ThemeScript />
       </head>
       <body
         suppressHydrationWarning
-        className={`${inter.className} bg-[#FBFBFC] dark:bg-[#070709] text-zinc-900 dark:text-zinc-100 antialiased selection:bg-[#E46254]/30`}
+        className={`${inter.className} bg-[#FBFBFC] text-zinc-900 antialiased selection:bg-[#E46254]/30`}
       >
-        <ThemeProvider>
-          {children}
-        </ThemeProvider>
-      </body>
+        {children}
+</body>
     </html>
   );
 }
