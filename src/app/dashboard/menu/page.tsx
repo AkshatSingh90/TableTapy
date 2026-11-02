@@ -215,12 +215,19 @@ export default function MenuManagerPage() {
            variantsConfig: config,
          };
        });
-       // Merge locally created dishes with cloud dishes so local items never vanish
+       // Only merge locally created dishes that have pending unsynced mutations
+       const pendingMutations = await LocalSqliteStore.getPendingMutations(restId).catch(() => []);
+       const pendingDishIds = new Set(
+         (pendingMutations || [])
+           .filter((m: any) => m.entity === 'MENU_ITEM' && m.action === 'INSERT')
+           .map((m: any) => m.payload?.id)
+       );
+
        let combined = [...mappedItems];
        if (restId) {
          const localDishes = await LocalSqliteStore.getMenuItems(restId, false);
          for (const ld of localDishes) {
-           if (!combined.some(c => c.id === ld.id || c.name.trim().toLowerCase() === ld.name.trim().toLowerCase())) {
+           if (pendingDishIds.has(ld.id) && !combined.some(c => c.id === ld.id)) {
              combined.push(ld as any);
            }
          }
@@ -246,10 +253,9 @@ export default function MenuManagerPage() {
              variantsConfig: m.variantsConfig,
              updated_at: new Date().toISOString(),
            })),
-           false
+           true
          ).catch((e) => console.warn('[Menu] Failed to cache into SQLite:', e));
        }
-       LocalCache.set('menu_catalog', combined);
     } else {
        // If offline / cloud returns null, NEVER wipe dishes! Preserve from SQLite
        if (restId) {
@@ -277,12 +283,6 @@ export default function MenuManagerPage() {
       const scoped = LocalCache.get<MenuItem[]>(LocalCache.makeKey('menu_catalog', restId));
       if (scoped?.data && Array.isArray(scoped.data) && scoped.data.length > 0) {
         setMenuItems(scoped.data);
-        setIsLoading(false);
-      }
-    } else {
-      const anyCached = LocalCache.getAny<MenuItem[]>('menu_catalog');
-      if (anyCached && Array.isArray(anyCached) && anyCached.length > 0) {
-        setMenuItems(anyCached);
         setIsLoading(false);
       }
     }
@@ -325,7 +325,6 @@ export default function MenuManagerPage() {
       if (restaurantId) {
         LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
       }
-      LocalCache.set('menu_catalog', updated);
       return updated;
     });
     if (selectedItem?.id === item.id) setSelectedItem({ ...selectedItem, is_available: newStatus });
@@ -343,7 +342,6 @@ export default function MenuManagerPage() {
       if (restaurantId) {
         LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
       }
-      LocalCache.set('menu_catalog', updated);
       return updated;
     });
     
@@ -480,7 +478,6 @@ export default function MenuManagerPage() {
       if (restaurantId) {
         LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
       }
-      LocalCache.set('menu_catalog', updated);
       return updated;
     });
 
@@ -1613,7 +1610,6 @@ export default function MenuManagerPage() {
                             if (restaurantId) {
                               LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), next);
                             }
-                            LocalCache.set('menu_catalog', next);
                             return next;
                           });
                           setSelectedItem(null);

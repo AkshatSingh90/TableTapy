@@ -258,34 +258,13 @@ export default function ReportsPage() {
         }
 
         // 3. Menu items (restaurant isolated)
-        let menuRows: any[] | null = null;
-        const { data: scopedMenu, error: menuScopeErr } = await supabase
+        const { data: scopedMenu } = await supabase
           .from("menu_items_v2")
           .select("id, name, base_price, category, is_veg, is_available, description, restaurant_id")
           .eq("restaurant_id", restId)
           .order("name");
 
-        if (!menuScopeErr && scopedMenu) {
-          menuRows = scopedMenu;
-        } else {
-          const { data: allMenu } = await supabase
-            .from("menu_items_v2")
-            .select("id, name, base_price, category, is_veg, is_available, description, restaurant_id")
-            .order("name");
-          if (allMenu) {
-            menuRows = allMenu.filter((row: any) => {
-              if (row.restaurant_id) return row.restaurant_id === restId;
-              const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${restId}`);
-              if (savedCustomMenuIds) {
-                try {
-                  const ids: string[] = JSON.parse(savedCustomMenuIds);
-                  if (ids.includes(row.id)) return true;
-                } catch {}
-              }
-              return row.description && row.description.includes(`[REST:${restId}]`);
-            });
-          }
-        }
+        const menuRows: any[] = scopedMenu || [];
 
         if (menuRows) {
           setMenuItems(menuRows as MenuItemV2[]);

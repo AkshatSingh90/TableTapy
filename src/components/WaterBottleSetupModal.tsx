@@ -43,12 +43,14 @@ export function WaterBottleSetupModal() {
         const { data: menuWater } = await supabase
           .from('menu_items_v2')
           .select('id, name')
+          .eq('restaurant_id', restId)
           .ilike('name', '%water%')
           .limit(1);
 
         const { data: invWater } = await supabase
           .from('inventory_items')
           .select('id, name')
+          .eq('restaurant_id', restId)
           .ilike('name', '%water%')
           .limit(1);
 
@@ -123,6 +125,7 @@ export function WaterBottleSetupModal() {
         // Add to menu
         await supabase.from('menu_items_v2').insert([{
           name: displayName,
+          restaurant_id: restaurantId,
           category: 'Beverages',
           subcategory: 'Water',
           base_price: Number(b.price),
@@ -134,6 +137,7 @@ export function WaterBottleSetupModal() {
         // Add to inventory_items
         await supabase.from('inventory_items').insert([{
           name: displayName,
+          restaurant_id: restaurantId,
           category: 'Beverages',
           storage_unit: 'bottle',
           vendor_unit: 'crate',

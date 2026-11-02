@@ -2337,66 +2337,13 @@ export default function CustomerMenuPage({ params }: { params: Promise<{ domain:
 
 
 
-        // 5. Fetch Menu Items (combines restaurant-specific dishes, custom dishes, and shared catalog dishes)
-
-        let menuRows: any[] | null = null;
-
-        const { data: allMenu } = await supabase
-
+        // 5. Fetch Menu Items strictly for this restaurant
+        const { data: menuRows } = await supabase
           .from('menu_items_v2')
-
           .select('*')
-
+          .eq('restaurant_id', rest.id)
           .eq('is_available', true)
-
           .order('created_at', { ascending: true });
-
-
-
-        if (allMenu && allMenu.length > 0) {
-
-          menuRows = allMenu.filter((row: any) => {
-
-            // 1. Specifically created for or linked to this restaurant
-
-            if (row.restaurant_id && row.restaurant_id === rest.id) return true;
-
-            const savedCustomMenuIds = localStorage.getItem(`tabletapy_menu_${rest.id}`);
-
-            if (savedCustomMenuIds) {
-
-              try {
-
-                const ids: string[] = JSON.parse(savedCustomMenuIds);
-
-                if (ids.includes(row.id)) return true;
-
-              } catch {}
-
-            }
-
-            if (row.description && row.description.includes(`[REST:${rest.id}]`)) return true;
-
-            
-
-            // 2. Belongs to another specific restaurant -> hide
-
-            if (row.restaurant_id && row.restaurant_id !== rest.id) return false;
-
-            if (row.description && row.description.includes('[REST:') && !row.description.includes(`[REST:${rest.id}]`)) return false;
-
-            
-
-            // 3. Item must strictly belong to this restaurant
-            return false;
-
-          });
-
-        }
-
-
-
-        // Strictly use menu_items_v2 items belonging to this restaurant
 
         const menuData = menuRows || [];
 
