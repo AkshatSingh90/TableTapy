@@ -386,9 +386,15 @@ export default function PosPage() {
         // D. Active Orders from SQLite
         const localOrders = await LocalSqliteStore.getLocalOrders(restId);
         if (localOrders && localOrders.length > 0) {
-          const activeLocal = localOrders.filter((o) =>
-            ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING"
-          );
+          const isOnline = typeof navigator !== "undefined" && navigator.onLine;
+          const activeLocal = localOrders.filter((o) => {
+            const isActiveStatus = ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING";
+            if (!isActiveStatus) return false;
+            if (isOnline) {
+              return o.synced === 0;
+            }
+            return true;
+          });
           if (activeLocal.length > 0) {
             setActiveOrders(activeLocal as any);
           }
@@ -554,11 +560,17 @@ export default function PosPage() {
 
   const fetchActiveOrders = async (restId: string) => {
     // 1. Instant local read
+    const isOnline = typeof navigator !== "undefined" && navigator.onLine;
     const localOrders = await LocalSqliteStore.getLocalOrders(restId);
     if (localOrders && localOrders.length > 0) {
-      const active = localOrders.filter((o) =>
-        ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING"
-      );
+      const active = localOrders.filter((o) => {
+        const isActiveStatus = ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING";
+        if (!isActiveStatus) return false;
+        if (isOnline) {
+          return o.synced === 0;
+        }
+        return true;
+      });
       if (active.length > 0) {
         setActiveOrders(active as any);
       }
@@ -576,22 +588,25 @@ export default function PosPage() {
 
       if (orderData) {
         setActiveOrders(orderData as OrderRecord[]);
-        for (const ord of orderData) {
-          LocalSqliteStore.saveOrderLocally({
+        await LocalSqliteStore.syncActiveOrders(
+          restId,
+          orderData.map((ord: any) => ({
             id: ord.id,
             restaurant_id: ord.restaurant_id,
             table_no: ord.table_no,
             customer_name: ord.customer_name,
             customer_phone: ord.customer_phone,
-            total: ord.total,
+            total: Number(ord.total || 0),
             items_json: ord.items_json,
             status: ord.status,
             payment_status: ord.payment_status,
             payment_method: ord.payment_method,
+            note: ord.note || "",
             created_at: ord.created_at,
             synced: 1,
-          });
-        }
+          })),
+          true // replaceAll = true to flush out old completed/ghost orders from SQLite!
+        );
       }
     } catch (err) {
       console.warn("[POS] fetchActiveOrders offline fallback:", err);
@@ -706,10 +721,9 @@ export default function PosPage() {
       setActiveTableId(targetId);
     }
 
-    // Find latest or unapproved round on this table to highlight & auto-scroll
+    // Find unacknowledged NEW round on this table to highlight & auto-scroll
     const session = tableSessionMap.get(targetId || "") || tableSessionMap.get(tableName);
-    const targetRound = session?.rounds?.find((r) => r.status === "NEW") ||
-      (session?.rounds && session.rounds.length > 0 ? session.rounds[session.rounds.length - 1] : null);
+    const targetRound = session?.rounds?.find((r) => r.status === "NEW" && !acknowledgedOrderIds.has(r.orderId));
 
     if (targetRound) {
       setHighlightRoundId(targetRound.orderId);
@@ -950,7 +964,11 @@ export default function PosPage() {
       return order.table_no;
     };
 
-    activeOrders.forEach((order) => {
+    const sortedOrders = [...activeOrders].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    sortedOrders.forEach((order) => {
       const isTakeaway =
         order.table_no.toLowerCase().includes("takeaway") ||
         order.table_no.toLowerCase().includes("token");
@@ -971,7 +989,12 @@ export default function PosPage() {
       const noteLower = (order.note || "").toLowerCase();
       const customerLower = (order.customer_name || "").toLowerCase();
 
-      if (noteLower.includes("pos") || noteLower.includes("counter")) {
+      if (
+        noteLower.includes("pos") ||
+        noteLower.includes("counter") ||
+        order.payment_method === "COUNTER" ||
+        noteLower.includes("pos fired round")
+      ) {
         orderSource = "STAFF";
       } else if (
         noteLower.includes("captain") ||
@@ -981,11 +1004,9 @@ export default function PosPage() {
         orderSource = "CAPTAIN";
       }
 
-      // Attention shake triggers if:
-      // 1. Explicit status === 'NEW', OR
-      // 2. It is an unacknowledged QR order (even if fired with status PREPARING direct to kitchen)
-      const isUnackQrOrder = orderSource === "QR" && !acknowledgedOrderIds.has(order.id);
-      if (order.status === "NEW" || isUnackQrOrder) {
+      // Attention shake triggers ONLY if order is genuinely unacknowledged
+      const isUnack = (order.status === "NEW" || orderSource === "QR") && !acknowledgedOrderIds.has(order.id);
+      if (isUnack) {
         existing.hasNewRound = true;
       }
 
@@ -1014,7 +1035,10 @@ export default function PosPage() {
         existing.latestOrderAt = order.created_at;
       }
 
-      const roundIndex = existing.rounds.length + 1;
+      // Extract original round number if recorded in note, e.g. [POS Fired Round #2]
+      const roundNumMatch = (order.note || "").match(/Round #(\d+)/i);
+      const parsedRoundNum = roundNumMatch ? parseInt(roundNumMatch[1], 10) : null;
+      const roundIndex = parsedRoundNum || (existing.rounds.length + 1);
       const roundItems: Array<{
         itemIndex: number;
         name: string;
@@ -1739,20 +1763,24 @@ export default function PosPage() {
         noteParts.push(`[PIN:${currentTablePin}]`);
       }
       if (batchNote.trim()) noteParts.push(batchNote.trim());
+      const fullNote = noteParts.join(" ");
 
-      const localOrderId = (activeSession?.orders && activeSession.orders[0]?.id) || 'local_' + Date.now();
+      // Generate a unique ID per round to never overwrite previous rounds
+      const localOrderId = 'ord_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
 
       // 1. Instant Local SQLite persistence (Guaranteed offline safety)
       await LocalSqliteStore.saveOrderLocally({
         id: localOrderId,
         restaurant_id: restaurantId || '',
         table_no: activeTableModal,
-        customer_name: activeSession?.customerName,
-        customer_phone: activeSession?.customerPhone,
-        total: (subtotal || 0),
-        items_json: manualCart.map((c: any) => ({ name: c.item?.name || c.name || 'Item', quantity: c.quantity, price: c.price, notes: c.notes })),
+        customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
+        customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || '',
+        total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+        items_json: itemsPayload,
         status: 'PREPARING',
-        payment_status: 'UNPAID',
+        payment_status: 'PENDING',
+        payment_method: 'COUNTER',
+        note: fullNote,
         created_at: new Date().toISOString(),
         synced: 0,
       }).catch(e => console.warn('Local SQLite write error:', e));
@@ -1797,15 +1825,17 @@ export default function PosPage() {
       if (typeof navigator === 'undefined' || navigator.onLine) {
         try {
           const { error } = await supabase.from("orders").insert({
+            id: localOrderId,
             restaurant_id: restaurantId,
             table_no: activeTableModal,
             total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
             status: "PREPARING",
             payment_status: "PENDING",
+            payment_method: "COUNTER",
             customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
             customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
             items_json: itemsPayload,
-            note: noteParts.join(" "),
+            note: fullNote,
           });
           if (!error) {
             await LocalSqliteStore.markOrderSynced(localOrderId);
@@ -1973,6 +2003,20 @@ export default function PosPage() {
     try {
       const nonCancelledOrders = (activeSession?.orders || []).filter((o) => o.status !== "CANCELLED");
       const orderIds = nonCancelledOrders.map((o) => o.id);
+
+      // Clean up acknowledged orders for settled orders
+      if (orderIds.length > 0) {
+        setAcknowledgedOrderIds((prev) => {
+          const next = new Set(prev);
+          orderIds.forEach((id) => next.delete(id));
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem("tabletapy_pos_ack_orders", JSON.stringify(Array.from(next)));
+            } catch {}
+          }
+          return next;
+        });
+      }
 
       // 1. Mark orders as COMPLETED and PAID locally in SQLite
       if (orderIds.length > 0) {

@@ -764,6 +764,62 @@ export const LocalSqliteStore = {
     }
   },
 
+  /**
+   * Sync active orders from cloud into local SQLite.
+   * If replaceAll is true, removes stale completed/settled orders for this restaurant
+   * while strictly preserving any unsynced offline orders (synced === 0).
+   */
+  async syncActiveOrders(
+    restaurantId: string,
+    orders: LocalOrderRecord[],
+    replaceAll: boolean = false
+  ): Promise<void> {
+    if (!restaurantId) return;
+    const cleanOrders = orders.filter((o) => o && (!o.restaurant_id || o.restaurant_id === restaurantId));
+    try {
+      const db = await openLocalDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORES.ORDERS, "readwrite");
+        const store = tx.objectStore(STORES.ORDERS);
+
+        if (replaceAll) {
+          const index = store.index("restaurant_id");
+          const range = IDBKeyRange.only(restaurantId);
+          const req = index.openCursor(range);
+          req.onsuccess = (e: any) => {
+            const cursor = e.target.result;
+            if (cursor) {
+              // Preserve unsynced offline mutations (synced === 0)
+              if (cursor.value.synced !== 0) {
+                store.delete(cursor.primaryKey);
+              }
+              cursor.continue();
+            } else {
+              for (const ord of cleanOrders) {
+                store.put({ ...ord, restaurant_id: restaurantId, synced: 1 });
+              }
+            }
+          };
+          req.onerror = () => reject(req.error);
+        } else {
+          for (const ord of cleanOrders) {
+            store.put({ ...ord, restaurant_id: restaurantId });
+          }
+        }
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (err) {
+      console.warn("[Local SQLite Store] Fallback to localStorage for syncActiveOrders:", err);
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`tt_offline_orders_${restaurantId}`, JSON.stringify(cleanOrders));
+        } catch {}
+      }
+    }
+  },
+
   async getLocalOrders(restaurantId: string): Promise<LocalOrderRecord[]> {
     if (!restaurantId) return [];
     try {
