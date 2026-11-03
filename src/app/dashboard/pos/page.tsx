@@ -29,6 +29,17 @@ import { LocalSqliteStore, getCanonicalRestaurantId } from "@/lib/localSqliteSto
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import { LocalCache } from "@/utils/localCache";
 
+function generateUUID(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 /* ─── Domain Models ────────────────────────────────────────────────── */
 interface Location {
   id: string;
@@ -375,28 +386,26 @@ export default function PosPage() {
           localDishes = await LocalSqliteStore.getMenuItems(restId, false);
         }
         if (localDishes && localDishes.length > 0) {
-          setMenuItems(
-            localDishes.map((dish) => ({
+          setMenuItems((prev) => {
+            if (prev.length > 0) return prev;
+            return localDishes.map((dish) => ({
               ...dish,
               variantsConfig: dish.variantsConfig || extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
-            }))
-          );
+            }));
+          });
         }
 
-        // D. Active Orders from SQLite
+        // D. Active Orders from SQLite (Loaded only when offline; when online, background sync loads smoothly)
         const localOrders = await LocalSqliteStore.getLocalOrders(restId);
         if (localOrders && localOrders.length > 0) {
           const isOnline = typeof navigator !== "undefined" && navigator.onLine;
-          const activeLocal = localOrders.filter((o) => {
-            const isActiveStatus = ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING";
-            if (!isActiveStatus) return false;
-            if (isOnline) {
-              return o.synced === 0;
+          if (!isOnline) {
+            const activeLocal = localOrders.filter((o) => {
+              return ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING";
+            });
+            if (activeLocal.length > 0) {
+              setActiveOrders(activeLocal as any);
             }
-            return true;
-          });
-          if (activeLocal.length > 0) {
-            setActiveOrders(activeLocal as any);
           }
         }
 
@@ -502,12 +511,18 @@ export default function PosPage() {
         .order("name", { ascending: true });
 
       if (allMenu && allMenu.length > 0) {
-        setMenuItems(
-          allMenu.map((dish) => ({
+        setMenuItems((prev) => {
+          if (
+            prev.length === allMenu.length &&
+            prev.every((p, idx) => p.id === allMenu[idx].id && p.name === allMenu[idx].name && p.base_price === allMenu[idx].base_price)
+          ) {
+            return prev;
+          }
+          return allMenu.map((dish) => ({
             ...dish,
             variantsConfig: extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
-          }))
-        );
+          }));
+        });
 
         await LocalSqliteStore.saveMenuItems(
           restId,
@@ -559,35 +574,48 @@ export default function PosPage() {
   };
 
   const fetchActiveOrders = async (restId: string) => {
-    // 1. Instant local read
+    if (!restId) return;
     const isOnline = typeof navigator !== "undefined" && navigator.onLine;
-    const localOrders = await LocalSqliteStore.getLocalOrders(restId);
-    if (localOrders && localOrders.length > 0) {
-      const active = localOrders.filter((o) => {
-        const isActiveStatus = ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING";
-        if (!isActiveStatus) return false;
-        if (isOnline) {
-          return o.synced === 0;
-        }
-        return true;
-      });
-      if (active.length > 0) {
+
+    // 1. If offline, load active orders directly from local SQLite
+    if (!isOnline) {
+      const localOrders = await LocalSqliteStore.getLocalOrders(restId);
+      if (localOrders && localOrders.length > 0) {
+        const active = localOrders.filter((o) => {
+          return ["NEW", "PREPARING", "SERVED"].includes(o.status) || o.payment_status === "UNPAID" || o.payment_status === "PENDING";
+        });
         setActiveOrders(active as any);
       }
+      return;
     }
 
-    if (typeof navigator !== "undefined" && !navigator.onLine) return;
-
+    // 2. If online, fetch from Supabase and merge any unsynced offline mutations
     try {
-      const { data: orderData } = await supabase
+      const { data: orderData, error } = await supabase
         .from("orders")
         .select("*")
         .eq("restaurant_id", restId)
         .in("status", ["NEW", "PREPARING", "SERVED"])
         .order("created_at", { ascending: true });
 
-      if (orderData) {
-        setActiveOrders(orderData as OrderRecord[]);
+      if (!error && orderData) {
+        const localOrders = await LocalSqliteStore.getLocalOrders(restId);
+        const unsyncedLocals = (localOrders || []).filter(
+          (o) =>
+            o.synced === 0 &&
+            !orderData.some((c: any) => c.id === o.id) &&
+            (["NEW", "PREPARING", "SERVED"].includes(o.status) ||
+              o.payment_status === "UNPAID" ||
+              o.payment_status === "PENDING")
+        );
+
+        const merged = [...orderData, ...unsyncedLocals].sort(
+          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        );
+
+        setActiveOrders(merged as OrderRecord[]);
+
+        // Sync into SQLite in background (preserving unsynced offline records)
         await LocalSqliteStore.syncActiveOrders(
           restId,
           orderData.map((ord: any) => ({
@@ -1765,16 +1793,15 @@ export default function PosPage() {
       if (batchNote.trim()) noteParts.push(batchNote.trim());
       const fullNote = noteParts.join(" ");
 
-      // Generate a unique ID per round to never overwrite previous rounds
-      const localOrderId = 'ord_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+      // Generate a valid RFC4122 UUID so Supabase Postgres uuid column accepts it with 200 OK
+      const localOrderId = generateUUID();
 
-      // 1. Instant Local SQLite persistence (Guaranteed offline safety)
-      await LocalSqliteStore.saveOrderLocally({
+      const newOrderRecord: OrderRecord = {
         id: localOrderId,
         restaurant_id: restaurantId || '',
         table_no: activeTableModal,
         customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
-        customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || '',
+        customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || undefined,
         total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
         items_json: itemsPayload,
         status: 'PREPARING',
@@ -1782,8 +1809,19 @@ export default function PosPage() {
         payment_method: 'COUNTER',
         note: fullNote,
         created_at: new Date().toISOString(),
+      };
+
+      // 1. Instant Local SQLite persistence (Guaranteed offline safety)
+      await LocalSqliteStore.saveOrderLocally({
+        ...newOrderRecord,
         synced: 0,
       }).catch(e => console.warn('Local SQLite write error:', e));
+
+      // 1b. OPTIMISTIC UPDATE: Add round immediately to activeOrders state so UI NEVER flashes or vanishes
+      setActiveOrders((prev) => {
+        if (prev.some((o) => o.id === localOrderId)) return prev;
+        return [...prev, newOrderRecord];
+      });
 
       // 2. Print Thermal KOT Chit
       const kotData = {
@@ -1828,24 +1866,27 @@ export default function PosPage() {
             id: localOrderId,
             restaurant_id: restaurantId,
             table_no: activeTableModal,
-            total: manualCart.reduce((s, it) => s + it.price * it.quantity, 0),
+            total: newOrderRecord.total,
             status: "PREPARING",
             payment_status: "PENDING",
             payment_method: "COUNTER",
-            customer_name: manualCustomerName.trim() || activeSession?.customerName || "Dine-in Guest",
-            customer_phone: manualCustomerPhone.trim() || activeSession?.customerPhone || null,
+            customer_name: newOrderRecord.customer_name,
+            customer_phone: newOrderRecord.customer_phone || null,
             items_json: itemsPayload,
             note: fullNote,
           });
           if (!error) {
             await LocalSqliteStore.markOrderSynced(localOrderId);
+            setActiveOrders((prev) =>
+              prev.map((o) => (o.id === localOrderId ? { ...o, synced: 1 } : o))
+            );
+          } else {
+            console.error("[POS] Supabase order insert error:", error);
           }
         } catch (netErr) {
           console.warn("[POS] Fired KOT offline, queued in SQLite:", netErr);
         }
       }
-
-      if (restaurantId) fetchActiveOrders(restaurantId);
       OfflineSyncEngine.triggerSync();
     } catch (err: any) {
       showToast("Failed to fire KOT: " + (err.message || "Network Error"));
@@ -1877,7 +1918,7 @@ export default function PosPage() {
           isReady: true,
         }));
         const manualTotal = manualCart.reduce((s, it) => s + it.price * it.quantity, 0);
-        const localOrderId = 'ord_' + Date.now();
+        const localOrderId = generateUUID();
 
         // 1a. Instant 0ms Local SQLite persistence
         await LocalSqliteStore.saveOrderLocally({
@@ -2472,7 +2513,7 @@ export default function PosPage() {
       if (cashChangeDue !== null && cashChangeDue >= 0) noteParts.push(`[Tender: ₹${cashTenderAmount}, Change: ₹${cashChangeDue}]`);
       if (takeawayBatchNote.trim()) noteParts.push(takeawayBatchNote.trim());
 
-      const localTakeawayId = 'tok_' + Date.now();
+      const localTakeawayId = generateUUID();
 
       // 1. Instant Local SQLite persistence
       await LocalSqliteStore.saveOrderLocally({
@@ -2511,6 +2552,7 @@ export default function PosPage() {
       if (typeof navigator === 'undefined' || navigator.onLine) {
         try {
           const { error } = await supabase.from("orders").insert({
+            id: localTakeawayId,
             restaurant_id: restaurantId,
             table_no: tokenIdentifier,
             total: takeawayTotal,
@@ -4442,8 +4484,29 @@ export default function PosPage() {
                                 <span>NEW ROUND</span>
                               </span>
                             )}
-                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#E46254]/5 text-[#C2410C] border border-[#E46254]/15">
-                              {round.source === "QR" ? "Customer QR" : round.source === "CAPTAIN" ? "Captain App" : "POS Counter"}
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                              round.source === "STAFF"
+                                ? "bg-blue-50 text-blue-700 border-blue-200"
+                                : round.source === "CAPTAIN"
+                                ? "bg-purple-50 text-purple-700 border-purple-200"
+                                : "bg-orange-50 text-orange-700 border-orange-200"
+                            }`}>
+                              {round.source === "STAFF" ? (
+                                <>
+                                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block" />
+                                  <span>POS Counter</span>
+                                </>
+                              ) : round.source === "CAPTAIN" ? (
+                                <>
+                                  <span className="w-1.5 h-1.5 rounded-full bg-purple-500 inline-block" />
+                                  <span>Captain App</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="w-1.5 h-1.5 rounded-full bg-orange-500 inline-block" />
+                                  <span>Customer QR</span>
+                                </>
+                              )}
                             </span>
                             <span className="text-[10px] text-zinc-400">
                               {new Date(round.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
