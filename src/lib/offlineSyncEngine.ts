@@ -20,6 +20,7 @@ import {
   LocalOrderRecord,
   LocalInvoiceRecord,
   getCanonicalRestaurantId,
+  generateUUID,
 } from "./localSqliteStore";
 
 export interface SyncEngineStatus {
@@ -210,9 +211,11 @@ class OfflineSyncManager {
           case "MENU_ITEM": {
             if (m.action === "INSERT" || m.action === "UPDATE") {
               const d = m.payload;
+              const isUuid = Boolean(d.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d.id));
+              const validId = isUuid ? d.id : generateUUID();
               const { error } = await this.withTimeout(
                 this.supabase.from("menu_items_v2").upsert({
-                  id: d.id,
+                  id: validId,
                   name: d.name ? d.name.trim() : "",
                   category: d.category || "General",
                   subcategory: d.subcategory || "",
@@ -224,6 +227,10 @@ class OfflineSyncManager {
                 })
               );
               success = !error;
+              if (!error && validId !== d.id) {
+                await LocalSqliteStore.deleteMenuItem(m.restaurant_id, d.id).catch(() => {});
+                await LocalSqliteStore.saveSingleMenuItem({ ...d, id: validId }).catch(() => {});
+              }
             } else if (m.action === "DELETE") {
               const { error } = await this.withTimeout(
                 this.supabase.from("menu_items_v2").delete().eq("id", m.payload.id)
@@ -241,9 +248,11 @@ class OfflineSyncManager {
           case "TABLE": {
             if (m.action === "INSERT" || m.action === "UPDATE") {
               const t = m.payload;
+              const isUuid = Boolean(t.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t.id));
+              const validId = isUuid ? t.id : generateUUID();
               const { error } = await this.withTimeout(
                 this.supabase.from("locations").upsert({
-                  id: t.id,
+                  id: validId,
                   restaurant_id: m.restaurant_id,
                   name: t.name,
                   type: t.type || "TABLE",
@@ -251,6 +260,10 @@ class OfflineSyncManager {
                 })
               );
               success = !error;
+              if (!error && validId !== t.id) {
+                await LocalSqliteStore.deleteTable(m.restaurant_id, t.id).catch(() => {});
+                await LocalSqliteStore.saveSingleTable({ ...t, id: validId }).catch(() => {});
+              }
             } else if (m.action === "DELETE") {
               const { error } = await this.withTimeout(
                 this.supabase.from("locations").delete().eq("id", m.payload.id)

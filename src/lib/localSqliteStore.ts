@@ -1,5 +1,18 @@
 import { isTauriEnvironment } from "./thermalPrinterBridge";
 
+export function generateUUID(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+
+
 /**
  * Universal SQLite Local Database Bridge for TableTapy POS
  * 
@@ -276,27 +289,55 @@ export const LocalSqliteStore = {
     try {
       const db = await openLocalDb();
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORES.MENU_ITEMS, "readwrite");
+        const tx = db.transaction([STORES.MENU_ITEMS, STORES.MUTATIONS], "readwrite");
         const store = tx.objectStore(STORES.MENU_ITEMS);
+        const mutStore = tx.objectStore(STORES.MUTATIONS);
 
         if (replaceAll) {
-          const index = store.index("restaurant_id");
-          const range = IDBKeyRange.only(restaurantId);
-          const req = index.openKeyCursor(range);
-          req.onsuccess = (e: any) => {
-            const cursor = e.target.result;
-            if (cursor) {
-              store.delete(cursor.primaryKey);
-              cursor.continue();
-            } else {
-              for (const item of cleanItems) {
-                store.put({ ...item, restaurant_id: restaurantId });
+          const mutReq = mutStore.getAll();
+          mutReq.onsuccess = () => {
+            const pendingMutations = mutReq.result || [];
+            const protectedIds = new Set<string>();
+            const pendingDishes: LocalMenuItem[] = [];
+
+            for (const m of pendingMutations) {
+              if (
+                m.restaurant_id === restaurantId &&
+                m.entity === "MENU_ITEM" &&
+                m.synced !== 1 &&
+                m.action !== "DELETE" &&
+                m.payload?.id
+              ) {
+                protectedIds.add(String(m.payload.id));
+                if (m.payload) {
+                  pendingDishes.push(m.payload as LocalMenuItem);
+                }
               }
             }
+
+            const index = store.index("restaurant_id");
+            const range = IDBKeyRange.only(restaurantId);
+            const req = index.openKeyCursor(range);
+            req.onsuccess = (e: any) => {
+              const cursor = e.target.result;
+              if (cursor) {
+                if (!protectedIds.has(String(cursor.primaryKey))) {
+                  store.delete(cursor.primaryKey);
+                }
+                cursor.continue();
+              } else {
+                for (const item of cleanItems) {
+                  store.put({ ...item, restaurant_id: restaurantId });
+                }
+                for (const pending of pendingDishes) {
+                  store.put({ ...pending, restaurant_id: restaurantId });
+                }
+              }
+            };
+            req.onerror = () => reject(req.error);
           };
-          req.onerror = () => reject(req.error);
+          mutReq.onerror = () => reject(mutReq.error);
         } else {
-          // Merge mode: upsert incoming items without destroying locally-created dishes
           for (const item of cleanItems) {
             store.put({ ...item, restaurant_id: restaurantId });
           }
@@ -485,27 +526,55 @@ export const LocalSqliteStore = {
     try {
       const db = await openLocalDb();
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORES.TABLES, "readwrite");
+        const tx = db.transaction([STORES.TABLES, STORES.MUTATIONS], "readwrite");
         const store = tx.objectStore(STORES.TABLES);
+        const mutStore = tx.objectStore(STORES.MUTATIONS);
 
         if (replaceAll) {
-          const index = store.index("restaurant_id");
-          const range = IDBKeyRange.only(restaurantId);
-          const req = index.openKeyCursor(range);
-          req.onsuccess = (e: any) => {
-            const cursor = e.target.result;
-            if (cursor) {
-              store.delete(cursor.primaryKey);
-              cursor.continue();
-            } else {
-              for (const table of cleanTables) {
-                store.put({ ...table, restaurant_id: restaurantId });
+          const mutReq = mutStore.getAll();
+          mutReq.onsuccess = () => {
+            const pendingMutations = mutReq.result || [];
+            const protectedIds = new Set<string>();
+            const pendingTables: LocalTable[] = [];
+
+            for (const m of pendingMutations) {
+              if (
+                m.restaurant_id === restaurantId &&
+                m.entity === "TABLE" &&
+                m.synced !== 1 &&
+                m.action !== "DELETE" &&
+                m.payload?.id
+              ) {
+                protectedIds.add(String(m.payload.id));
+                if (m.payload) {
+                  pendingTables.push(m.payload as LocalTable);
+                }
               }
             }
+
+            const index = store.index("restaurant_id");
+            const range = IDBKeyRange.only(restaurantId);
+            const req = index.openKeyCursor(range);
+            req.onsuccess = (e: any) => {
+              const cursor = e.target.result;
+              if (cursor) {
+                if (!protectedIds.has(String(cursor.primaryKey))) {
+                  store.delete(cursor.primaryKey);
+                }
+                cursor.continue();
+              } else {
+                for (const table of cleanTables) {
+                  store.put({ ...table, restaurant_id: restaurantId });
+                }
+                for (const pending of pendingTables) {
+                  store.put({ ...pending, restaurant_id: restaurantId });
+                }
+              }
+            };
+            req.onerror = () => reject(req.error);
           };
-          req.onerror = () => reject(req.error);
+          mutReq.onerror = () => reject(mutReq.error);
         } else {
-          // Merge mode: upsert without wiping locally-created tables
           for (const table of cleanTables) {
             store.put({ ...table, restaurant_id: restaurantId });
           }

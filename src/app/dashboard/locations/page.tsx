@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
-import { LocalSqliteStore, getCanonicalRestaurantId } from "@/lib/localSqliteStore";
+import { LocalSqliteStore, getCanonicalRestaurantId, generateUUID } from "@/lib/localSqliteStore";
 import { SyncBus } from "@/utils/syncBus";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import { Loader2, Plus, Trash2, Edit2, Download, Users, AlertTriangle, Link as LinkIcon, Search, CheckCircle2, QrCode, Layers } from "lucide-react";
@@ -263,7 +263,7 @@ export default function TableManagerPage() {
       }
 
       const code = Math.random().toString(16).substring(2, 10);
-      const tableId = 'loc_' + Date.now();
+      const tableId = generateUUID();
       const newLocObj = {
         id: tableId,
         restaurant_id: restaurantId,
@@ -309,6 +309,7 @@ export default function TableManagerPage() {
         (async () => {
           try {
             const { data, error } = await supabase.from('locations').insert({
+              id: tableId,
               restaurant_id: restaurantId,
               name: trimmedName,
               type: newLocObj.type,

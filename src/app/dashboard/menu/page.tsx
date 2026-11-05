@@ -4,7 +4,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Pencil, Trash2, ChefHat, Check, Layers, Filter } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import { LocalCache } from "@/utils/localCache";
-import { LocalSqliteStore, getCanonicalRestaurantId, LocalMenuItem } from "@/lib/localSqliteStore";
+import { LocalSqliteStore, getCanonicalRestaurantId, LocalMenuItem, generateUUID } from "@/lib/localSqliteStore";
 import { SyncBus } from "@/utils/syncBus";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import {
@@ -454,13 +454,24 @@ export default function MenuManagerPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Resolve ground truth restaurant ID
+    let effectiveRestId = restaurantId;
+    if (!effectiveRestId) {
+      effectiveRestId = await getCanonicalRestaurantId(supabase);
+      if (!effectiveRestId && typeof window !== 'undefined') {
+        effectiveRestId = localStorage.getItem('tabletapy_restaurant_id') || '';
+      }
+      if (effectiveRestId) setRestaurantId(effectiveRestId);
+    }
+
     const finalCategory = isCustomCategory ? customCategoryInput.trim() : form.category;
-    const dishId = editingItemId || ('dish_' + Date.now());
-    const taggedDesc = buildTaggedDescription(form.description, variantsConfig, restaurantId);
+    // Guaranteed standard RFC4122 UUID so Supabase Postgres uuid column accepts it 100%
+    const dishId = editingItemId || generateUUID();
+    const taggedDesc = buildTaggedDescription(form.description, variantsConfig, effectiveRestId);
 
     const localDish: LocalMenuItem = {
       id: dishId,
-      restaurant_id: restaurantId,
+      restaurant_id: effectiveRestId,
       name: form.name.trim(),
       category: finalCategory,
       subcategory: form.subcategory || '',
@@ -474,7 +485,7 @@ export default function MenuManagerPage() {
     };
 
     // 1. Instant 0ms Local SQLite persistence
-    if (restaurantId) {
+    if (effectiveRestId) {
       await LocalSqliteStore.saveSingleMenuItem(localDish);
     }
 
@@ -482,18 +493,18 @@ export default function MenuManagerPage() {
     setMenuItems(prev => {
       const filtered = prev.filter(m => m.id !== dishId);
       const updated = [localDish as any, ...filtered];
-      if (restaurantId) {
-        LocalCache.set(LocalCache.makeKey('menu_catalog', restaurantId), updated);
+      if (effectiveRestId) {
+        LocalCache.set(LocalCache.makeKey('menu_catalog', effectiveRestId), updated);
       }
       return updated;
     });
 
-    if (form.badge && restaurantId) {
+    if (form.badge && effectiveRestId) {
       try {
-        const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${restaurantId}`);
+        const savedBadges = localStorage.getItem(`tabletapy_dish_badges_${effectiveRestId}`);
         const parsed = savedBadges ? JSON.parse(savedBadges) : {};
         parsed[dishId] = form.badge;
-        localStorage.setItem(`tabletapy_dish_badges_${restaurantId}`, JSON.stringify(parsed));
+        localStorage.setItem(`tabletapy_dish_badges_${effectiveRestId}`, JSON.stringify(parsed));
       } catch {}
     }
 
@@ -504,10 +515,10 @@ export default function MenuManagerPage() {
     // 3. Silent background push to Supabase if online, otherwise queue mutation
     const runCloudSync = async () => {
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        if (restaurantId) {
+        if (effectiveRestId) {
           await LocalSqliteStore.queueMutation({
             id: 'mut_' + Date.now(),
-            restaurant_id: restaurantId,
+            restaurant_id: effectiveRestId,
             entity: 'MENU_ITEM',
             action: editingItemId ? 'UPDATE' : 'INSERT',
             payload: { ...localDish, description: taggedDesc },
@@ -528,10 +539,11 @@ export default function MenuManagerPage() {
             description: taggedDesc,
             is_veg: form.is_veg,
           }).eq('id', editingItemId);
-          if (error && restaurantId) {
+          if (error && effectiveRestId) {
+            console.error('[Menu] Cloud update error:', error);
             await LocalSqliteStore.queueMutation({
               id: 'mut_' + Date.now(),
-              restaurant_id: restaurantId,
+              restaurant_id: effectiveRestId,
               entity: 'MENU_ITEM',
               action: 'UPDATE',
               payload: { ...localDish, description: taggedDesc },
@@ -539,7 +551,7 @@ export default function MenuManagerPage() {
             });
           }
         } else {
-          const { error } = await supabase.from('menu_items_v2').insert([{
+          const { data, error } = await supabase.from('menu_items_v2').insert([{
             id: dishId,
             name: form.name.trim(),
             category: finalCategory,
@@ -548,25 +560,42 @@ export default function MenuManagerPage() {
             description: taggedDesc,
             is_veg: form.is_veg,
             is_available: true,
-            restaurant_id: restaurantId || null
-          }]);
-          if (error && restaurantId) {
-            await LocalSqliteStore.queueMutation({
-              id: 'mut_' + Date.now(),
-              restaurant_id: restaurantId,
-              entity: 'MENU_ITEM',
-              action: 'INSERT',
-              payload: { ...localDish, description: taggedDesc },
-              created_at: new Date().toISOString()
-            });
+            restaurant_id: effectiveRestId || null
+          }]).select();
+          if (error) {
+            console.error('[Menu] Cloud insert error:', error);
+            if (effectiveRestId) {
+              await LocalSqliteStore.queueMutation({
+                id: 'mut_' + Date.now(),
+                restaurant_id: effectiveRestId,
+                entity: 'MENU_ITEM',
+                action: 'INSERT',
+                payload: { ...localDish, description: taggedDesc },
+                created_at: new Date().toISOString()
+              });
+            }
           }
+        }
+
+        // Save Recipe Usages if any
+        if (recipeIngredients.length > 0) {
+          try {
+            await supabase.from('inventory_recipe_usage').delete().eq('name', form.name.trim());
+            await supabase.from('inventory_recipe_usage').insert(
+              recipeIngredients.map(r => ({
+                name: form.name.trim(),
+                inventory_item_id: r.inventory_item_id,
+                amount: parseFloat(r.amount) || 0
+              }))
+            );
+          } catch {}
         }
       } catch (cloudErr) {
         console.warn('[Menu] Cloud sync deferred:', cloudErr);
-        if (restaurantId) {
+        if (effectiveRestId) {
           await LocalSqliteStore.queueMutation({
             id: 'mut_' + Date.now(),
-            restaurant_id: restaurantId,
+            restaurant_id: effectiveRestId,
             entity: 'MENU_ITEM',
             action: editingItemId ? 'UPDATE' : 'INSERT',
             payload: { ...localDish, description: taggedDesc },
@@ -575,8 +604,8 @@ export default function MenuManagerPage() {
         }
       } finally {
         OfflineSyncEngine.triggerSync();
-        if (restaurantId) {
-          SyncBus.emit("MENU_UPDATED", restaurantId, { id: editingItemId || dishId });
+        if (effectiveRestId) {
+          SyncBus.emit("MENU_UPDATED", effectiveRestId, { id: editingItemId || dishId });
         }
       }
     };
