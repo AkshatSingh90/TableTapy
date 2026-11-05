@@ -28,6 +28,7 @@ import { printThermalChit } from "@/lib/thermalPrinterBridge";
 import { LocalSqliteStore, getCanonicalRestaurantId } from "@/lib/localSqliteStore";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import { LocalCache } from "@/utils/localCache";
+import { SyncBus } from "@/utils/syncBus";
 
 function generateUUID(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -826,11 +827,45 @@ export default function PosPage() {
         fetchPastOrders(restaurantId);
       }
     };
+    // Cross-tab instant synchronization without Supabase egress
+    const unsubscribeSyncBus = SyncBus.subscribe((msg) => {
+      if (msg.restaurantId !== restaurantId) return;
+      if (msg.type === "MENU_UPDATED") {
+        LocalSqliteStore.getMenuItems(restaurantId, true).then((items) => {
+          if (items && items.length > 0) {
+            setMenuItems(
+              items.map((dish) => ({
+                ...dish,
+                variantsConfig: dish.variantsConfig || extractVariantsFromDescription(dish.description, Number(dish.base_price || 0)).config,
+              }))
+            );
+          }
+        });
+      } else if (msg.type === "LOCATIONS_UPDATED") {
+        LocalSqliteStore.getTables(restaurantId).then((tables) => {
+          if (tables && tables.length > 0) {
+            const enriched = tables.map((loc) => ({
+              ...loc,
+              zone: tableZones[loc.id] || (loc as any).zone || "Main Floor",
+            }));
+            const sorted = enriched.sort((a, b) => {
+              const numA = parseInt(a.name.replace(/\D/g, ""), 10);
+              const numB = parseInt(b.name.replace(/\D/g, ""), 10);
+              if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+              return a.name.localeCompare(b.name);
+            });
+            setLocations(sorted);
+          }
+        });
+      }
+    });
+
     window.addEventListener("storage", handleStorage);
     window.addEventListener("tabletapy_config_updated", handleConfigUpdated);
     window.addEventListener("tabletapy_locations_updated", handleLocationsUpdated);
     window.addEventListener("tabletapy_sync_completed", handleSyncComplete);
     return () => {
+      unsubscribeSyncBus();
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener("tabletapy_config_updated", handleConfigUpdated);
       window.removeEventListener("tabletapy_locations_updated", handleLocationsUpdated);

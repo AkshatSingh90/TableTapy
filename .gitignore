@@ -48,6 +48,7 @@ next-env.d.ts
 !postcss.config.mjs
 !tailwind.config.js
 !tailwind.config.mjs
+!public/sw.js
 *.py
 *.ps1
 *.txt

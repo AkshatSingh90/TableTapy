@@ -135,9 +135,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     setIsOpen(false);
   }, [pathname]);
 
-  // Start Background Outbox & Auto-Sync Engine
+  // Start Background Outbox & Auto-Sync Engine and PWA Service Worker
   useEffect(() => {
     OfflineSyncEngine.start();
+
+    // Register PWA Service Worker for 100% offline startup
+    if (typeof window !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker
+        .register("/sw.js")
+        .catch((err) => console.warn("[PWA] Service worker registration deferred:", err));
+    }
+
     return () => {
       OfflineSyncEngine.stop();
     };

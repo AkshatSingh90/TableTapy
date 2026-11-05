@@ -5,6 +5,7 @@ import { Search, Plus, ArrowLeft, Loader2, X, Edit2, Pencil, Trash2, ChefHat, Ch
 import { createClient } from "@/utils/supabase/client";
 import { LocalCache } from "@/utils/localCache";
 import { LocalSqliteStore, getCanonicalRestaurantId, LocalMenuItem } from "@/lib/localSqliteStore";
+import { SyncBus } from "@/utils/syncBus";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import {
   ItemVariantsConfig,
@@ -331,6 +332,9 @@ export default function MenuManagerPage() {
     
     const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).eq('id', item.id);
     if (error) console.warn("Could not save availability to DB, state updated locally. Add 'is_available' column to fix.");
+    if (restaurantId) {
+      SyncBus.emit("MENU_UPDATED", restaurantId, { id: item.id, is_available: newStatus });
+    }
   };
 
   const toggleCategoryAvailability = async (itemsToToggle: MenuItem[]) => {
@@ -347,6 +351,9 @@ export default function MenuManagerPage() {
     
     const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).in('id', ids);
     if (error) console.warn("Could not save category availability to DB, state updated locally. Add 'is_available' column to fix.");
+    if (restaurantId) {
+      SyncBus.emit("MENU_UPDATED", restaurantId, { ids, is_available: newStatus });
+    }
   };
 
   const handleAddIngredientToRecipe = (invId: string) => {
@@ -568,6 +575,9 @@ export default function MenuManagerPage() {
         }
       } finally {
         OfflineSyncEngine.triggerSync();
+        if (restaurantId) {
+          SyncBus.emit("MENU_UPDATED", restaurantId, { id: editingItemId || dishId });
+        }
       }
     };
     runCloudSync();
@@ -1649,6 +1659,9 @@ export default function MenuManagerPage() {
                             try {
                               const { error } = await supabase.from('menu_items_v2').delete().eq('id', toDeleteId);
                               await supabase.from('inventory_recipe_usage').delete().eq('name', toDeleteName);
+                              if (restaurantId) {
+                                SyncBus.emit("MENU_UPDATED", restaurantId, { id: toDeleteId, action: 'DELETE' });
+                              }
                               if (error && restaurantId) {
                                 await LocalSqliteStore.queueMutation({
                                   id: 'mut_' + Date.now(),

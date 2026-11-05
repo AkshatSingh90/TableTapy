@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { LocalSqliteStore, getCanonicalRestaurantId } from "@/lib/localSqliteStore";
+import { SyncBus } from "@/utils/syncBus";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import { Loader2, Plus, Trash2, Edit2, Download, Users, AlertTriangle, Link as LinkIcon, Search, CheckCircle2, QrCode, Layers } from "lucide-react";
 import QRCode from "react-qr-code";
@@ -327,6 +328,14 @@ export default function TableManagerPage() {
               const updatedZones = { ...tableZones, [cloudId]: trimmedZone };
               setTableZones(updatedZones);
               syncZones(restaurantId, updatedZones, nextZones);
+              LocalSqliteStore.saveSingleTable({
+                id: cloudId,
+                restaurant_id: restaurantId,
+                name: trimmedName,
+                type: newLocObj.type,
+                zone: trimmedZone,
+              });
+              SyncBus.emit("LOCATIONS_UPDATED", restaurantId, { id: cloudId, action: "INSERT" });
             }
           } catch (e: any) {
             console.warn('[Locations] Cloud insert deferred:', e);
