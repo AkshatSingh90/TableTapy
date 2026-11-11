@@ -20,6 +20,9 @@ import {
   CheckCircle2
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { LocalSqliteStore } from "@/lib/localSqliteStore";
+import { SyncBus } from "@/utils/syncBus";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
 import { 
   TaxSettings, 
   DEFAULT_TAX_SETTINGS, 
@@ -208,10 +211,42 @@ export default function SettingsPage() {
           bg_image: mergedBgImage
         };
 
-        const { error: updateErr } = await supabase.from('restaurants').update(updatePayload).eq('id', targetRestId);
-        if (updateErr) {
-          console.error("Database update error:", updateErr);
-          throw new Error(updateErr.message);
+        // Instant 0ms Local SQLite persistence
+        LocalSqliteStore.saveSettings({
+          restaurant_id: targetRestId,
+          business_name: restaurantName,
+          upi_id: upiId,
+          tax_settings_json: JSON.stringify(taxSettings),
+        }).catch(() => {});
+
+        // Instant cross-tab sync
+        SyncBus.emit("SETTINGS_UPDATED", targetRestId, { config: fullConfig });
+
+        // Cloud sync with offline fallback
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now(),
+            restaurant_id: targetRestId,
+            entity: 'SETTINGS',
+            action: 'UPDATE',
+            payload: updatePayload,
+            created_at: new Date().toISOString()
+          });
+          OfflineSyncEngine.triggerSync();
+        } else {
+          const { error: updateErr } = await supabase.from('restaurants').update(updatePayload).eq('id', targetRestId);
+          if (updateErr) {
+            console.warn("Database update deferred, queued offline:", updateErr);
+            await LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now(),
+              restaurant_id: targetRestId,
+              entity: 'SETTINGS',
+              action: 'UPDATE',
+              payload: updatePayload,
+              created_at: new Date().toISOString()
+            });
+            OfflineSyncEngine.triggerSync();
+          }
         }
 
         // 4. Realtime broadcast instant update to active POS terminals and customer tables

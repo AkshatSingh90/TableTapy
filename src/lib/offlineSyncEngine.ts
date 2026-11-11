@@ -209,10 +209,49 @@ class OfflineSyncManager {
 
         switch (m.entity) {
           case "MENU_ITEM": {
-            if (m.action === "INSERT" || m.action === "UPDATE") {
-              const d = m.payload;
-              const isUuid = Boolean(d.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d.id));
-              const validId = isUuid ? d.id : generateUUID();
+            const d = m.payload;
+            const isUuid = Boolean(d.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d.id));
+            const validId = isUuid ? d.id : generateUUID();
+
+            if (m.action === "UPDATE") {
+              if (d.is_available !== undefined && !d.name) {
+                // Availability-only toggle without risk of clearing dish names
+                const { error } = await this.withTimeout(
+                  this.supabase
+                    .from("menu_items_v2")
+                    .update({ is_available: d.is_available })
+                    .eq("id", validId)
+                );
+                success = !error;
+              } else {
+                const updateFields: any = {
+                  name: d.name ? d.name.trim() : "",
+                  category: d.category || "General",
+                  subcategory: d.subcategory || "",
+                  base_price: Number(d.base_price || d.price || 0),
+                  description: d.description || "",
+                  is_veg: Boolean(d.is_veg),
+                };
+                if (d.is_available !== undefined) {
+                  updateFields.is_available = d.is_available !== false;
+                }
+                const { error } = await this.withTimeout(
+                  this.supabase.from("menu_items_v2").update(updateFields).eq("id", validId)
+                );
+                if (!error) {
+                  success = true;
+                } else {
+                  const { error: upsertErr } = await this.withTimeout(
+                    this.supabase.from("menu_items_v2").upsert({
+                      id: validId,
+                      ...updateFields,
+                      restaurant_id: m.restaurant_id,
+                    })
+                  );
+                  success = !upsertErr;
+                }
+              }
+            } else if (m.action === "INSERT") {
               const { error } = await this.withTimeout(
                 this.supabase.from("menu_items_v2").upsert({
                   id: validId,
@@ -227,10 +266,6 @@ class OfflineSyncManager {
                 })
               );
               success = !error;
-              if (!error && validId !== d.id) {
-                await LocalSqliteStore.deleteMenuItem(m.restaurant_id, d.id).catch(() => {});
-                await LocalSqliteStore.saveSingleMenuItem({ ...d, id: validId }).catch(() => {});
-              }
             } else if (m.action === "DELETE") {
               const { error } = await this.withTimeout(
                 this.supabase.from("menu_items_v2").delete().eq("id", m.payload.id)
@@ -242,33 +277,74 @@ class OfflineSyncManager {
               }
               success = !error;
             }
+
+            if (success && validId !== d.id) {
+              await LocalSqliteStore.deleteMenuItem(m.restaurant_id, d.id).catch(() => {});
+              await LocalSqliteStore.saveSingleMenuItem({ ...d, id: validId }).catch(() => {});
+            }
             break;
           }
 
           case "TABLE": {
-            if (m.action === "INSERT" || m.action === "UPDATE") {
-              const t = m.payload;
-              const isUuid = Boolean(t.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t.id));
-              const validId = isUuid ? t.id : generateUUID();
-              const { error } = await this.withTimeout(
-                this.supabase.from("locations").upsert({
+            const t = m.payload;
+            const isUuid = Boolean(t.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t.id));
+            const validId = isUuid ? t.id : generateUUID();
+
+            if (m.action === "UPDATE") {
+              const { error: updErr } = await this.withTimeout(
+                this.supabase.from("locations").update({
+                  name: t.name ? t.name.trim() : "Table",
+                  type: t.type || "TABLE",
+                  secure_code: t.secure_code || t.code || "1234",
+                }).eq("id", validId)
+              );
+              if (!updErr) {
+                success = true;
+              } else {
+                // Delete & re-insert fallback for missing RLS UPDATE policy
+                await this.withTimeout(this.supabase.from("locations").delete().eq("id", validId)).catch(() => {});
+                const { error: insErr } = await this.withTimeout(
+                  this.supabase.from("locations").insert({
+                    id: validId,
+                    restaurant_id: m.restaurant_id,
+                    name: t.name ? t.name.trim() : "Table",
+                    type: t.type || "TABLE",
+                    secure_code: t.secure_code || t.code || "1234",
+                  })
+                );
+                success = !insErr;
+              }
+            } else if (m.action === "INSERT") {
+              const { error: insErr } = await this.withTimeout(
+                this.supabase.from("locations").insert({
                   id: validId,
                   restaurant_id: m.restaurant_id,
-                  name: t.name,
+                  name: t.name ? t.name.trim() : "Table",
                   type: t.type || "TABLE",
                   secure_code: t.secure_code || t.code || "1234",
                 })
               );
-              success = !error;
-              if (!error && validId !== t.id) {
-                await LocalSqliteStore.deleteTable(m.restaurant_id, t.id).catch(() => {});
-                await LocalSqliteStore.saveSingleTable({ ...t, id: validId }).catch(() => {});
+              if (!insErr) {
+                success = true;
+              } else {
+                const { error: updErr } = await this.withTimeout(
+                  this.supabase.from("locations").update({
+                    name: t.name ? t.name.trim() : "Table",
+                    type: t.type || "TABLE",
+                  }).eq("id", validId)
+                );
+                success = !updErr;
               }
             } else if (m.action === "DELETE") {
               const { error } = await this.withTimeout(
                 this.supabase.from("locations").delete().eq("id", m.payload.id)
               );
               success = !error;
+            }
+
+            if (success && validId !== t.id) {
+              await LocalSqliteStore.deleteTable(m.restaurant_id, t.id).catch(() => {});
+              await LocalSqliteStore.saveSingleTable({ ...t, id: validId }).catch(() => {});
             }
             break;
           }

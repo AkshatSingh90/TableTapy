@@ -159,17 +159,43 @@ export default function TableManagerPage() {
           zone: loadedTableZones[loc.id] || (loc as any).zone || finalZones[0] || 'Main Floor'
         }));
 
-        // Only merge locally created tables that have pending unsynced mutations
+        // Reconcile pending unsynced mutations (inserts, updates, deletes)
         const pendingMutations = await LocalSqliteStore.getPendingMutations(restId).catch(() => []);
-        const pendingTableIds = new Set(
-          (pendingMutations || [])
-            .filter((m: any) => m.entity === 'TABLE' && m.action === 'INSERT')
-            .map((m: any) => m.payload?.id)
-        );
+        const pendingInserts = new Map<string, any>();
+        const pendingUpdates = new Map<string, any>();
+        const pendingDeletes = new Set<string>();
 
-        const combined = [...mappedCloud];
+        for (const m of (pendingMutations || [])) {
+          if (m.entity === 'TABLE') {
+            const tableId = m.payload?.id;
+            if (!tableId) continue;
+            if (m.action === 'INSERT') pendingInserts.set(tableId, m.payload);
+            else if (m.action === 'UPDATE') pendingUpdates.set(tableId, m.payload);
+            else if (m.action === 'DELETE') pendingDeletes.add(tableId);
+          }
+        }
+
+        // 1. Exclude tables pending deletion
+        let combined = mappedCloud.filter((tbl) => !pendingDeletes.has(tbl.id));
+
+        // 2. Apply pending local updates (e.g. name edits, zone adjustments, capacity)
+        combined = combined.map((tbl) => {
+          if (pendingUpdates.has(tbl.id)) {
+            const upd = pendingUpdates.get(tbl.id);
+            return {
+              ...tbl,
+              ...(upd.name ? { name: upd.name } : {}),
+              ...(upd.zone ? { zone: upd.zone } : {}),
+              ...(upd.capacity !== undefined ? { capacity: upd.capacity } : {}),
+              ...(upd.isActive !== undefined ? { isActive: upd.isActive } : {}),
+            };
+          }
+          return tbl;
+        });
+
+        // 3. Include newly inserted tables from SQLite that haven't hit the cloud yet
         for (const lt of localTables) {
-          if (pendingTableIds.has(lt.id) && !combined.some(c => c.id === lt.id)) {
+          if (pendingInserts.has(lt.id) && !combined.some((c) => c.id === lt.id)) {
             combined.push({
               id: lt.id,
               restaurant_id: restId,
@@ -394,45 +420,127 @@ export default function TableManagerPage() {
         }
       }
 
-      if (updateOk) {
-        // Reflect rename across active orders in database so POS & Orders update
-        if (oldName && oldName.toLowerCase() !== trimmedName.toLowerCase()) {
-          try {
-            await supabase
-              .from('orders')
-              .update({ table_no: trimmedName })
-              .eq('restaurant_id', restaurantId)
-              .ilike('table_no', oldName);
-
-            const oldNorm = normalizeTableIdentifier(oldName);
-            if (oldNorm && oldNorm !== oldName) {
-              await supabase
-                .from('orders')
-                .update({ table_no: trimmedName })
-                .eq('restaurant_id', restaurantId)
-                .eq('table_no', oldNorm);
-            }
-          } catch (ordErr) {
-            console.error('Order migration error:', ordErr);
-          }
-        }
-
-        // Sync table zone
-        const nextTableZones = { ...tableZones, [formData.id]: trimmedZone };
-        setTableZones(nextTableZones);
-        await syncZones(restaurantId, nextTableZones, nextZones);
-
-        setLocations(locs => locs.map(l => l.id === formData.id ? {
-          ...l,
+      // 1. Instant 0ms SQLite Update
+      if (restaurantId) {
+        await LocalSqliteStore.saveSingleTable({
+          id: formData.id,
+          restaurant_id: restaurantId,
           name: trimmedName,
           capacity: formData.capacity,
-          isActive: formData.isActive,
-          zone: trimmedZone
-        } : l));
+          zone: trimmedZone,
+          is_active: formData.isActive
+        });
+      }
 
-        triggerToast(`${trimmedName} updated successfully`);
+      // 2. Instant UI update
+      const nextTableZones = { ...tableZones, [formData.id]: trimmedZone };
+      setTableZones(nextTableZones);
+      setLocations(locs => locs.map(l => l.id === formData.id ? {
+        ...l,
+        name: trimmedName,
+        capacity: formData.capacity,
+        isActive: formData.isActive,
+        zone: trimmedZone
+      } : l));
+      triggerToast(`${trimmedName} updated successfully`);
+
+      // 3. Broadcast instant cross-tab update
+      if (restaurantId) {
+        SyncBus.emit("LOCATIONS_UPDATED", restaurantId, { id: formData.id, action: "UPDATE" });
+      }
+
+      // 4. Cloud sync with offline fallback
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (restaurantId) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now(),
+            restaurant_id: restaurantId,
+            entity: 'TABLE',
+            action: 'UPDATE',
+            payload: {
+              id: formData.id,
+              name: trimmedName,
+              capacity: formData.capacity,
+              zone: trimmedZone,
+              isActive: formData.isActive,
+              type: oldLoc?.type || (businessType === 'HOTEL' ? 'ROOM' : 'TABLE'),
+              secure_code: oldLoc?.secure_code || '1234'
+            },
+            created_at: new Date().toISOString()
+          });
+        }
+        OfflineSyncEngine.triggerSync();
       } else {
-        triggerToast('Failed to update table in database.');
+        (async () => {
+          try {
+            let updateOk = false;
+            const { data: uData, error: uErr } = await supabase
+              .from('locations')
+              .update({ name: trimmedName })
+              .eq('id', formData.id)
+              .select();
+
+            if (!uErr && uData && uData.length > 0) {
+              updateOk = true;
+            } else if (oldLoc) {
+              const { error: dErr } = await supabase.from('locations').delete().eq('id', formData.id);
+              if (!dErr) {
+                const { data: iData, error: iErr } = await supabase.from('locations').insert({
+                  id: formData.id,
+                  restaurant_id: restaurantId,
+                  type: oldLoc.type || (businessType === 'HOTEL' ? 'ROOM' : 'TABLE'),
+                  name: trimmedName,
+                  secure_code: oldLoc.secure_code
+                }).select();
+                if (!iErr && iData && iData.length > 0) {
+                  updateOk = true;
+                }
+              }
+            }
+
+            if (!updateOk && restaurantId) {
+              await LocalSqliteStore.queueMutation({
+                id: 'mut_' + Date.now(),
+                restaurant_id: restaurantId,
+                entity: 'TABLE',
+                action: 'UPDATE',
+                payload: {
+                  id: formData.id,
+                  name: trimmedName,
+                  type: oldLoc?.type || 'TABLE',
+                  secure_code: oldLoc?.secure_code || '1234'
+                },
+                created_at: new Date().toISOString()
+              });
+            }
+
+            if (restaurantId) syncZones(restaurantId, nextTableZones, nextZones);
+            if (oldName && oldName.toLowerCase() !== trimmedName.toLowerCase()) {
+              try {
+                await supabase.from('orders').update({ table_no: trimmedName }).eq('restaurant_id', restaurantId).ilike('table_no', oldName);
+              } catch {}
+            }
+          } catch (cloudErr) {
+            console.warn('[Locations] Cloud update deferred:', cloudErr);
+            if (restaurantId) {
+              await LocalSqliteStore.queueMutation({
+                id: 'mut_' + Date.now(),
+                restaurant_id: restaurantId,
+                entity: 'TABLE',
+                action: 'UPDATE',
+                payload: {
+                  id: formData.id,
+                  name: trimmedName,
+                  type: oldLoc?.type || 'TABLE',
+                  secure_code: oldLoc?.secure_code || '1234'
+                },
+                created_at: new Date().toISOString()
+              }).catch(() => {});
+            }
+          } finally {
+            OfflineSyncEngine.triggerSync();
+          }
+        })();
       }
     }
     
@@ -487,7 +595,10 @@ export default function TableManagerPage() {
               created_at: new Date().toISOString()
             });
           }
-          if (restaurantId) syncZones(restaurantId, nextTableZones, zones);
+          if (restaurantId) {
+            syncZones(restaurantId, nextTableZones, zones);
+            SyncBus.emit("LOCATIONS_UPDATED", restaurantId, { id: toDel.id, action: "DELETE" });
+          }
         } catch (e: any) {
           console.warn('[Locations] Cloud delete deferred:', e);
           if (restaurantId) {

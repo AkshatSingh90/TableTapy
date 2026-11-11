@@ -26,6 +26,9 @@ import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
 import { groupOrdersIntoSessions } from "@/utils/orderSession";
 import { printThermalChit } from "@/lib/thermalPrinterBridge";
+import { LocalSqliteStore } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
+import { SyncBus } from "@/utils/syncBus";
 
 /* ─── Interfaces ─────────────────────────────────────────── */
 interface OrderItem {
@@ -173,30 +176,46 @@ export default function InvoicesPage() {
       const restId = activeUser?.user_metadata?.restaurant_id || (typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") : null);
 
       if (restId) {
-        const { data: restData } = await supabase.from("restaurants").select("*").eq("id", restId).maybeSingle();
-        if (restData) {
-          setRestaurant({
-            id: restData.id,
-            name: restData.name || "My Restaurant",
-            slug: restData.slug,
-            address: restData.address || "",
-            phone: restData.phone || "",
-            gstin: restData.gstin || "",
-            fssai: restData.fssai || "",
-            upi_id: restData.upi_id || "",
-            primary_color: restData.primary_color || "#E46254",
-          });
-        }
+        // 1. Instant 0ms local hydration from SQLite store
+        try {
+          const localOrds = await LocalSqliteStore.getLocalOrders(restId);
+          if (localOrds && localOrds.length > 0) {
+            setRawOrders(localOrds as OrderRecord[]);
+            setLoading(false);
+          }
+        } catch {}
 
-        const { data: ordersData, error: ordersErr } = await supabase
-          .from("orders")
-          .select("*")
-          .eq("restaurant_id", restId)
-          .order("created_at", { ascending: false })
-          .limit(600);
+        try {
+          const { data: restData } = await supabase.from("restaurants").select("*").eq("id", restId).maybeSingle();
+          if (restData) {
+            setRestaurant({
+              id: restData.id,
+              name: restData.name || "My Restaurant",
+              slug: restData.slug,
+              address: restData.address || "",
+              phone: restData.phone || "",
+              gstin: restData.gstin || "",
+              fssai: restData.fssai || "",
+              upi_id: restData.upi_id || "",
+              primary_color: restData.primary_color || "#E46254",
+            });
+          }
+        } catch {}
 
-        if (!ordersErr && ordersData) {
-          setRawOrders(ordersData as OrderRecord[]);
+        try {
+          const { data: ordersData, error: ordersErr } = await supabase
+            .from("orders")
+            .select("*")
+            .eq("restaurant_id", restId)
+            .order("created_at", { ascending: false })
+            .limit(600);
+
+          if (!ordersErr && ordersData) {
+            setRawOrders(ordersData as OrderRecord[]);
+            LocalSqliteStore.syncActiveOrders(restId, ordersData as any, true).catch(() => {});
+          }
+        } catch (fetchErr) {
+          console.warn("[Invoices] Cloud fetch deferred, running from local SQLite:", fetchErr);
         }
       }
     } catch (err) {
@@ -209,6 +228,18 @@ export default function InvoicesPage() {
 
   useEffect(() => {
     fetchData();
+
+    const unsub = SyncBus.subscribe((msg) => {
+      if (msg.type === "ORDERS_UPDATED") {
+        const rId = localStorage.getItem("tabletapy_restaurant_id") || "";
+        if (rId && (!msg.restaurantId || msg.restaurantId === rId)) {
+          LocalSqliteStore.getLocalOrders(rId).then((cached) => {
+            if (cached && cached.length > 0) setRawOrders(cached as OrderRecord[]);
+          }).catch(() => {});
+        }
+      }
+    });
+    return () => unsub();
   }, []);
 
   const handleRefresh = () => {
@@ -495,24 +526,49 @@ export default function InvoicesPage() {
 
     try {
       const orderIds = editingPaymentInvoice.rounds.map((r) => r.id);
+      const restId = restaurant?.id || (typeof window !== "undefined" ? localStorage.getItem("tabletapy_restaurant_id") : null);
 
-      const { error } = await supabase
-        .from("orders")
-        .update({
-          payment_method: newMethod,
-          payment_status: "PAID",
-          note: `[Payment Method updated to ${newMethod}]`,
-        })
-        .in("id", orderIds);
+      // 1. Instant 0ms local state and SQLite update
+      setRawOrders((prev) =>
+        prev.map((o) => (orderIds.includes(o.id) ? { ...o, payment_method: newMethod, payment_status: "PAID" } : o))
+      );
 
-      if (error) {
-        showToast("Error updating payment: " + error.message);
-      } else {
-        setRawOrders((prev) =>
-          prev.map((o) => (orderIds.includes(o.id) ? { ...o, payment_method: newMethod } : o))
-        );
-        showToast(`✅ Invoice ${editingPaymentInvoice.invoiceNumber} switched to ${newMethod}`);
-        setEditingPaymentInvoice(null);
+      if (restId) {
+        for (const r of editingPaymentInvoice.rounds) {
+          await LocalSqliteStore.saveOrderLocally({
+            ...r,
+            restaurant_id: restId,
+            payment_method: newMethod,
+            payment_status: "PAID",
+            synced: false
+          }).catch(() => {});
+        }
+        SyncBus.emit("ORDERS_UPDATED", restId, { orderIds, payment_method: newMethod });
+      }
+
+      showToast(`✅ Invoice ${editingPaymentInvoice.invoiceNumber} switched to ${newMethod}`);
+      setEditingPaymentInvoice(null);
+
+      // 2. Cloud Sync with offline fallback
+      try {
+        const { error } = await supabase
+          .from("orders")
+          .update({
+            payment_method: newMethod,
+            payment_status: "PAID",
+            note: `[Payment Method updated to ${newMethod}]`,
+          })
+          .in("id", orderIds);
+
+        if (!error) {
+          for (const oid of orderIds) {
+            await LocalSqliteStore.markOrderSynced(oid).catch(() => {});
+          }
+        } else {
+          OfflineSyncEngine.triggerSync();
+        }
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     } catch (err: any) {
       showToast("Failed to update payment: " + err.message);

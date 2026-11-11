@@ -3,6 +3,9 @@
 import React, { useState, useEffect } from "react";
 import { Maximize2, Minimize2, Volume2, VolumeX, Check, AlertOctagon, X, Trash2, CheckCircle2 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { LocalSqliteStore } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
+import { SyncBus } from "@/utils/syncBus";
 
 import { playNewOrderChime, playKitchenHoldUrgentAlert } from "@/utils/audioAlerts";
 import { extractUserNote } from "@/utils/orderSession";
@@ -364,46 +367,70 @@ export default function KitchenDisplayPage() {
   const handleMarkReady = async (order: KitchenOrder) => {
     setActionLoadingId(order.id);
     try {
-      // Set status to SERVED which notifies cashier / waiters on dashboard
-      const { error } = await supabase.from('orders').update({ status: 'SERVED' }).eq('id', order.id);
-      if (!error) {
-        setOrders(prev => prev.filter(o => o.id !== order.id));
-        setRecentlyBumped(prev => [order, ...prev.filter(o => o.id !== order.id)].slice(0, 15));
+      // 1. Instant 0ms Local SQLite update
+      if (restaurantId) {
+        await LocalSqliteStore.saveOrderLocally({
+          ...order,
+          restaurant_id: restaurantId,
+          status: 'SERVED',
+          payment_status: (order as any).payment_status || 'PENDING',
+          payment_method: (order as any).payment_method || 'COUNTER',
+          total: (order as any).total || 0,
+          created_at: (order as any).created_at || new Date().toISOString(),
+          synced: false
+        }).catch(() => {});
+        SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: order.id, status: 'SERVED' });
+      }
 
-        // Trigger Expediter notification on screen
-        setExpediteNotice(`Table ${order.table_no} Plated & Ready for Waiter Pickup`);
-        setTimeout(() => setExpediteNotice(null), 5000);
+      // Update UI state immediately
+      setOrders(prev => prev.filter(o => o.id !== order.id));
+      setRecentlyBumped(prev => [order, ...prev.filter(o => o.id !== order.id)].slice(0, 15));
 
-        // Broadcast to guest table and waiter terminals immediately
-        if (restaurantId && order.table_no) {
-          try {
-            const tableChannel = supabase.channel(`table_session_${restaurantId}_${encodeURIComponent(order.table_no)}`);
-            tableChannel.subscribe((status: string) => {
-              if (status === 'SUBSCRIBED') {
-                tableChannel.send({
-                  type: 'broadcast',
-                  event: 'food_ready',
-                  payload: {
-                    orderId: order.id,
-                    tableName: order.table_no,
-                    timestamp: Date.now()
-                  }
-                });
-                setTimeout(() => supabase.removeChannel(tableChannel), 1000);
-              }
-            });
-          } catch (bErr) {
-            console.warn("Food ready broadcast notice:", bErr);
-          }
+      // Trigger Expediter notification on screen
+      setExpediteNotice(`Table ${order.table_no} Plated & Ready for Waiter Pickup`);
+      setTimeout(() => setExpediteNotice(null), 5000);
+
+      // Broadcast to guest table and waiter terminals immediately
+      if (restaurantId && order.table_no) {
+        try {
+          const tableChannel = supabase.channel(`table_session_${restaurantId}_${encodeURIComponent(order.table_no)}`);
+          tableChannel.subscribe((status: string) => {
+            if (status === 'SUBSCRIBED') {
+              tableChannel.send({
+                type: 'broadcast',
+                event: 'food_ready',
+                payload: {
+                  orderId: order.id,
+                  tableName: order.table_no,
+                  timestamp: Date.now()
+                }
+              });
+              setTimeout(() => supabase.removeChannel(tableChannel), 1000);
+            }
+          });
+        } catch (bErr) {
+          console.warn("Food ready broadcast notice:", bErr);
         }
+      }
 
-        // Trigger 10-second Undo banner
-        if (undoTimer) clearTimeout(undoTimer);
-        setUndoToastOrder(order);
-        const timer = setTimeout(() => {
-          setUndoToastOrder(null);
-        }, 10000);
-        setUndoTimer(timer);
+      // Trigger 10-second Undo banner
+      if (undoTimer) clearTimeout(undoTimer);
+      setUndoToastOrder(order);
+      const timer = setTimeout(() => {
+        setUndoToastOrder(null);
+      }, 10000);
+      setUndoTimer(timer);
+
+      // 2. Cloud Sync with offline fallback
+      try {
+        const { error } = await supabase.from('orders').update({ status: 'SERVED' }).eq('id', order.id);
+        if (!error) {
+          await LocalSqliteStore.markOrderSynced(order.id).catch(() => {});
+        } else {
+          OfflineSyncEngine.triggerSync();
+        }
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     } catch (err) {
       console.error(err);
@@ -423,16 +450,40 @@ export default function KitchenDisplayPage() {
   const handleRestoreOrder = async (order: KitchenOrder) => {
     setActionLoadingId(order.id);
     try {
-      const { error } = await supabase.from('orders').update({ status: 'PREPARING' }).eq('id', order.id);
-      if (!error) {
-        setRecentlyBumped(prev => prev.filter(o => o.id !== order.id));
-        setOrders(prev => {
-          if (prev.some(o => o.id === order.id)) return prev;
-          return [...prev, { ...order, status: 'PREPARING' }];
-        });
-        if (undoToastOrder?.id === order.id) {
-          setUndoToastOrder(null);
+      // 1. Instant 0ms Local SQLite update
+      if (restaurantId) {
+        await LocalSqliteStore.saveOrderLocally({
+          ...order,
+          restaurant_id: restaurantId,
+          status: 'PREPARING',
+          payment_status: (order as any).payment_status || 'PENDING',
+          payment_method: (order as any).payment_method || 'COUNTER',
+          total: (order as any).total || 0,
+          created_at: (order as any).created_at || new Date().toISOString(),
+          synced: false
+        }).catch(() => {});
+        SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: order.id, status: 'PREPARING' });
+      }
+
+      setRecentlyBumped(prev => prev.filter(o => o.id !== order.id));
+      setOrders(prev => {
+        if (prev.some(o => o.id === order.id)) return prev;
+        return [...prev, { ...order, status: 'PREPARING' }];
+      });
+      if (undoToastOrder?.id === order.id) {
+        setUndoToastOrder(null);
+      }
+
+      // 2. Cloud Sync with offline fallback
+      try {
+        const { error } = await supabase.from('orders').update({ status: 'PREPARING' }).eq('id', order.id);
+        if (!error) {
+          await LocalSqliteStore.markOrderSynced(order.id).catch(() => {});
+        } else {
+          OfflineSyncEngine.triggerSync();
         }
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     } catch (err) {
       console.error(err);

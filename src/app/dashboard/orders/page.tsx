@@ -16,6 +16,9 @@ import {
   playKitchenHoldUrgentAlert
 } from "@/utils/audioAlerts";
 import { groupOrdersIntoSessions, extractSessionId, extractUserNote } from "@/utils/orderSession";
+import { LocalSqliteStore, generateUUID } from "@/lib/localSqliteStore";
+import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
+import { SyncBus } from "@/utils/syncBus";
 
 interface OrderItem {
   item: { id: string; name: string; basePrice?: number; category?: string; isVeg?: boolean; notes?: string };
@@ -1548,6 +1551,7 @@ export default function LiveOrdersPage() {
   useEffect(() => {
     let ch: any = null;
     let restIdLocal: string | null = null;
+    let unsubscribeSyncBus: (() => void) | null = null;
 
     const init = async () => {
       setLoading(true);
@@ -1558,25 +1562,46 @@ export default function LiveOrdersPage() {
       restIdLocal = restId || null;
 
       if (restId) {
+        // 1. Instant 0ms hydration from local SQLite store
+        try {
+          const localOrds = await LocalSqliteStore.getLocalOrders(restId);
+          if (localOrds && localOrds.length > 0) {
+            setOrders(localOrds as Order[]);
+            ordersRef.current = localOrds as Order[];
+            setLoading(false);
+          }
+          const localDishes = await LocalSqliteStore.getMenuItems(restId, true);
+          if (localDishes && localDishes.length > 0) {
+            setMenuCatalog(localDishes);
+          }
+        } catch {}
+
         const { data: ri } = await supabase.from('restaurants').select('name').eq('id', restId).maybeSingle();
         if (ri?.name) setRestaurantName(ri.name);
 
-        const { data } = await supabase.from('orders').select('*').eq('restaurant_id', restId).order('created_at', { ascending: false }).limit(150);
-        if (data) {
-          setOrders(data as Order[]);
-          ordersRef.current = data as Order[];
+        try {
+          const { data } = await supabase.from('orders').select('*').eq('restaurant_id', restId).order('created_at', { ascending: false }).limit(150);
+          if (data) {
+            setOrders(data as Order[]);
+            ordersRef.current = data as Order[];
+            LocalSqliteStore.syncActiveOrders(restId, data as any, true).catch(() => {});
+          }
+        } catch (fetchErr) {
+          console.warn("[Orders] Cloud fetch deferred, running from local SQLite:", fetchErr);
         }
 
         // Fetch menu catalog for quick add in BillModal / POS
-        const { data: menuData } = await supabase
-          .from('menu_items_v2')
-          .select('id, name, base_price, category, is_veg')
-          .eq('restaurant_id', restId)
-          .eq('is_available', true)
-          .order('name');
-        if (menuData) {
-          setMenuCatalog(menuData);
-        }
+        try {
+          const { data: menuData } = await supabase
+            .from('menu_items_v2')
+            .select('id, name, base_price, category, is_veg')
+            .eq('restaurant_id', restId)
+            .eq('is_available', true)
+            .order('name');
+          if (menuData) {
+            setMenuCatalog(menuData);
+          }
+        } catch {}
 
         ch = supabase.channel(`orders_${restId}_${Date.now()}`)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders', filter: `restaurant_id=eq.${restId}` }, p => {
@@ -1587,6 +1612,7 @@ export default function LiveOrdersPage() {
                 ordersRef.current = next;
                 return next;
               });
+              LocalSqliteStore.saveOrderLocally({ ...o, restaurant_id: restId, synced: true }).catch(() => {});
               playNewOrderChime(soundEnabled);
             }
           })
@@ -1618,18 +1644,42 @@ export default function LiveOrdersPage() {
                 ordersRef.current = next;
                 return next;
               });
+              LocalSqliteStore.saveOrderLocally({ ...o, restaurant_id: restId, synced: true }).catch(() => {});
             }
           })
           .subscribe();
 
+        // Cross-tab synchronization via SyncBus
+        unsubscribeSyncBus = SyncBus.subscribe((msg) => {
+          if (msg.type === "ORDERS_UPDATED" && (!msg.restaurantId || msg.restaurantId === restIdLocal)) {
+            if (restIdLocal) {
+              LocalSqliteStore.getLocalOrders(restIdLocal).then((cached) => {
+                if (cached && cached.length > 0) {
+                  setOrders(cached as Order[]);
+                  ordersRef.current = cached as Order[];
+                }
+              }).catch(() => {});
+            }
+          } else if (msg.type === "MENU_UPDATED" && (!msg.restaurantId || msg.restaurantId === restIdLocal)) {
+            if (restIdLocal) {
+              LocalSqliteStore.getMenuItems(restIdLocal, true).then((items) => {
+                if (items && items.length > 0) setMenuCatalog(items);
+              }).catch(() => {});
+            }
+          }
+        });
+
         // Auto-reconnect / sync when screen wakes up from sleep or tab regains focus
         const syncOwnerOrders = async () => {
           if (!restIdLocal) return;
-          const { data } = await supabase.from('orders').select('*').eq('restaurant_id', restIdLocal).order('created_at', { ascending: false }).limit(150);
-          if (data) {
-            setOrders(data as Order[]);
-            ordersRef.current = data as Order[];
-          }
+          try {
+            const { data } = await supabase.from('orders').select('*').eq('restaurant_id', restIdLocal).order('created_at', { ascending: false }).limit(150);
+            if (data) {
+              setOrders(data as Order[]);
+              ordersRef.current = data as Order[];
+              LocalSqliteStore.syncActiveOrders(restIdLocal, data as any, true).catch(() => {});
+            }
+          } catch {}
         };
 
         const handleVisibilityChange = () => {
@@ -1649,27 +1699,58 @@ export default function LiveOrdersPage() {
 
     return () => { 
       if (ch) supabase.removeChannel(ch); 
+      if (unsubscribeSyncBus) unsubscribeSyncBus();
     };
   }, [soundEnabled]);
 
   const handleRefresh = async () => {
     if (!restaurantId) return;
     setLoading(true);
-    const { data } = await supabase.from('orders').select('*').eq('restaurant_id', restaurantId).order('created_at', { ascending: false }).limit(150);
-    if (data) setOrders(data as Order[]);
+    try {
+      const { data } = await supabase.from('orders').select('*').eq('restaurant_id', restaurantId).order('created_at', { ascending: false }).limit(150);
+      if (data) {
+        setOrders(data as Order[]);
+        ordersRef.current = data as Order[];
+        LocalSqliteStore.syncActiveOrders(restaurantId, data as any, true).catch(() => {});
+      }
+    } catch {
+      const local = await LocalSqliteStore.getLocalOrders(restaurantId);
+      if (local && local.length > 0) {
+        setOrders(local as Order[]);
+        ordersRef.current = local as Order[];
+      }
+    }
     setLoading(false);
   };
 
   // Send a specific round's KOT to kitchen
   const handleSendKot = async (round: Order) => {
     setActionLoadingId(`kot_${round.id}`);
-    const { error } = await supabase.from('orders').update({ status: 'PREPARING' }).eq('id', round.id);
-    if (error) {
-      setDashboardErrorToast("Error sending KOT: " + error.message);
-      setTimeout(() => setDashboardErrorToast(null), 5000);
-    } else {
-      setOrders(prev => prev.map(o => o.id === round.id ? { ...o, status: 'PREPARING' } : o));
+    const updatedRound: Order = { ...round, status: 'PREPARING' };
+
+    // 1. Instant 0ms Local SQLite Save
+    if (restaurantId) {
+      await LocalSqliteStore.saveOrderLocally({
+        ...updatedRound,
+        restaurant_id: restaurantId,
+        synced: false
+      });
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: round.id, status: 'PREPARING' });
     }
+    setOrders(prev => prev.map(o => o.id === round.id ? updatedRound : o));
+
+    // 2. Cloud Sync with offline fallback
+    try {
+      const { error } = await supabase.from('orders').update({ status: 'PREPARING' }).eq('id', round.id);
+      if (!error) {
+        await LocalSqliteStore.markOrderSynced(round.id);
+      } else {
+        OfflineSyncEngine.triggerSync();
+      }
+    } catch {
+      OfflineSyncEngine.triggerSync();
+    }
+
     setActionLoadingId(null);
     setKotModal(null);
   };
@@ -1718,15 +1799,15 @@ export default function LiveOrdersPage() {
       }
     }
 
-    const { error } = await supabase
-      .from('orders')
-      .update(updatePayload)
-      .eq('id', roundId);
-
-    if (error) {
-      setDashboardErrorToast("Error updating item: " + error.message);
-      setTimeout(() => setDashboardErrorToast(null), 5000);
-      return;
+    // 1. Instant 0ms Local SQLite update & state update
+    if (restaurantId) {
+      await LocalSqliteStore.saveOrderLocally({
+        ...targetRound,
+        ...updatePayload,
+        restaurant_id: restaurantId,
+        synced: false
+      });
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: roundId });
     }
 
     // Update local state
@@ -1750,6 +1831,22 @@ export default function LiveOrdersPage() {
         }
       };
     });
+
+    // 2. Cloud Sync with offline fallback
+    try {
+      const { error } = await supabase
+        .from('orders')
+        .update(updatePayload)
+        .eq('id', roundId);
+
+      if (!error) {
+        await LocalSqliteStore.markOrderSynced(roundId);
+      } else {
+        OfflineSyncEngine.triggerSync();
+      }
+    } catch {
+      OfflineSyncEngine.triggerSync();
+    }
 
     // If order is cooking or plated, notify kitchen immediately of deductions or additions!
     if (targetRound.status === 'PREPARING' || targetRound.status === 'SERVED') {
@@ -1834,29 +1931,45 @@ export default function LiveOrdersPage() {
         updatePayload.status = 'SERVED';
       }
 
-      const { error } = await supabase.from('orders').update(updatePayload).eq('id', activeRound.id);
-      if (!error) {
-        setOrders(prev => prev.map(o => o.id === activeRound.id ? { ...o, ...updatePayload } : o));
-        setBillModal(prev => {
-          if (!prev) return null;
-          const updatedRounds = prev.session.rounds.map(r => r.id === activeRound.id ? { ...r, ...updatePayload } : r);
-          const updatedTotal = updatedRounds.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
-          return {
-            ...prev,
-            session: {
-              ...prev.session,
-              rounds: updatedRounds,
-              totalBill: updatedTotal,
-              isPaid: false,
-              sessionStatus: 'ACTIVE',
-            }
-          };
+      if (restaurantId) {
+        await LocalSqliteStore.saveOrderLocally({
+          ...activeRound,
+          ...updatePayload,
+          restaurant_id: restaurantId,
+          synced: false
         });
-        setReadyForPickupNotice(`💧 Added ${bottleType.name} to Table ${session.table_no}!`);
-        setTimeout(() => setReadyForPickupNotice(null), 4000);
+        SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: activeRound.id });
+      }
+
+      setOrders(prev => prev.map(o => o.id === activeRound.id ? { ...o, ...updatePayload } : o));
+      setBillModal(prev => {
+        if (!prev) return null;
+        const updatedRounds = prev.session.rounds.map(r => r.id === activeRound.id ? { ...r, ...updatePayload } : r);
+        const updatedTotal = updatedRounds.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
+        return {
+          ...prev,
+          session: {
+            ...prev.session,
+            rounds: updatedRounds,
+            totalBill: updatedTotal,
+            isPaid: false,
+            sessionStatus: 'ACTIVE',
+          }
+        };
+      });
+      setReadyForPickupNotice(`💧 Added ${bottleType.name} to Table ${session.table_no}!`);
+      setTimeout(() => setReadyForPickupNotice(null), 4000);
+
+      try {
+        const { error } = await supabase.from('orders').update(updatePayload).eq('id', activeRound.id);
+        if (!error) await LocalSqliteStore.markOrderSynced(activeRound.id);
+        else OfflineSyncEngine.triggerSync();
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     } else if (restaurantId) {
       // Create new served round with water bottle
+      const newOrderId = generateUUID();
       const itemsPayload = [{
         item: {
           id: `water_${Date.now()}`,
@@ -1868,29 +1981,52 @@ export default function LiveOrdersPage() {
         quantity: 1
       }];
 
-      const { data, error } = await supabase.from('orders').insert({
+      const newOrderObj: Order = {
+        id: newOrderId,
         restaurant_id: restaurantId,
         table_no: session.table_no,
         total: bottleType.price,
         status: 'SERVED',
         items_json: itemsPayload,
         customer_name: session.customer_name || 'Dine-in Guest',
-        payment_status: 'PENDING'
-      }).select().single();
+        payment_status: 'PENDING',
+        created_at: new Date().toISOString()
+      };
 
-      if (!error && data) {
-        setOrders(prev => [data, ...prev]);
-        setBillModal(prev => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            session: {
-              ...prev.session,
-              rounds: [...prev.session.rounds, data],
-              totalBill: prev.session.totalBill + bottleType.price
-            }
-          };
+      await LocalSqliteStore.saveOrderLocally({
+        ...newOrderObj,
+        synced: false
+      });
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: newOrderId });
+
+      setOrders(prev => [newOrderObj, ...prev]);
+      setBillModal(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          session: {
+            ...prev.session,
+            rounds: [...prev.session.rounds, newOrderObj],
+            totalBill: prev.session.totalBill + bottleType.price
+          }
+        };
+      });
+
+      try {
+        const { error } = await supabase.from('orders').insert({
+          id: newOrderId,
+          restaurant_id: restaurantId,
+          table_no: session.table_no,
+          total: bottleType.price,
+          status: 'SERVED',
+          items_json: itemsPayload,
+          customer_name: session.customer_name || 'Dine-in Guest',
+          payment_status: 'PENDING'
         });
+        if (!error) await LocalSqliteStore.markOrderSynced(newOrderId);
+        else OfflineSyncEngine.triggerSync();
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     }
   };
@@ -1932,29 +2068,45 @@ export default function LiveOrdersPage() {
         updatePayload.status = 'SERVED';
       }
 
-      const { error } = await supabase.from('orders').update(updatePayload).eq('id', targetRound.id);
-      if (!error) {
-        setOrders(prev => prev.map(o => o.id === targetRound.id ? { ...o, ...updatePayload } : o));
-        setBillModal(prev => {
-          if (!prev) return null;
-          const updatedRounds = prev.session.rounds.map(r => r.id === targetRound.id ? { ...r, ...updatePayload } : r);
-          const updatedTotal = updatedRounds.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
-          return {
-            ...prev,
-            session: {
-              ...prev.session,
-              rounds: updatedRounds,
-              totalBill: updatedTotal,
-              isPaid: false,
-              sessionStatus: 'ACTIVE',
-            }
-          };
+      if (restaurantId) {
+        await LocalSqliteStore.saveOrderLocally({
+          ...targetRound,
+          ...updatePayload,
+          restaurant_id: restaurantId,
+          synced: false
         });
-        setReadyForPickupNotice(`✅ Added 1× "${menuItem.name}" to Table ${session.table_no}!`);
-        setTimeout(() => setReadyForPickupNotice(null), 4000);
+        SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: targetRound.id });
+      }
+
+      setOrders(prev => prev.map(o => o.id === targetRound.id ? { ...o, ...updatePayload } : o));
+      setBillModal(prev => {
+        if (!prev) return null;
+        const updatedRounds = prev.session.rounds.map(r => r.id === targetRound.id ? { ...r, ...updatePayload } : r);
+        const updatedTotal = updatedRounds.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
+        return {
+          ...prev,
+          session: {
+            ...prev.session,
+            rounds: updatedRounds,
+            totalBill: updatedTotal,
+            isPaid: false,
+            sessionStatus: 'ACTIVE',
+          }
+        };
+      });
+      setReadyForPickupNotice(`✅ Added 1× "${menuItem.name}" to Table ${session.table_no}!`);
+      setTimeout(() => setReadyForPickupNotice(null), 4000);
+
+      try {
+        const { error } = await supabase.from('orders').update(updatePayload).eq('id', targetRound.id);
+        if (!error) await LocalSqliteStore.markOrderSynced(targetRound.id);
+        else OfflineSyncEngine.triggerSync();
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     } else if (restaurantId) {
       // Create new NEW round with this dish
+      const newOrderId = generateUUID();
       const itemsPayload = [{
         item: {
           id: menuItem.id,
@@ -1966,34 +2118,57 @@ export default function LiveOrdersPage() {
         quantity: 1
       }];
 
-      const { data, error } = await supabase.from('orders').insert({
+      const newOrderObj: Order = {
+        id: newOrderId,
         restaurant_id: restaurantId,
         table_no: session.table_no,
         total: menuItem.base_price,
         status: 'NEW',
         items_json: itemsPayload,
         customer_name: session.customer_name || 'Dine-in Guest',
-        payment_status: 'PENDING'
-      }).select().single();
+        payment_status: 'PENDING',
+        created_at: new Date().toISOString()
+      };
 
-      if (!error && data) {
-        setOrders(prev => [data, ...prev]);
-        setBillModal(prev => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            session: {
-              ...prev.session,
-              rounds: [...prev.session.rounds, data],
-              totalBill: prev.session.totalBill + menuItem.base_price,
-              hasNewRound: true,
-              isPaid: false,
-              sessionStatus: 'ACTIVE',
-            }
-          };
+      await LocalSqliteStore.saveOrderLocally({
+        ...newOrderObj,
+        synced: false
+      });
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: newOrderId });
+
+      setOrders(prev => [newOrderObj, ...prev]);
+      setBillModal(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          session: {
+            ...prev.session,
+            rounds: [...prev.session.rounds, newOrderObj],
+            totalBill: prev.session.totalBill + menuItem.base_price,
+            hasNewRound: true,
+            isPaid: false,
+            sessionStatus: 'ACTIVE',
+          }
+        };
+      });
+      setReadyForPickupNotice(`✅ Created new order with 1× "${menuItem.name}" for Table ${session.table_no}!`);
+      setTimeout(() => setReadyForPickupNotice(null), 4000);
+
+      try {
+        const { error } = await supabase.from('orders').insert({
+          id: newOrderId,
+          restaurant_id: restaurantId,
+          table_no: session.table_no,
+          total: menuItem.base_price,
+          status: 'NEW',
+          items_json: itemsPayload,
+          customer_name: session.customer_name || 'Dine-in Guest',
+          payment_status: 'PENDING'
         });
-        setReadyForPickupNotice(`✅ Created new order with 1× "${menuItem.name}" for Table ${session.table_no}!`);
-        setTimeout(() => setReadyForPickupNotice(null), 4000);
+        if (!error) await LocalSqliteStore.markOrderSynced(newOrderId);
+        else OfflineSyncEngine.triggerSync();
+      } catch {
+        OfflineSyncEngine.triggerSync();
       }
     }
   };
@@ -2011,20 +2186,36 @@ export default function LiveOrdersPage() {
       notes: note
     };
 
-    const { error } = await supabase.from('orders').update({ items_json: currentItems }).eq('id', roundId);
-    if (!error) {
-      setOrders(prev => prev.map(o => o.id === roundId ? { ...o, items_json: currentItems } : o));
-      setBillModal(prev => {
-        if (!prev) return null;
-        const updatedRounds = prev.session.rounds.map(r => r.id === roundId ? { ...r, items_json: currentItems } : r);
-        return {
-          ...prev,
-          session: {
-            ...prev.session,
-            rounds: updatedRounds
-          }
-        };
+    if (restaurantId) {
+      await LocalSqliteStore.saveOrderLocally({
+        ...targetRound,
+        items_json: currentItems,
+        restaurant_id: restaurantId,
+        synced: false
       });
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { id: roundId });
+    }
+
+    setOrders(prev => prev.map(o => o.id === roundId ? { ...o, items_json: currentItems } : o));
+    setBillModal(prev => {
+      if (!prev) return null;
+      const updatedRounds = prev.session.rounds.map(r => r.id === roundId ? { ...r, items_json: currentItems } : r);
+      return {
+        ...prev,
+        session: {
+          ...prev.session,
+          rounds: updatedRounds
+        }
+      };
+    });
+
+    try {
+      const { error } = await supabase.from('orders').update({ items_json: currentItems }).eq('id', roundId);
+      if (!error) await LocalSqliteStore.markOrderSynced(roundId);
+      else OfflineSyncEngine.triggerSync();
+    } catch {
+      OfflineSyncEngine.triggerSync();
+    }
 
       // Broadcast note update to kitchen display in real-time
       try {
@@ -2045,7 +2236,6 @@ export default function LiveOrdersPage() {
           }
         });
       } catch {}
-    }
   };
 
   // Settle entire table (called from bill modal with optional discount)
@@ -2069,25 +2259,63 @@ export default function LiveOrdersPage() {
 
     setActionLoadingId(`table_${session.table_no}`);
     const ids = session.rounds.map(r => r.id);
+    const finalPaid = Math.max(0, session.totalBill - discountAmount);
     
+    // 1. Instant 0ms Local SQLite update & invoice generation
+    if (restaurantId) {
+      for (const r of session.rounds) {
+        await LocalSqliteStore.saveOrderLocally({
+          ...r,
+          restaurant_id: restaurantId,
+          status: 'COMPLETED',
+          payment_status: 'PAID',
+          synced: false
+        }).catch(() => {});
+      }
+      await LocalSqliteStore.saveInvoice({
+        id: 'inv_' + (session.rounds[0]?.id || Date.now()),
+        invoice_number: 'INV-' + (session.table_no || 'T') + '-' + Date.now().toString().slice(-4),
+        restaurant_id: restaurantId,
+        table_no: session.table_no,
+        total: finalPaid,
+        payment_method: 'COUNTER',
+        customer_name: session.customer_name || 'Dine-in Guest',
+        customer_phone: session.customer_phone,
+        rounds_json: session.rounds,
+        created_at: new Date().toISOString(),
+        synced: false
+      }).catch(() => {});
+
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { table_no: session.table_no, status: 'COMPLETED' });
+    }
+
     // Update local state immediately so UI updates instantaneously
     setOrders(prev => prev.map(o => {
       const match = ids.includes(o.id) || (session.table_no && o.table_no?.toLowerCase().trim() === session.table_no.toLowerCase().trim());
       return match ? { ...o, status: 'COMPLETED', payment_status: 'PAID' } : o;
     }));
 
-    // Update in Supabase (both by round IDs and by restaurant table_no to ensure 100% coverage)
-    const validIds = session.rounds.map(r => r.id).filter(Boolean);
-    if (validIds.length > 0) {
-      await supabase.from('orders').update({ status: 'COMPLETED', payment_status: 'PAID' }).in('id', validIds);
-    }
-    if (restaurantId && session.table_no) {
-      await supabase
-        .from('orders')
-        .update({ status: 'COMPLETED', payment_status: 'PAID' })
-        .eq('restaurant_id', restaurantId)
-        .ilike('table_no', session.table_no)
-        .neq('payment_status', 'PAID');
+    // 2. Cloud Sync with offline fallback
+    try {
+      const validIds = session.rounds.map(r => r.id).filter(Boolean);
+      if (validIds.length > 0) {
+        await supabase.from('orders').update({ status: 'COMPLETED', payment_status: 'PAID' }).in('id', validIds);
+      }
+      if (restaurantId && session.table_no) {
+        await supabase
+          .from('orders')
+          .update({ status: 'COMPLETED', payment_status: 'PAID' })
+          .eq('restaurant_id', restaurantId)
+          .ilike('table_no', session.table_no)
+          .neq('payment_status', 'PAID');
+      }
+      if (validIds.length > 0) {
+        for (const vid of validIds) {
+          await LocalSqliteStore.markOrderSynced(vid).catch(() => {});
+        }
+      }
+    } catch {
+      OfflineSyncEngine.triggerSync();
     }
 
     // Broadcast table settlement to customer devices and captain terminals immediately
@@ -2135,7 +2363,6 @@ export default function LiveOrdersPage() {
       }
     }
 
-    const finalPaid = Math.max(0, session.totalBill - discountAmount);
     setReadyForPickupNotice(`✅ Table ${session.table_no} settled (₹${finalPaid.toFixed(0)}) & closed.`);
     setTimeout(() => setReadyForPickupNotice(null), 5000);
 
@@ -2152,14 +2379,37 @@ export default function LiveOrdersPage() {
     setReopenConfirmModal(null);
     setActionLoadingId(`table_${session.table_no}`);
     const ids = session.rounds.map(r => r.id);
-    const { error } = await supabase.from('orders').update({ status: 'SERVED', payment_status: 'PENDING' }).in('id', ids);
-    if (error) {
-      setDashboardErrorToast("Error reopening table: " + error.message);
-      setTimeout(() => setDashboardErrorToast(null), 5000);
-    } else {
-      setOrders(prev => prev.map(o => ids.includes(o.id) ? { ...o, status: 'SERVED', payment_status: 'PENDING' } : o));
-      setReadyForPickupNotice(`Table ${session.table_no} restored to active status.`);
-      setTimeout(() => setReadyForPickupNotice(null), 4000);
+
+    // 1. Instant 0ms Local SQLite update
+    if (restaurantId) {
+      for (const r of session.rounds) {
+        await LocalSqliteStore.saveOrderLocally({
+          ...r,
+          restaurant_id: restaurantId,
+          status: 'SERVED',
+          payment_status: 'PENDING',
+          synced: false
+        }).catch(() => {});
+      }
+      SyncBus.emit("ORDERS_UPDATED", restaurantId, { table_no: session.table_no, status: 'SERVED' });
+    }
+
+    setOrders(prev => prev.map(o => ids.includes(o.id) ? { ...o, status: 'SERVED', payment_status: 'PENDING' } : o));
+    setReadyForPickupNotice(`Table ${session.table_no} restored to active status.`);
+    setTimeout(() => setReadyForPickupNotice(null), 4000);
+
+    // 2. Cloud Sync with offline fallback
+    try {
+      const { error } = await supabase.from('orders').update({ status: 'SERVED', payment_status: 'PENDING' }).in('id', ids);
+      if (!error) {
+        for (const vid of ids) {
+          await LocalSqliteStore.markOrderSynced(vid).catch(() => {});
+        }
+      } else {
+        OfflineSyncEngine.triggerSync();
+      }
+    } catch {
+      OfflineSyncEngine.triggerSync();
     }
     setActionLoadingId(null);
   };

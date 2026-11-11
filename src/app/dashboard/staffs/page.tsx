@@ -125,6 +125,7 @@ export default function StaffsDashboardPage() {
         const { data: staffData } = await supabase
           .from('inventory_items')
           .select('*')
+          .eq('restaurant_id', restId)
           .eq('category', 'STAFF_ROSTER')
           .order('created_at', { ascending: false });
 
@@ -272,22 +273,31 @@ export default function StaffsDashboardPage() {
         restaurant_id: restaurantId,
       };
 
-      const { data: dbItem } = await supabase
-        .from('inventory_items')
-        .insert([{
-          name: `STAFF:${JSON.stringify(payload)}`,
-          category: 'STAFF_ROSTER',
-          stock: 1,
-          threshold: 0,
-          storage_unit: 'person',
-          vendor_unit: 'staff',
-          vendor_to_storage: 1,
-          cost_per_vendor_unit: 0,
-          price_last_month: 0,
-          recipe_unit: 'person'
-        }])
-        .select()
-        .maybeSingle();
+      let dbItem: any = null;
+      try {
+        const { data, error } = await supabase
+          .from('inventory_items')
+          .insert([{
+            restaurant_id: restaurantId,
+            name: `STAFF:${JSON.stringify(payload)}`,
+            category: 'STAFF_ROSTER',
+            stock: 1,
+            threshold: 0,
+            storage_unit: 'person',
+            vendor_unit: 'staff',
+            vendor_to_storage: 1,
+            cost_per_vendor_unit: 0,
+            price_last_month: 0,
+            recipe_unit: 'person'
+          }])
+          .select()
+          .maybeSingle();
+        if (!error && data) {
+          dbItem = data;
+        }
+      } catch (cloudErr) {
+        console.warn('Failed to insert staff to cloud directly, saving locally:', cloudErr);
+      }
 
       const savedRecord = dbItem ? { ...payload, id: dbItem.id } : payload;
       const updatedList = [savedRecord, ...staffList];

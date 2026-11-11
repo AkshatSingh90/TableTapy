@@ -137,14 +137,29 @@ export default function PromotionsPage() {
 
       if (restId) {
         setRestaurantId(restId);
-        const { data: rData } = await supabase.from("restaurants").select("name").eq("id", restId).maybeSingle();
+        const { data: rData } = await supabase.from("restaurants").select("name, bg_image").eq("id", restId).maybeSingle();
         if (rData?.name) {
           setRestaurantName(rData.name);
         }
 
-        // Load Saved Configuration from localStorage or restaurant metadata
+        let cloudPromoConfig = null;
+        if (rData?.bg_image) {
+          try {
+            const parsed = typeof rData.bg_image === "string" ? JSON.parse(rData.bg_image) : rData.bg_image;
+            if (parsed?.promotionsConfig) {
+              cloudPromoConfig = parsed.promotionsConfig;
+            }
+          } catch {}
+        }
+
+        // Load Saved Configuration from cloud or localStorage
         const savedConfig = localStorage.getItem(`tabletapy_promotions_config_${restId}`);
-        if (savedConfig) {
+        if (cloudPromoConfig) {
+          setConfig(cloudPromoConfig);
+          try {
+            localStorage.setItem(`tabletapy_promotions_config_${restId}`, JSON.stringify(cloudPromoConfig));
+          } catch {}
+        } else if (savedConfig) {
           try {
             setConfig(JSON.parse(savedConfig));
           } catch {}
@@ -162,7 +177,7 @@ export default function PromotionsPage() {
   }, []);
 
   /* ─── Save All Changes ──────────────────────────────────── */
-  const handleSaveConfig = () => {
+  const handleSaveConfig = async () => {
     if (!restaurantId) return;
     setSaving(true);
 
@@ -172,6 +187,21 @@ export default function PromotionsPage() {
 
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event("storage"));
+      }
+
+      // 2. Persist to Supabase restaurants bg_image
+      try {
+        const { data: r } = await supabase.from('restaurants').select('bg_image').eq('id', restaurantId).maybeSingle();
+        let existingCfg: any = {};
+        if (r?.bg_image) {
+          try {
+            existingCfg = typeof r.bg_image === 'string' ? JSON.parse(r.bg_image) : r.bg_image;
+          } catch {}
+        }
+        existingCfg.promotionsConfig = config;
+        await supabase.from('restaurants').update({ bg_image: JSON.stringify(existingCfg) }).eq('id', restaurantId);
+      } catch (cloudErr) {
+        console.warn("Could not sync promotions to cloud:", cloudErr);
       }
 
       showToast("All promotions & coin rules saved successfully!");

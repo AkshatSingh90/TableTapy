@@ -82,11 +82,14 @@ export interface LocalInventoryItem {
 export interface LocalRestaurantSettings {
   restaurant_id: string;
   name?: string;
+  business_name?: string;
   address?: string;
   phone?: string;
   gstin?: string;
   fssai?: string;
+  upi_id?: string;
   taxSettings?: any;
+  tax_settings_json?: string;
   paperWidth?: "58mm" | "80mm" | "58MM" | "80MM" | string;
   printCopies?: number;
   autoPrintOnSettle?: boolean;
@@ -100,20 +103,25 @@ export interface LocalRestaurantSettings {
 export interface LocalInvoiceRecord {
   id: string;
   restaurant_id: string;
-  order_number: string | number;
+  order_number?: string | number;
+  invoice_number?: string;
   table_name?: string;
+  table_no?: string;
   order_type?: "DINE_IN" | "TAKEAWAY" | "DELIVERY";
   customer_name?: string;
   customer_phone?: string;
-  total_amount: number;
+  total_amount?: number;
+  total?: number;
   payment_mode?: string;
+  payment_method?: string;
   payment_status?: string;
-  items_json: any;
+  items_json?: any;
+  rounds_json?: any;
   subtotal?: number;
   tax_amount?: number;
   discount_amount?: number;
   created_at: string;
-  synced: number; // 0 = pending cloud push, 1 = synced
+  synced: number | boolean; // 0 = pending cloud push, 1 = synced
 }
 
 export interface LocalOrderRecord {
@@ -125,11 +133,11 @@ export interface LocalOrderRecord {
   total: number;
   items_json: any;
   status: string;
-  payment_status: string;
+  payment_status?: string;
   payment_method?: string;
   note?: string;
   created_at: string;
-  synced: number; // 0 = pending cloud push, 1 = synced
+  synced: number | boolean; // 0 = pending cloud push, 1 = synced
 }
 
 export interface LocalMutationRecord {
@@ -737,10 +745,11 @@ export const LocalSqliteStore = {
   async saveInvoice(invoice: LocalInvoiceRecord): Promise<void> {
     try {
       const db = await openLocalDb();
+      const normSynced = (invoice.synced === 1 || invoice.synced === true) ? 1 : 0;
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORES.INVOICES, "readwrite");
         const store = tx.objectStore(STORES.INVOICES);
-        store.put(invoice);
+        store.put({ ...invoice, synced: normSynced });
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });
@@ -812,10 +821,11 @@ export const LocalSqliteStore = {
   async saveOrderLocally(order: LocalOrderRecord): Promise<void> {
     try {
       const db = await openLocalDb();
+      const normSynced = (order.synced === 1 || order.synced === true) ? 1 : 0;
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORES.ORDERS, "readwrite");
         const store = tx.objectStore(STORES.ORDERS);
-        store.put(order);
+        store.put({ ...order, synced: normSynced });
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });

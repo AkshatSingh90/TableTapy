@@ -216,19 +216,47 @@ export default function MenuManagerPage() {
            variantsConfig: config,
          };
        });
-       // Only merge locally created dishes that have pending unsynced mutations
+       // Reconcile pending unsynced mutations (inserts, updates, deletes)
        const pendingMutations = await LocalSqliteStore.getPendingMutations(restId).catch(() => []);
-       const pendingDishIds = new Set(
-         (pendingMutations || [])
-           .filter((m: any) => m.entity === 'MENU_ITEM' && m.action === 'INSERT')
-           .map((m: any) => m.payload?.id)
-       );
+       const pendingInserts = new Map<string, any>();
+       const pendingUpdates = new Map<string, any>();
+       const pendingDeletes = new Set<string>();
 
-       let combined = [...mappedItems];
+       for (const m of (pendingMutations || [])) {
+         if (m.entity === 'MENU_ITEM') {
+           const itemId = m.payload?.id;
+           if (!itemId) continue;
+           if (m.action === 'INSERT') pendingInserts.set(itemId, m.payload);
+           else if (m.action === 'UPDATE') pendingUpdates.set(itemId, m.payload);
+           else if (m.action === 'DELETE') pendingDeletes.add(itemId);
+         }
+       }
+
+       // 1. Exclude dishes pending deletion
+       let combined = mappedItems.filter((item) => !pendingDeletes.has(item.id));
+
+       // 2. Apply pending local updates (e.g. availability toggles, price, name edits)
+       combined = combined.map((item) => {
+         if (pendingUpdates.has(item.id)) {
+           const upd = pendingUpdates.get(item.id);
+           return {
+             ...item,
+             ...(upd.name ? { name: upd.name } : {}),
+             ...(upd.category ? { category: upd.category } : {}),
+             ...(upd.subcategory !== undefined ? { subcategory: upd.subcategory } : {}),
+             ...(upd.base_price !== undefined ? { base_price: Number(upd.base_price) } : {}),
+             ...(upd.is_available !== undefined ? { is_available: upd.is_available } : {}),
+             ...(upd.description !== undefined ? { description: upd.description } : {}),
+           };
+         }
+         return item;
+       });
+
+       // 3. Include newly inserted dishes from SQLite that haven't hit the cloud yet
        if (restId) {
          const localDishes = await LocalSqliteStore.getMenuItems(restId, false);
          for (const ld of localDishes) {
-           if (pendingDishIds.has(ld.id) && !combined.some(c => c.id === ld.id)) {
+           if (pendingInserts.has(ld.id) && !combined.some((c) => c.id === ld.id)) {
              combined.push(ld as any);
            }
          }
@@ -317,9 +345,9 @@ export default function MenuManagerPage() {
   const toggleAvailability = async (item: MenuItem, e: React.MouseEvent) => {
     e.stopPropagation();
     const newStatus = !item.is_available;
-    // 0ms instant local SQLite update
+    // 1. 0ms instant local SQLite update
     if (restaurantId) {
-      LocalSqliteStore.updateMenuItem({ id: item.id, restaurant_id: restaurantId, is_available: newStatus });
+      await LocalSqliteStore.updateMenuItem({ id: item.id, restaurant_id: restaurantId, is_available: newStatus });
     }
     setMenuItems(prev => {
       const updated = prev.map(i => i.id === item.id ? { ...i, is_available: newStatus } : i);
@@ -330,10 +358,51 @@ export default function MenuManagerPage() {
     });
     if (selectedItem?.id === item.id) setSelectedItem({ ...selectedItem, is_available: newStatus });
     
-    const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).eq('id', item.id);
-    if (error) console.warn("Could not save availability to DB, state updated locally. Add 'is_available' column to fix.");
+    // 2. Broadcast instant cross-tab sync
     if (restaurantId) {
       SyncBus.emit("MENU_UPDATED", restaurantId, { id: item.id, is_available: newStatus });
+    }
+
+    // 3. Cloud update with offline fallback
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (restaurantId) {
+        await LocalSqliteStore.queueMutation({
+          id: 'mut_' + Date.now(),
+          restaurant_id: restaurantId,
+          entity: 'MENU_ITEM',
+          action: 'UPDATE',
+          payload: { id: item.id, is_available: newStatus },
+          created_at: new Date().toISOString()
+        });
+      }
+      OfflineSyncEngine.triggerSync();
+    } else {
+      try {
+        const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).eq('id', item.id);
+        if (error && restaurantId) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now(),
+            restaurant_id: restaurantId,
+            entity: 'MENU_ITEM',
+            action: 'UPDATE',
+            payload: { id: item.id, is_available: newStatus },
+            created_at: new Date().toISOString()
+          });
+        }
+      } catch (netErr) {
+        if (restaurantId) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now(),
+            restaurant_id: restaurantId,
+            entity: 'MENU_ITEM',
+            action: 'UPDATE',
+            payload: { id: item.id, is_available: newStatus },
+            created_at: new Date().toISOString()
+          }).catch(() => {});
+        }
+      } finally {
+        OfflineSyncEngine.triggerSync();
+      }
     }
   };
 
@@ -341,6 +410,13 @@ export default function MenuManagerPage() {
     const anyAvailable = itemsToToggle.some(i => i.is_available);
     const newStatus = !anyAvailable;
     const ids = itemsToToggle.map(i => i.id);
+
+    // 1. 0ms local SQLite update
+    if (restaurantId) {
+      for (const id of ids) {
+        await LocalSqliteStore.updateMenuItem({ id, restaurant_id: restaurantId, is_available: newStatus });
+      }
+    }
     setMenuItems(prev => {
       const updated = prev.map(i => ids.includes(i.id) ? { ...i, is_available: newStatus } : i);
       if (restaurantId) {
@@ -348,11 +424,58 @@ export default function MenuManagerPage() {
       }
       return updated;
     });
-    
-    const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).in('id', ids);
-    if (error) console.warn("Could not save category availability to DB, state updated locally. Add 'is_available' column to fix.");
+
+    // 2. Broadcast instant cross-tab sync
     if (restaurantId) {
       SyncBus.emit("MENU_UPDATED", restaurantId, { ids, is_available: newStatus });
+    }
+
+    // 3. Cloud update with offline fallback
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (restaurantId) {
+        for (const id of ids) {
+          await LocalSqliteStore.queueMutation({
+            id: 'mut_' + Date.now() + '_' + id.slice(0, 4),
+            restaurant_id: restaurantId,
+            entity: 'MENU_ITEM',
+            action: 'UPDATE',
+            payload: { id, is_available: newStatus },
+            created_at: new Date().toISOString()
+          });
+        }
+      }
+      OfflineSyncEngine.triggerSync();
+    } else {
+      try {
+        const { error } = await supabase.from('menu_items_v2').update({ is_available: newStatus }).in('id', ids);
+        if (error && restaurantId) {
+          for (const id of ids) {
+            await LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now() + '_' + id.slice(0, 4),
+              restaurant_id: restaurantId,
+              entity: 'MENU_ITEM',
+              action: 'UPDATE',
+              payload: { id, is_available: newStatus },
+              created_at: new Date().toISOString()
+            });
+          }
+        }
+      } catch (netErr) {
+        if (restaurantId) {
+          for (const id of ids) {
+            await LocalSqliteStore.queueMutation({
+              id: 'mut_' + Date.now() + '_' + id.slice(0, 4),
+              restaurant_id: restaurantId,
+              entity: 'MENU_ITEM',
+              action: 'UPDATE',
+              payload: { id, is_available: newStatus },
+              created_at: new Date().toISOString()
+            }).catch(() => {});
+          }
+        }
+      } finally {
+        OfflineSyncEngine.triggerSync();
+      }
     }
   };
 

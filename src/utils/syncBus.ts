@@ -8,7 +8,7 @@
  * 3. Bumps local version timestamp so other tabs read from local storage without hitting Supabase.
  */
 
-export type SyncEventType = "MENU_UPDATED" | "LOCATIONS_UPDATED" | "SETTINGS_UPDATED";
+export type SyncEventType = "MENU_UPDATED" | "LOCATIONS_UPDATED" | "SETTINGS_UPDATED" | "ORDERS_UPDATED" | "INVENTORY_UPDATED";
 
 export interface SyncMessage {
   type: SyncEventType;
