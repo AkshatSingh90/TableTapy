@@ -46,12 +46,7 @@ export interface ThermalPrintChitData {
 /** Check if running inside the Tauri native desktop wrapper */
 export function isTauriEnvironment(): boolean {
   if (typeof window === 'undefined') return false;
-  return Boolean(
-    (window as any).isTauri ||
-    (window as any).__TAURI_INTERNALS__ || 
-    (window as any).__TAURI__ || 
-    (window as any).__TAURI_INVOKE__
-  );
+  return Boolean((window as any).isTauri === true);
 }
 
 /**
@@ -60,7 +55,7 @@ export function isTauriEnvironment(): boolean {
  * 2. Falls back to local host hardware API (/api/hardware/printers) if running in browser on localhost.
  */
 export async function getInstalledPrinters(): Promise<string[]> {
-  // 1. Try native Tauri IPC
+  // 1. Try native Tauri IPC if inside Tauri window
   if (isTauriEnvironment()) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -79,7 +74,7 @@ export async function getInstalledPrinters(): Promise<string[]> {
       const res = await fetch('/api/hardware/printers');
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data.printers)) {
+        if (Array.isArray(data.printers) && data.printers.length > 0) {
           return data.printers;
         }
       }
