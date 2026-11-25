@@ -51,6 +51,7 @@ next-env.d.ts
 !public/sw.js
 *.py
 *.ps1
+!src/lib/raw_print_helper.ps1
 *.txt
 *.sql
 

@@ -1211,9 +1211,7 @@ export default function SettingsPage() {
             <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
-                    isDesktopApp ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
-                  }`}>
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
                     <Printer size={20} strokeWidth={2} />
                   </div>
                   <div>
@@ -1221,18 +1219,13 @@ export default function SettingsPage() {
                       <h2 className="text-base font-bold text-zinc-900 tracking-tight">
                         Thermal Hardware Bridge
                       </h2>
-                      <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                        isDesktopApp 
-                          ? 'bg-emerald-100/80 text-emerald-800 border border-emerald-200' 
-                          : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
-                      }`}>
-                        {isDesktopApp ? 'Native Win32 Spooler Active' : 'Web Browser Preview'}
+                      <span className="text-[10.5px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        {isDesktopApp ? 'Native Win32 Spooler Active' : 'Localhost Hardware Bridge Connected'}
                       </span>
                     </div>
                     <p className="text-zinc-500 text-xs mt-0.5">
-                      {isDesktopApp
-                        ? 'Direct binary ESC/POS communication via Windows Spooler (winspool.drv RAW) & Network TCP Socket. Zero print dialogs, instant sub-100ms output.'
-                        : 'Running inside web browser. Direct silent hardware printing & Ethernet IP socket KOT firing activate seamlessly when using the TableTapy Desktop Terminal.'}
+                      Direct binary ESC/POS communication via Windows Spooler (winspool.drv RAW) & Network TCP Socket (Port 9100). Zero browser print dialogs, automatic paper cuts, and instant sub-100ms output.
                     </p>
                   </div>
                 </div>
