@@ -17,12 +17,27 @@ import {
   Smartphone,
   Monitor,
   Info,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw,
+  Wifi,
+  WifiOff,
+  Volume2,
+  AlertCircle,
+  ChefHat,
+  CheckCircle,
+  Radio
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import { LocalSqliteStore } from "@/lib/localSqliteStore";
 import { SyncBus } from "@/utils/syncBus";
 import { OfflineSyncEngine } from "@/lib/offlineSyncEngine";
+import { 
+  getInstalledPrinters, 
+  isTauriEnvironment, 
+  testNetworkPrinter, 
+  testPrintBillingPrinter, 
+  testPrintKitchenPrinter 
+} from "@/lib/thermalPrinterBridge";
 import { 
   TaxSettings, 
   DEFAULT_TAX_SETTINGS, 
@@ -56,6 +71,21 @@ export default function SettingsPage() {
   const [paperWidth, setPaperWidth] = useState<'80MM' | '58MM'>('80MM');
   const [printCopies, setPrintCopies] = useState<1 | 2>(1);
   const [autoPrintOnSettle, setAutoPrintOnSettle] = useState(false);
+  
+  // Thermal Hardware & KOT Configuration
+  const [installedPrinters, setInstalledPrinters] = useState<string[]>([]);
+  const [loadingPrinters, setLoadingPrinters] = useState(false);
+  const [selectedPrinter, setSelectedPrinter] = useState<string>('');
+  const [kotPrinterType, setKotPrinterType] = useState<'same' | 'windows' | 'network'>('same');
+  const [kotPrinterName, setKotPrinterName] = useState<string>('');
+  const [kotPrinterIp, setKotPrinterIp] = useState<string>('192.168.1.200');
+  const [kotPrinterPort, setKotPrinterPort] = useState<number>(9100);
+  const [autoKotPrint, setAutoKotPrint] = useState<boolean>(true);
+  const [testingBill, setTestingBill] = useState(false);
+  const [testingKot, setTestingKot] = useState(false);
+  const [testingPing, setTestingPing] = useState(false);
+  const [printerFeedback, setPrinterFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isDesktopApp, setIsDesktopApp] = useState(false);
 
   // Tax & Receipt Settings
   const [taxSettings, setTaxSettings] = useState<TaxSettings>(DEFAULT_TAX_SETTINGS);
@@ -116,8 +146,15 @@ export default function SettingsPage() {
                 setPaperWidth(cloudConfig.paperWidth);
                 setPrintCopies(cloudConfig.printCopies);
                 setAutoPrintOnSettle(cloudConfig.autoPrintOnSettle);
-                isLoadedRef.current = true;
-                return;
+                if (parsedBg?.printerSettings) {
+                  const ps = parsedBg.printerSettings;
+                  if (ps.selectedPrinter) setSelectedPrinter(ps.selectedPrinter);
+                  if (ps.kotPrinterType) setKotPrinterType(ps.kotPrinterType);
+                  if (ps.kotPrinterName) setKotPrinterName(ps.kotPrinterName);
+                  if (ps.kotPrinterIp) setKotPrinterIp(ps.kotPrinterIp);
+                  if (ps.kotPrinterPort) setKotPrinterPort(ps.kotPrinterPort);
+                  if (typeof ps.autoKotPrint === 'boolean') setAutoKotPrint(ps.autoKotPrint);
+                }
               }
             }
           }
@@ -141,6 +178,29 @@ export default function SettingsPage() {
           setAutoPrintOnSettle(genericConfig.autoPrintOnSettle);
           isLoadedRef.current = true;
         }
+
+        // Load local hardware printer preferences
+        if (typeof window !== "undefined") {
+          setIsDesktopApp(isTauriEnvironment());
+          const localPrinter = localStorage.getItem('tabletapy_selected_printer');
+          if (localPrinter) setSelectedPrinter(localPrinter);
+          const localKotType = localStorage.getItem('tabletapy_kot_printer_type') as any;
+          if (localKotType) setKotPrinterType(localKotType);
+          const localKotName = localStorage.getItem('tabletapy_kot_printer_name');
+          if (localKotName) setKotPrinterName(localKotName);
+          const localKotIp = localStorage.getItem('tabletapy_kot_printer_ip');
+          if (localKotIp) setKotPrinterIp(localKotIp);
+          const localKotPort = parseInt(localStorage.getItem('tabletapy_kot_printer_port') || '', 10);
+          if (localKotPort) setKotPrinterPort(localKotPort);
+          const localAutoKot = localStorage.getItem('tabletapy_auto_kot_print');
+          if (localAutoKot !== null) setAutoKotPrint(localAutoKot !== 'false');
+        }
+
+        // Query installed Windows printers from desktop bridge
+        try {
+          const list = await getInstalledPrinters();
+          setInstalledPrinters(list);
+        } catch {}
       } catch (err) {
         console.error("Failed to load settings:", err);
       }
@@ -149,9 +209,91 @@ export default function SettingsPage() {
     loadSettings();
   }, []);
 
+  const refreshPrinters = async () => {
+    setLoadingPrinters(true);
+    try {
+      const list = await getInstalledPrinters();
+      setInstalledPrinters(list);
+      setPrinterFeedback({ type: 'success', message: `Detected ${list.length} installed Windows printer(s).` });
+    } catch (err: any) {
+      setPrinterFeedback({ type: 'error', message: err?.message || 'Failed to detect printers' });
+    } finally {
+      setLoadingPrinters(false);
+      setTimeout(() => setPrinterFeedback(null), 4000);
+    }
+  };
+
+  const handleTestBillPrint = async () => {
+    setTestingBill(true);
+    setPrinterFeedback(null);
+    try {
+      const res = await testPrintBillingPrinter();
+      if (res.success) {
+        setPrinterFeedback({ type: 'success', message: `Test receipt printed to "${selectedPrinter || 'Windows Default Printer'}"!` });
+      } else {
+        setPrinterFeedback({ type: 'error', message: res.error || 'Failed to print test receipt. Check printer power & connection.' });
+      }
+    } catch (err: any) {
+      setPrinterFeedback({ type: 'error', message: err.message || 'Error executing test print' });
+    } finally {
+      setTestingBill(false);
+      setTimeout(() => setPrinterFeedback(null), 6000);
+    }
+  };
+
+  const handleTestKotPrint = async () => {
+    setTestingKot(true);
+    setPrinterFeedback(null);
+    try {
+      const res = await testPrintKitchenPrinter();
+      if (res.success) {
+        const dest = kotPrinterType === 'network' ? `${kotPrinterIp}:${kotPrinterPort}` : (kotPrinterName || selectedPrinter || 'Counter Printer');
+        setPrinterFeedback({ type: 'success', message: `Test KOT ticket sent to kitchen printer (${dest})!` });
+      } else {
+        setPrinterFeedback({ type: 'error', message: res.error || 'Failed to print test KOT ticket. Verify IP address or printer driver.' });
+      }
+    } catch (err: any) {
+      setPrinterFeedback({ type: 'error', message: err.message || 'Error executing kitchen test print' });
+    } finally {
+      setTestingKot(false);
+      setTimeout(() => setPrinterFeedback(null), 6000);
+    }
+  };
+
+  const handlePingNetworkPrinter = async () => {
+    setTestingPing(true);
+    setPrinterFeedback(null);
+    try {
+      const res = await testNetworkPrinter(kotPrinterIp, kotPrinterPort);
+      if (res.success) {
+        setPrinterFeedback({ type: 'success', message: res.message });
+      } else {
+        setPrinterFeedback({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setPrinterFeedback({ type: 'error', message: err.message || 'Could not reach printer' });
+    } finally {
+      setTestingPing(false);
+      setTimeout(() => setPrinterFeedback(null), 6000);
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
+      // Persist local thermal hardware preferences
+      if (typeof window !== "undefined") {
+        localStorage.setItem('tabletapy_selected_printer', selectedPrinter);
+        localStorage.setItem('tabletapy_kot_printer_type', kotPrinterType);
+        localStorage.setItem('tabletapy_kot_printer_name', kotPrinterName);
+        localStorage.setItem('tabletapy_kot_printer_ip', kotPrinterIp);
+        localStorage.setItem('tabletapy_kot_printer_port', kotPrinterPort.toString());
+        localStorage.setItem('tabletapy_auto_kot_print', autoKotPrint ? 'true' : 'false');
+        localStorage.setItem('tabletapy_paper_width', paperWidth);
+        localStorage.setItem('tabletapy_print_copies', printCopies.toString());
+        localStorage.setItem('tabletapy_auto_bill_print', autoPrintOnSettle ? 'true' : 'false');
+      }
+
       const fullConfig: RestaurantConfig = {
         taxSettings: {
           ...taxSettings,
@@ -197,6 +339,17 @@ export default function SettingsPage() {
           ...existingCfg,
           ...fullConfig,
           upiId,
+          printerSettings: {
+            selectedPrinter,
+            kotPrinterType,
+            kotPrinterName,
+            kotPrinterIp,
+            kotPrinterPort,
+            autoKotPrint,
+            paperWidth,
+            printCopies,
+            autoPrintOnSettle
+          },
           taxSettings: {
             ...DEFAULT_TAX_SETTINGS,
             ...taxSettings,
@@ -1033,13 +1186,411 @@ export default function SettingsPage() {
         )}
 
         {/* ══════════════════════════════════════════════════════════════════════ */}
-        {/* ── TAB 3: POS & HARDWARE (TOUCHSCREEN PLACEHOLDER) ── */}
+        {/* ── TAB 3: POS & HARDWARE (THERMAL PRINTERS & KOT ENGINE) ── */}
         {/* ══════════════════════════════════════════════════════════════════════ */}
         {activeTab === 'HARDWARE' && (
-          <div className="max-w-3xl space-y-6">
+          <div className="max-w-4xl space-y-6">
 
-            {/* 1. Touchscreen Monitor & On-Screen Numpad Placeholder */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs sm:p-7 shadow-xs space-y-5">
+            {/* Notification / Feedback Banner */}
+            {printerFeedback && (
+              <div className={`p-4 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-200 border ${
+                printerFeedback.type === 'success'
+                  ? 'bg-emerald-50/80 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50/80 border-rose-200 text-rose-800'
+              }`}>
+                {printerFeedback.type === 'success' ? (
+                  <CheckCircle size={18} className="shrink-0 text-emerald-600" />
+                ) : (
+                  <AlertCircle size={18} className="shrink-0 text-rose-600" />
+                )}
+                <span className="text-xs font-semibold">{printerFeedback.message}</span>
+              </div>
+            )}
+
+            {/* 1. Desktop ESC/POS Hardware Bridge Status */}
+            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
+                    isDesktopApp ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'
+                  }`}>
+                    <Printer size={20} strokeWidth={2} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                        Thermal Hardware Bridge
+                      </h2>
+                      <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                        isDesktopApp 
+                          ? 'bg-emerald-100/80 text-emerald-800 border border-emerald-200' 
+                          : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
+                      }`}>
+                        {isDesktopApp ? 'Native Win32 Spooler Active' : 'Web Browser Preview'}
+                      </span>
+                    </div>
+                    <p className="text-zinc-500 text-xs mt-0.5">
+                      {isDesktopApp
+                        ? 'Direct binary ESC/POS communication via Windows Spooler (winspool.drv RAW) & Network TCP Socket. Zero print dialogs, instant sub-100ms output.'
+                        : 'Running inside web browser. Direct silent hardware printing & Ethernet IP socket KOT firing activate seamlessly when using the TableTapy Desktop Terminal.'}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={refreshPrinters}
+                  disabled={loadingPrinters}
+                  className="px-3 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer self-start sm:self-auto shrink-0"
+                >
+                  <RefreshCw size={13} className={loadingPrinters ? 'animate-spin' : ''} />
+                  <span>Scan Printers</span>
+                </button>
+              </div>
+            </section>
+
+            {/* 2. Counter Billing Thermal Printer */}
+            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Receipt size={17} className="text-[#E46254]" />
+                    <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                      Counter Billing Thermal Printer
+                    </h2>
+                  </div>
+                  <p className="text-zinc-500 text-xs mt-0.5">
+                    Used for customer tax invoices, takeaway order tokens, and receipt copies.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleTestBillPrint}
+                  disabled={testingBill}
+                  className="px-4 py-2 bg-zinc-900 hover:bg-black text-white text-xs font-semibold rounded-xl flex items-center gap-2 transition-all cursor-pointer self-start sm:self-auto shrink-0 active:scale-95 disabled:opacity-60 shadow-xs"
+                >
+                  {testingBill ? <Loader2 size={13} className="animate-spin" /> : <Printer size={13} />}
+                  <span>Test Print Bill</span>
+                </button>
+              </div>
+
+              {/* Printer Selection Dropdown */}
+              <div className="pt-2">
+                <label className="block text-xs font-medium text-zinc-700 mb-1.5">
+                  Select Windows Billing Printer
+                </label>
+                <div className="relative">
+                  <select
+                    value={selectedPrinter}
+                    onChange={(e) => setSelectedPrinter(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-xs sm:text-sm font-medium text-zinc-900 outline-none focus:bg-white focus:border-zinc-900 transition-all cursor-pointer"
+                  >
+                    <option value="">(Default Windows Printer)</option>
+                    {installedPrinters.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {installedPrinters.length === 0 && (
+                  <p className="text-[11px] text-zinc-400 mt-1 italic">
+                    Click "Scan Printers" above to detect installed USB and networked Windows thermal printers.
+                  </p>
+                )}
+              </div>
+
+              {/* Paper Roll Width & Copies */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-zinc-100">
+                {/* 80mm */}
+                <div
+                  onClick={() => setPaperWidth('80MM')}
+                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                    paperWidth === '80MM'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
+                      : 'border-zinc-200 bg-white hover:border-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-900">80mm (3-Inch Standard)</span>
+                    {paperWidth === '80MM' && (
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
+                        <Check size={10} className="text-white" strokeWidth={3} />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-500 mt-1.5">
+                    Recommended for high-speed counter printers (Epson TM-T82, TVS RP-3200, Rugtek).
+                  </p>
+                </div>
+
+                {/* 58mm */}
+                <div
+                  onClick={() => setPaperWidth('58MM')}
+                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                    paperWidth === '58MM'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
+                      : 'border-zinc-200 bg-white hover:border-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-900">58mm (2-Inch Compact)</span>
+                    {paperWidth === '58MM' && (
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
+                        <Check size={10} className="text-white" strokeWidth={3} />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-500 mt-1.5">
+                    Compact portable Bluetooth or small desktop receipt printers.
+                  </p>
+                </div>
+              </div>
+
+              {/* Print Copies & Auto-Print Toggle */}
+              <div className="pt-3 border-t border-zinc-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <span className="text-xs font-semibold text-zinc-800 block">Print Copies</span>
+                  <span className="text-[11px] text-zinc-500">Number of receipts printed per table settlement</span>
+                </div>
+
+                <div className="flex items-center gap-1.5 bg-zinc-100 p-1 rounded-xl self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setPrintCopies(1)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                      printCopies === 1
+                        ? 'bg-white text-[#E46254] shadow-xs'
+                        : 'text-zinc-600 hover:text-zinc-900'
+                    }`}
+                  >
+                    1 Copy (Guest Bill)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPrintCopies(2)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                      printCopies === 2
+                        ? 'bg-white text-[#E46254] shadow-xs'
+                        : 'text-zinc-600 hover:text-zinc-900'
+                    }`}
+                  >
+                    2 Copies (Guest + Store)
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-zinc-100 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-semibold text-zinc-800 block">Auto-Print Bill on Settle</span>
+                  <span className="text-[11px] text-zinc-500">Automatically trigger thermal print when cashier marks order as PAID</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setAutoPrintOnSettle(!autoPrintOnSettle)}
+                  className={`w-11 h-6 rounded-full transition-colors cursor-pointer relative p-0.5 ${
+                    autoPrintOnSettle ? 'bg-[#E46254]' : 'bg-zinc-200'
+                  }`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    autoPrintOnSettle ? 'translate-x-5' : 'translate-x-0'
+                  }`} />
+                </button>
+              </div>
+            </section>
+
+            {/* 3. Kitchen KOT Thermal Printer Routing */}
+            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <ChefHat size={18} className="text-[#E46254]" />
+                    <h2 className="text-base font-bold text-zinc-900 tracking-tight">
+                      Kitchen Order Ticket (KOT) Printer
+                    </h2>
+                  </div>
+                  <p className="text-zinc-500 text-xs mt-0.5">
+                    Direct thermal chit output to the kitchen cook line (supports Ethernet LAN, Wi-Fi, or USB).
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleTestKotPrint}
+                  disabled={testingKot}
+                  className="px-4 py-2 bg-[#E46254] hover:bg-[#d04e41] text-white text-xs font-semibold rounded-xl flex items-center gap-2 transition-all cursor-pointer self-start sm:self-auto shrink-0 active:scale-95 disabled:opacity-60 shadow-xs"
+                >
+                  {testingKot ? <Loader2 size={13} className="animate-spin" /> : <ChefHat size={13} />}
+                  <span>Test Print Kitchen KOT</span>
+                </button>
+              </div>
+
+              {/* 3-Way Mode Selector */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                {/* Mode 1: Same as Counter */}
+                <div
+                  onClick={() => setKotPrinterType('same')}
+                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                    kotPrinterType === 'same'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
+                      : 'border-zinc-200 bg-white hover:border-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-900">Same as Counter</span>
+                    {kotPrinterType === 'same' && (
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
+                        <Check size={10} className="text-white" strokeWidth={3} />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-500 mt-2">
+                    Single thermal printer prints both customer bills and kitchen KOT chits.
+                  </p>
+                </div>
+
+                {/* Mode 2: Separate Windows Printer */}
+                <div
+                  onClick={() => setKotPrinterType('windows')}
+                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                    kotPrinterType === 'windows'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
+                      : 'border-zinc-200 bg-white hover:border-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-900">USB / Windows Spooler</span>
+                    {kotPrinterType === 'windows' && (
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
+                        <Check size={10} className="text-white" strokeWidth={3} />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-500 mt-2">
+                    Dedicated USB kitchen printer with Windows driver installed.
+                  </p>
+                </div>
+
+                {/* Mode 3: Network IP (Ethernet / LAN) */}
+                <div
+                  onClick={() => setKotPrinterType('network')}
+                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                    kotPrinterType === 'network'
+                      ? 'border-[#E46254] bg-[#E46254]/5'
+                      : 'border-zinc-200 bg-white hover:border-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-900">Network IP (LAN / Wi-Fi)</span>
+                    {kotPrinterType === 'network' && (
+                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
+                        <Check size={10} className="text-white" strokeWidth={3} />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-500 mt-2">
+                    Commercial kitchen Ethernet LAN printer (ESC/POS Raw Port 9100).
+                  </p>
+                </div>
+              </div>
+
+              {/* Sub-config: Windows Printer Selector */}
+              {kotPrinterType === 'windows' && (
+                <div className="p-4 bg-zinc-50 rounded-xl border border-zinc-200/80 space-y-2 animate-in fade-in">
+                  <label className="block text-xs font-medium text-zinc-700">
+                    Select Kitchen Windows Printer
+                  </label>
+                  <select
+                    value={kotPrinterName}
+                    onChange={(e) => setKotPrinterName(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-white border border-zinc-200 rounded-xl text-xs sm:text-sm font-medium text-zinc-900 outline-none focus:border-zinc-900 transition-all cursor-pointer"
+                  >
+                    <option value="">-- Choose Installed Kitchen Printer --</option>
+                    {installedPrinters.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Sub-config: Network IP & Port */}
+              {kotPrinterType === 'network' && (
+                <div className="p-4 bg-zinc-50 rounded-xl border border-zinc-200/80 space-y-3 animate-in fade-in">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-zinc-800 flex items-center gap-1.5">
+                      <Wifi size={14} className="text-emerald-600" />
+                      Kitchen Printer Network Settings
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handlePingNetworkPrinter}
+                      disabled={testingPing}
+                      className="px-3 py-1.5 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-800 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                    >
+                      {testingPing ? <Loader2 size={12} className="animate-spin" /> : <Radio size={12} />}
+                      <span>Ping Port 9100</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-medium text-zinc-600 mb-1">
+                        Printer IP Address (LAN)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 192.168.1.200"
+                        value={kotPrinterIp}
+                        onChange={(e) => setKotPrinterIp(e.target.value.trim())}
+                        className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 outline-none focus:border-zinc-900 transition-all placeholder:text-zinc-400"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-zinc-600 mb-1">
+                        RAW Port (Default: 9100)
+                      </label>
+                      <input
+                        type="number"
+                        placeholder="9100"
+                        value={kotPrinterPort}
+                        onChange={(e) => setKotPrinterPort(parseInt(e.target.value, 10) || 9100)}
+                        className="w-full px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-mono text-zinc-900 outline-none focus:border-zinc-900 transition-all"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Auto-print KOT toggle */}
+              <div className="pt-3 border-t border-zinc-100 flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-semibold text-zinc-800 block">Auto-Print KOT on Punch</span>
+                  <span className="text-[11px] text-zinc-500">
+                    Immediately print KOT ticket to kitchen printer when order is placed or fired
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setAutoKotPrint(!autoKotPrint)}
+                  className={`w-11 h-6 rounded-full transition-colors cursor-pointer relative p-0.5 ${
+                    autoKotPrint ? 'bg-[#E46254]' : 'bg-zinc-200'
+                  }`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    autoKotPrint ? 'translate-x-5' : 'translate-x-0'
+                  }`} />
+                </button>
+              </div>
+            </section>
+
+            {/* 4. Touchscreen Monitor & On-Screen Numpad */}
+            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs space-y-5">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
@@ -1047,7 +1598,7 @@ export default function SettingsPage() {
                       Touchscreen Monitor & On-Screen Numpad
                     </h2>
                     <span className="text-[10px] font-semibold tracking-wide uppercase px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 border border-zinc-200">
-                      Desktop App Preview
+                      Touch Ergonomics
                     </span>
                   </div>
                   <p className="text-zinc-500 text-xs mt-1 leading-relaxed">
@@ -1067,11 +1618,11 @@ export default function SettingsPage() {
                     Touch Keypad Ergonomics
                   </div>
                   <p className="text-[11.5px] text-zinc-500 max-w-sm leading-relaxed">
-                    When active in the upcoming TableTapy Desktop App, clicking any numeric field on POS immediately floats this large touch numpad to eliminate keyboard reach.
+                    Clicking numeric quantity or cash fields instantly launches the large floating touch dial to eliminate keyboard reach.
                   </p>
-                  <div className="pt-2 flex items-center gap-2 text-[11px] font-medium text-zinc-400">
-                    <Info size={13} />
-                    <span>Included in TableTapy Desktop App release</span>
+                  <div className="pt-2 flex items-center gap-2 text-[11px] font-medium text-emerald-600">
+                    <CheckCircle2 size={13} />
+                    <span>Enabled in TableTapy Terminal</span>
                   </div>
                 </div>
 
@@ -1090,98 +1641,6 @@ export default function SettingsPage() {
                       </div>
                     ))}
                   </div>
-                </div>
-              </div>
-            </section>
-
-            {/* 2. Thermal Printer Paper Width & Copies */}
-            <section className="bg-white rounded-2xl border border-zinc-200/80 p-6 shadow-xs sm:p-7 shadow-xs space-y-5">
-              <div>
-                <h2 className="text-base font-bold text-zinc-900 tracking-tight">
-                  Thermal Chit Printing Preferences
-                </h2>
-                <p className="text-zinc-500 text-xs mt-1">
-                  Configure ESC/POS thermal receipt paper roll and copies.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                
-                {/* 80mm standard */}
-                <div
-                  onClick={() => setPaperWidth('80MM')}
-                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
-                    paperWidth === '80MM'
-                      ? 'border-[#E46254] bg-[#E46254]/5'
-                      : 'border-zinc-200 bg-white hover:border-zinc-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-900">80mm (3-Inch Standard)</span>
-                    {paperWidth === '80MM' && (
-                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
-                        <Check size={10} className="text-white" strokeWidth={3} />
-                      </div>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-zinc-500 mt-2">
-                    Standard high-speed desktop receipt printer (Epson, TVS, Rugtek).
-                  </p>
-                </div>
-
-                {/* 58mm compact */}
-                <div
-                  onClick={() => setPaperWidth('58MM')}
-                  className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
-                    paperWidth === '58MM'
-                      ? 'border-[#E46254] bg-[#E46254]/5'
-                      : 'border-zinc-200 bg-white hover:border-zinc-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-900">58mm (2-Inch Mobile)</span>
-                    {paperWidth === '58MM' && (
-                      <div className="w-4 h-4 rounded-full bg-[#E46254] flex items-center justify-center">
-                        <Check size={10} className="text-white" strokeWidth={3} />
-                      </div>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-zinc-500 mt-2">
-                    Compact portable Bluetooth or pocket handheld thermal printer.
-                  </p>
-                </div>
-
-              </div>
-
-              <div className="pt-4 border-t border-zinc-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                <div>
-                  <span className="text-xs font-semibold text-zinc-800 block">Print Copies</span>
-                  <span className="text-[11px] text-zinc-500">Number of chit copies generated per table bill</span>
-                </div>
-
-                <div className="flex items-center gap-1.5 bg-zinc-100 p-1 rounded-xl">
-                  <button
-                    type="button"
-                    onClick={() => setPrintCopies(1)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      printCopies === 1
-                        ? 'bg-white text-[#E46254] shadow-xs'
-                        : 'text-zinc-600 hover:text-zinc-900 '
-                    }`}
-                  >
-                    1 Copy (Guest Bill)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPrintCopies(2)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      printCopies === 2
-                        ? 'bg-white text-[#E46254] shadow-xs'
-                        : 'text-zinc-600 hover:text-zinc-900 '
-                    }`}
-                  >
-                    2 Copies (Guest + Store)
-                  </button>
                 </div>
               </div>
             </section>

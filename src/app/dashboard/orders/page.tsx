@@ -1739,7 +1739,27 @@ export default function LiveOrdersPage() {
     }
     setOrders(prev => prev.map(o => o.id === round.id ? updatedRound : o));
 
-    // 2. Cloud Sync with offline fallback
+    // 2. Fire Kitchen KOT Thermal Chit if auto-print enabled
+    const autoKot = typeof window !== 'undefined' ? localStorage.getItem('tabletapy_auto_kot_print') !== 'false' : true;
+    if (autoKot) {
+      const kotItems = (round.items_json || []).map(it => ({
+        name: it.item?.name || 'Item',
+        quantity: it.quantity || 1,
+        notes: it.notes || it.item?.notes
+      }));
+      printThermalChit({
+        restaurantName: (typeof window !== 'undefined' ? localStorage.getItem('tabletapy_restaurant_name') : null) || 'TableTapy',
+        type: 'KOT',
+        tableName: round.table_no,
+        orderType: 'DINE_IN',
+        orderNumber: round.id.slice(0, 8),
+        customerName: round.customer_name || undefined,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        items: kotItems
+      }).catch(err => console.warn('[Orders] Auto KOT print failed:', err));
+    }
+
+    // 3. Cloud Sync with offline fallback
     try {
       const { error } = await supabase.from('orders').update({ status: 'PREPARING' }).eq('id', round.id);
       if (!error) {
@@ -2365,6 +2385,36 @@ export default function LiveOrdersPage() {
 
     setReadyForPickupNotice(`✅ Table ${session.table_no} settled (₹${finalPaid.toFixed(0)}) & closed.`);
     setTimeout(() => setReadyForPickupNotice(null), 5000);
+
+    // Auto-print bill chit if configured in hardware settings
+    const autoBill = typeof window !== 'undefined' ? localStorage.getItem('tabletapy_auto_bill_print') === 'true' : false;
+    if (autoBill) {
+      const billItems: Array<{ name: string; quantity: number; price?: number; total?: number }> = [];
+      session.rounds.forEach(r => {
+        (r.items_json || []).forEach(it => {
+          const itemPrice = it.price || it.item?.basePrice || 0;
+          const itemQty = it.quantity || 1;
+          billItems.push({
+            name: it.item?.name || 'Item',
+            quantity: itemQty,
+            price: itemPrice,
+            total: itemPrice * itemQty
+          });
+        });
+      });
+      printThermalChit({
+        restaurantName: (typeof window !== 'undefined' ? localStorage.getItem('tabletapy_restaurant_name') : null) || 'TableTapy',
+        type: 'BILL',
+        tableName: session.table_no,
+        orderType: 'DINE_IN',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        items: billItems,
+        subtotal: session.totalBill,
+        discount: discountAmount > 0 ? discountAmount : undefined,
+        grandTotal: finalPaid,
+        footerMessage: 'Thank you! Visit again.'
+      }).catch(err => console.warn('[Orders] Auto Bill print failed:', err));
+    }
 
     setActionLoadingId(null);
     setBillModal(null);
