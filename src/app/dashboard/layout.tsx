@@ -139,11 +139,28 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   useEffect(() => {
     OfflineSyncEngine.start();
 
-    // Register PWA Service Worker for 100% offline startup
+    // Register PWA Service Worker for 100% offline startup in production, or clear in development
     if (typeof window !== "undefined" && "serviceWorker" in navigator) {
-      navigator.serviceWorker
-        .register("/sw.js")
-        .catch((err) => console.warn("[PWA] Service worker registration deferred:", err));
+      const isLocalhost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+      if (isLocalhost) {
+        // Clear any stale cached bundles on localhost to guarantee live code execution
+        navigator.serviceWorker.getRegistrations().then((registrations) => {
+          for (const reg of registrations) {
+            reg.unregister();
+          }
+        });
+        if ("caches" in window) {
+          caches.keys().then((names) => {
+            for (const name of names) {
+              caches.delete(name);
+            }
+          });
+        }
+      } else {
+        navigator.serviceWorker
+          .register("/sw.js")
+          .catch((err) => console.warn("[PWA] Service worker registration deferred:", err));
+      }
     }
 
     return () => {

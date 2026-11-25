@@ -71,7 +71,10 @@ export async function getInstalledPrinters(): Promise<string[]> {
   // 2. Query local Next.js hardware host API
   if (typeof window !== 'undefined') {
     try {
-      const res = await fetch('/api/hardware/printers');
+      const res = await fetch(`/api/hardware/printers?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' }
+      });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.printers) && data.printers.length > 0) {

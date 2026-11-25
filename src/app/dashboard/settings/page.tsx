@@ -198,7 +198,14 @@ export default function SettingsPage() {
 
         // Query installed Windows printers from desktop bridge
         try {
-          const list = await getInstalledPrinters();
+          let list = await getInstalledPrinters();
+          if (list.length === 0) {
+            const res = await fetch(`/api/hardware/printers?_t=${Date.now()}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (Array.isArray(data.printers) && data.printers.length > 0) list = data.printers;
+            }
+          }
           setInstalledPrinters(list);
         } catch {}
       } catch (err) {
@@ -212,9 +219,21 @@ export default function SettingsPage() {
   const refreshPrinters = async () => {
     setLoadingPrinters(true);
     try {
-      const list = await getInstalledPrinters();
+      let list = await getInstalledPrinters();
+      if (list.length === 0) {
+        const res = await fetch(`/api/hardware/printers?_t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.printers) && data.printers.length > 0) list = data.printers;
+        }
+      }
       setInstalledPrinters(list);
-      setPrinterFeedback({ type: 'success', message: `Detected ${list.length} installed Windows printer(s).` });
+      setPrinterFeedback({ 
+        type: list.length > 0 ? 'success' : 'error', 
+        message: list.length > 0 
+          ? `Detected ${list.length} installed Windows printer(s).` 
+          : 'No Windows printers detected. Check Windows Settings > Printers & Scanners.' 
+      });
     } catch (err: any) {
       setPrinterFeedback({ type: 'error', message: err?.message || 'Failed to detect printers' });
     } finally {

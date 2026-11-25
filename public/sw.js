@@ -1,7 +1,7 @@
-// TableTapy POS Service Worker (v1)
-// Enables 100% offline startup and eliminates the Chrome dinosaur page.
+// TableTapy POS Service Worker (v2)
+// Ultra-reliable offline shell with zero-cache on development/localhost and APIs
 
-const CACHE_NAME = 'tabletapy-pwa-v1';
+const CACHE_NAME = 'tabletapy-pwa-v2';
 const PRECACHE_ASSETS = [
   '/manifest.json',
   '/logo-clean.png',
@@ -25,6 +25,7 @@ self.addEventListener('activate', (event) => {
       return Promise.all(
         keys.map((key) => {
           if (key !== CACHE_NAME) {
+            console.log('[SW] Purging outdated cache:', key);
             return caches.delete(key);
           }
         })
@@ -36,37 +37,36 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // 1. Bypass all Supabase API and WebSocket requests (handled by LocalSqliteStore & OfflineSyncEngine)
+  // 1. NEVER intercept localhost/dev requests, API routes, or Supabase calls
   if (
+    url.hostname === 'localhost' ||
+    url.hostname === '127.0.0.1' ||
+    url.pathname.startsWith('/api/') ||
     url.hostname.includes('supabase.co') ||
     url.pathname.startsWith('/rest/') ||
     url.pathname.startsWith('/auth/') ||
     event.request.method !== 'GET'
   ) {
-    return;
+    return; // Pass through directly to network
   }
 
-  // 2. Next.js Static Assets & Fonts (Cache-First)
-  if (
-    url.pathname.startsWith('/_next/static/') ||
-    url.pathname.match(/\.(png|jpg|jpeg|svg|webp|woff2|woff|ttf|css|js)$/i)
-  ) {
+  // 2. Next.js Static Assets & Fonts (Network-First for scripts to guarantee instant updates)
+  if (url.pathname.startsWith('/_next/static/')) {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
-        if (cached) return cached;
-        return fetch(event.request).then((response) => {
+      fetch(event.request)
+        .then((response) => {
           if (response && response.status === 200) {
             const clone = response.clone();
             caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
           }
           return response;
-        });
-      })
+        })
+        .catch(() => caches.match(event.request))
     );
     return;
   }
 
-  // 3. Navigation / Dashboard HTML Routes (Network-First with Cache Fallback)
+  // 3. Navigation / Dashboard HTML Routes (Network-First with Cache Fallback for pure offline)
   if (event.request.mode === 'navigate' || url.pathname.startsWith('/dashboard')) {
     event.respondWith(
       fetch(event.request)
@@ -78,7 +78,6 @@ self.addEventListener('fetch', (event) => {
           return response;
         })
         .catch(() => {
-          // If completely offline, serve cached dashboard shell
           return caches.match(event.request).then((cached) => {
             if (cached) return cached;
             return caches.match('/dashboard/pos');
