@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from "react";
-import { Bell, Check, ChevronRight, MapPin, Plus, Printer, Search, Smartphone, UtensilsCrossed, Wifi } from "lucide-react";
+import { Bell, Check, ChevronRight, MapPin, Pause, Play, Plus, Printer, Search, Smartphone, UtensilsCrossed, Wifi } from "lucide-react";
 
 type Step = 0 | 1 | 2;
 const STEP_SECONDS = 2.7;
@@ -16,6 +16,7 @@ const stages = [
 export function RestaurantJourneyStage() {
   const [cycleTime, setCycleTime] = useState(0);
   const [isVisible, setIsVisible] = useState(false);
+  const [manualPause, setManualPause] = useState(false);
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const mobileRail = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLElement>(null);
@@ -37,10 +38,10 @@ export function RestaurantJourneyStage() {
   }, []);
 
   useEffect(() => {
-    if (!isVisible) return;
+    if (!isVisible || manualPause) return;
     const timer = window.setInterval(() => setCycleTime((time) => Number(((time + 0.1) % LOOP_SECONDS).toFixed(1))), 100);
     return () => window.clearInterval(timer);
-  }, [isVisible]);
+  }, [isVisible, manualPause]);
 
   useEffect(() => {
     if (mobileRail.current) mobileRail.current.scrollTo({ left: mobileRail.current.clientWidth * step, behavior: "smooth" });
@@ -50,20 +51,23 @@ export function RestaurantJourneyStage() {
   const handleTouchEnd = (x: number) => {
     if (touchStart === null) return;
     const delta = touchStart - x;
-    if (Math.abs(delta) > 44) setCycleTime((delta > 0 ? Math.min(LOOP_SECONDS - 0.1, (step + 1) * STEP_SECONDS + 0.1) : Math.max(0, (step - 1) * STEP_SECONDS + 0.1)));
+    if (Math.abs(delta) > 44) {
+      setManualPause(true);
+      setCycleTime((delta > 0 ? Math.min(LOOP_SECONDS - 0.1, (step + 1) * STEP_SECONDS + 0.1) : Math.max(0, (step - 1) * STEP_SECONDS + 0.1)));
+    }
     setTouchStart(null);
   };
 
   return (
     <section ref={stageRef} className="overflow-x-clip rounded-[24px] border border-zinc-200/80 bg-gradient-to-b from-white to-slate-50 p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.28)] sm:rounded-[32px] sm:p-5">
       <div className="hidden gap-2 rounded-2xl bg-slate-100/80 p-2 lg:grid lg:grid-cols-3">
-        {stages.map(({ label, icon: Icon }, index) => <div key={label} aria-current={step === index ? "step" : undefined} className={`relative flex min-h-14 min-w-0 items-center overflow-hidden rounded-xl px-3 text-left text-[11px] font-semibold transition xl:px-4 xl:text-xs ${step === index ? "bg-white text-zinc-900 shadow-sm" : "text-slate-500"}`}>
+        {stages.map(({ label, icon: Icon }, index) => <button key={label} type="button" aria-pressed={manualPause && step === index} onClick={() => { setCycleTime(index * STEP_SECONDS + 0.1); setManualPause(true); }} className={`relative flex min-h-14 min-w-0 items-center overflow-hidden rounded-xl px-3 text-left text-[11px] font-semibold transition xl:px-4 xl:text-xs ${step === index ? "bg-white text-zinc-900 shadow-sm" : "text-slate-500"}`}>
           <span className="relative z-10 flex items-center gap-2 whitespace-nowrap"><Icon size={15} className="shrink-0" />{label}</span>
           <span className="absolute inset-x-0 bottom-0 h-0.5 bg-zinc-100"><span className="block h-full bg-[#E46254] transition-[width] duration-100" style={{ width: `${progress(index)}%` }} /></span>
-        </div>)}
+        </button>)}
       </div>
 
-      <div className="relative mt-5 hidden min-h-[590px] items-center gap-10 px-6 py-8 lg:flex">
+      <div className="relative mt-5 hidden min-h-[700px] items-start gap-10 px-6 py-8 lg:flex">
         <div className="absolute left-[27%] right-[35%] top-[49%] h-px overflow-hidden bg-gradient-to-r from-transparent via-[#E46254]/35 to-transparent"><span className={`absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-[#E46254] shadow-[0_0_0_6px_rgba(228,98,84,0.13)] ${isVisible && step === 1 ? "tt-data-pulse" : "hidden"}`} /></div>
         <div className="w-[32%] min-w-0"><PhoneMockup step={step} elapsed={elapsed} /></div>
         <div className="flex-1 min-w-0"><TerminalMockup step={step} elapsed={elapsed} /></div>
@@ -75,7 +79,8 @@ export function RestaurantJourneyStage() {
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={2} elapsed={elapsed} mobile /></div>
       </div>
       <div className="mt-3 flex items-center justify-center gap-2 lg:hidden">{stages.map((_, index) => <span key={index} className={`block h-1.5 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-1.5 bg-zinc-300"}`} />)}</div>
-      <p className="mt-2 text-center text-[10px] text-slate-400">{isVisible ? "Customer order → floor alert → printed bill and kitchen ticket" : "The product journey starts as you bring it into view"}</p>
+      <div className="mt-2 flex items-center justify-center gap-2 text-center text-[10px] text-slate-400"><span>{manualPause ? "Paused · select a step or resume the journey" : isVisible ? "Customer order → floor alert → printed bill and kitchen ticket" : "The product journey starts as you bring it into view"}</span><button type="button" onClick={() => setManualPause((paused) => !paused)} aria-label={manualPause ? "Resume journey" : "Pause journey"} className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-600 hover:text-[#E46254]">{manualPause ? <Play size={12} /> : <Pause size={12} />}</button></div>
+      <p className="mt-1 text-center text-[10px] font-medium text-slate-500 lg:hidden">Swipe to see floor plan and POS <ChevronRight size={11} className="inline" /></p>
     </section>
   );
 }
@@ -92,7 +97,7 @@ function PhoneMockup({ step, elapsed, mobile = false }: { step: Step; elapsed: n
       <div className="flex h-8 items-center justify-between px-5 pt-1 font-mono text-[9px]"><span>19:42</span><span className="flex items-center gap-1"><Wifi size={10} /> 92%</span></div>
       {sent ? <div className="grid h-[calc(100%-2rem)] place-items-center px-6 text-center"><div><div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-emerald-100 text-emerald-600"><Check size={28} strokeWidth={3} /></div><h3 className="mt-5 text-lg font-bold">Order #104 Sent to Kitchen!</h3><p className="mt-2 text-xs leading-5 text-slate-500">Table 04 session active. Your order is now with the restaurant.</p><span className="mt-5 inline-flex rounded-full bg-emerald-50 px-3 py-2 font-mono text-[10px] text-emerald-700">3 ITEMS · ₹470.00</span></div></div> : <>
         <div className="border-b border-zinc-200 bg-white px-4 pb-3"><div className="flex items-center justify-between"><div><p className="text-xs font-bold">The TableTapy Bistro</p><p className="mt-0.5 flex items-center gap-1 text-[9px] text-slate-500"><MapPin size={9} /> Table 04 · Ground Hall</p></div><span className="grid h-7 w-7 place-items-center rounded-full bg-[#E46254]/10 text-[#E46254]"><UtensilsCrossed size={13} /></span></div><div className="mt-3 flex h-7 items-center gap-2 rounded-lg bg-slate-100 px-2 text-[9px] text-slate-400"><Search size={11} /> Search dishes</div></div>
-        <div className="flex gap-1.5 overflow-hidden px-4 py-3 text-[9px]">{["All", "Starters", "Main Course", "Tandoor & Breads", "Beverages"].map((category, index) => <span key={category} className={`shrink-0 rounded-full px-2 py-1 ${index === 0 ? "bg-zinc-900 text-white" : "bg-white text-slate-500"}`}>{category}</span>)}</div>
+        <div className="relative"><div className="flex gap-1.5 overflow-x-auto px-4 py-3 text-[9px] [scrollbar-width:none]">{["All", "Starters", "Main Course", "Tandoor & Breads", "Beverages"].map((category, index) => <span key={category} className={`shrink-0 rounded-full px-2 py-1 ${index === 0 ? "bg-zinc-900 text-white" : "bg-white text-slate-500"}`}>{category}</span>)}</div><span aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-5 bg-gradient-to-l from-slate-50 to-transparent" /></div>
         <div className="space-y-2 px-4 pb-20"><PhoneDish name="Chicken Dum Biryani" price="₹340.00" tag="Bestseller" meta="Full · 750g" veg={false} qty={hasBiryani ? 1 : 0} /><PhoneDish name="Paneer Butter Masala" price="₹290.00" tag="Chef Special" veg qty={0} /><PhoneDish name="Butter Garlic Naan" price="₹65.00" veg qty={naanQty} /><PhoneDish name="Cold Brew Coffee" price="₹160.00" veg qty={0} /></div>
         {showCart && <div className="absolute inset-x-2 bottom-2 rounded-2xl border border-zinc-200 bg-white p-3 shadow-lg"><div className="flex items-center justify-between text-[10px]"><span className="font-medium">3 items in cart</span><span className="font-mono font-bold">₹470.00</span></div><div className="mt-2 flex min-h-9 w-full items-center justify-center gap-1 rounded-xl bg-[#E46254] text-[10px] font-bold text-white">Place Table Order <ChevronRight size={12} /></div></div>}
       </>}
@@ -121,5 +126,5 @@ function PosTicket({ receiptVisible, mobile = false }: { receiptVisible: boolean
 }
 
 function ThermalReceipt({ mobile = false }: { mobile?: boolean }) {
-  return <div className={`tt-receipt-feed z-10 border-x border-b border-zinc-300 bg-[#FDFCF7] p-3 font-mono leading-relaxed text-zinc-800 shadow-xl ${mobile ? "relative mx-auto mt-2 w-[min(82%,300px)] text-[9px]" : "absolute left-[26%] top-[calc(100%-1rem)] w-[48%] text-[7px]"}`}><div className="text-center"><p className="font-bold">THE TABLETAPY BISTRO</p><p>TAX INVOICE</p><p className="text-zinc-500">GSTIN: 29ABCDE1234F1Z5 · FSSAI: 11223344556677</p></div><div className="my-2 border-t border-dashed border-zinc-400" /><p>TABLE: T-04 · 19:43</p><p>1x Biryani (Dum) ........ ₹340.00</p><p>2x Butter Garlic Naan ... ₹130.00</p><p className="mt-1 text-right font-bold">PAID TOTAL: ₹493.50 CASH</p><p className="text-center">Thank you! Visit again.</p><p className="my-2 text-center text-zinc-400">✂ ---------------- GS V AUTO CUT ----------------</p><div className="text-center font-bold"><p>KITCHEN ORDER TICKET</p><p>KOT #104 · TABLE T-04 · DINE-IN</p></div><p className="mt-2 font-bold">[ ] 1x Biryani (Dum)</p><p>NOTE: Less spicy</p><p className="font-bold">[ ] 2x Butter Garlic Naan</p><p className="mt-2 text-center">♩ Acoustic Kitchen Buzzer Alert Fired!</p></div>;
+  return <div className={`tt-receipt-feed z-10 border-x border-b border-zinc-300 bg-[#FDFCF7] p-3 font-mono leading-relaxed text-zinc-800 shadow-xl ${mobile ? "relative mx-auto mt-2 w-[min(82%,300px)] text-[9px]" : "absolute left-[26%] top-[calc(100%-1rem)] max-h-[190px] w-[48%] overflow-hidden text-[7px]"}`}><div className="text-center"><p className="font-bold">THE TABLETAPY BISTRO</p><p>TAX INVOICE</p><p className="text-zinc-500">GSTIN: 29ABCDE1234F1Z5 · FSSAI: 11223344556677</p></div><div className="my-2 border-t border-dashed border-zinc-400" /><p>TABLE: T-04 · 19:43</p><p>1x Biryani (Dum) ........ ₹340.00</p><p>2x Butter Garlic Naan ... ₹130.00</p><p className="mt-1 text-right font-bold">PAID TOTAL: ₹493.50 CASH</p><p className="text-center">Thank you! Visit again.</p><p className="my-2 text-center text-zinc-400">✂ ---------------- GS V AUTO CUT ----------------</p><div className="text-center font-bold"><p>KITCHEN ORDER TICKET</p><p>KOT #104 · TABLE T-04 · DINE-IN</p></div><p className="mt-2 font-bold">[ ] 1x Biryani (Dum)</p><p>NOTE: Less spicy</p><p className="font-bold">[ ] 2x Butter Garlic Naan</p><p className="mt-2 text-center">♩ Acoustic Kitchen Buzzer Alert Fired!</p></div>;
 }
