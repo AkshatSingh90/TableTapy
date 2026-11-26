@@ -12,7 +12,7 @@ export default function MarketingHomepage() {
     <main className="min-h-screen overflow-x-clip bg-white text-zinc-900">
       <header className="sticky top-0 z-50 border-b border-zinc-200/80 bg-white/90 backdrop-blur-xl">
         <div className="mx-auto flex min-h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
-          <Link href="/" className="flex items-center gap-2" aria-label="TableTapy home"><img src="/logo-clean.png" alt="TableTapy" className="h-7 w-auto" /><span className="hidden rounded-full bg-emerald-50 px-2 py-1 font-mono text-[10px] text-emerald-700 sm:inline">● POS v0.1</span></Link>
+          <Link href="/" className="flex items-center gap-2" aria-label="TableTapy home"><img src="/logo-header.png" alt="TableTapy" className="h-7 w-auto" /><span className="hidden rounded-full bg-emerald-50 px-2 py-1 font-mono text-[10px] text-emerald-700 sm:inline">● POS v0.1</span></Link>
           <div className="hidden items-center gap-6 text-xs font-medium text-slate-500 md:flex"><a href="#journey" className="hover:text-zinc-900">Product journey</a><a href="#hardware" className="hover:text-zinc-900">Hardware ready</a><Link href="/login" className="hover:text-zinc-900">Sign in</Link></div>
           <Link href="/signup" className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#E46254] px-3 text-xs font-semibold text-white sm:px-4"><MonitorDown size={14} /><span className="hidden sm:inline">Download for Windows</span><span className="sm:hidden">Download</span></Link>
         </div>

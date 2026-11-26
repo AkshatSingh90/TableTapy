@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Bell, Check, ChevronRight, MapPin, Plus, Printer, Search, Smartphone, UtensilsCrossed, Wifi } from "lucide-react";
 
 type Step = 0 | 1 | 2;
+const STEP_SECONDS = 2.7;
+const LOOP_SECONDS = STEP_SECONDS * 3;
 
 const stages = [
   { label: "1. Customer Scans QR & Orders", icon: Smartphone },
@@ -17,8 +19,8 @@ export function RestaurantJourneyStage() {
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const mobileRail = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLElement>(null);
-  const step = Math.floor(cycleTime / 4) as Step;
-  const elapsed = cycleTime % 4;
+  const step = Math.floor(cycleTime / STEP_SECONDS) as Step;
+  const elapsed = cycleTime % STEP_SECONDS;
 
   useEffect(() => {
     const target = stageRef.current;
@@ -26,14 +28,14 @@ export function RestaurantJourneyStage() {
     const observer = new IntersectionObserver(([entry]) => {
       setIsVisible(entry.isIntersecting && entry.intersectionRatio >= 0.6);
       if (entry.isIntersecting && entry.intersectionRatio >= 0.6) setCycleTime(0);
-    }, { threshold: [0, 0.6] });
+    }, { threshold: [0, 0.55] });
     observer.observe(target);
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
     if (!isVisible) return;
-    const timer = window.setInterval(() => setCycleTime((time) => Number(((time + 0.1) % 12).toFixed(1))), 100);
+    const timer = window.setInterval(() => setCycleTime((time) => Number(((time + 0.1) % LOOP_SECONDS).toFixed(1))), 100);
     return () => window.clearInterval(timer);
   }, [isVisible]);
 
@@ -41,17 +43,17 @@ export function RestaurantJourneyStage() {
     if (mobileRail.current) mobileRail.current.scrollTo({ left: mobileRail.current.clientWidth * step, behavior: "smooth" });
   }, [step]);
 
-  const progress = (index: number) => index < step ? 100 : index === step ? Math.min(100, (elapsed / 4) * 100) : 0;
+  const progress = (index: number) => index < step ? 100 : index === step ? Math.min(100, (elapsed / STEP_SECONDS) * 100) : 0;
   const handleTouchEnd = (x: number) => {
     if (touchStart === null) return;
     const delta = touchStart - x;
-    if (Math.abs(delta) > 44) setCycleTime((delta > 0 ? Math.min(11.9, (step + 1) * 4 + 0.1) : Math.max(0, (step - 1) * 4 + 0.1)));
+    if (Math.abs(delta) > 44) setCycleTime((delta > 0 ? Math.min(LOOP_SECONDS - 0.1, (step + 1) * STEP_SECONDS + 0.1) : Math.max(0, (step - 1) * STEP_SECONDS + 0.1)));
     setTouchStart(null);
   };
 
   return (
-    <section ref={stageRef} className="overflow-x-clip rounded-[24px] border border-zinc-200/80 bg-white p-2 shadow-[0_20px_70px_-28px_rgba(15,23,42,0.24)] sm:rounded-[32px] sm:p-5">
-      <div className="grid gap-2 rounded-2xl bg-slate-50 p-2 sm:grid-cols-3">
+    <section ref={stageRef} className="overflow-x-clip rounded-[24px] border border-zinc-200/80 bg-gradient-to-b from-white to-slate-50 p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.28)] sm:rounded-[32px] sm:p-5">
+      <div className="hidden gap-2 rounded-2xl bg-slate-100/80 p-2 md:grid md:grid-cols-3">
         {stages.map(({ label, icon: Icon }, index) => <div key={label} aria-current={step === index ? "step" : undefined} className={`relative min-h-12 overflow-hidden rounded-xl px-3 text-left text-[11px] font-semibold transition sm:text-xs ${step === index ? "bg-white text-zinc-900 shadow-sm" : "text-slate-500"}`}>
           <span className="relative z-10 flex items-center gap-2"><Icon size={15} className={step === index ? "text-[#E46254]" : ""} />{label}</span>
           <span className="absolute inset-x-0 bottom-0 h-0.5 bg-zinc-100"><span className="block h-full bg-[#E46254] transition-[width] duration-100" style={{ width: `${progress(index)}%` }} /></span>
@@ -69,18 +71,18 @@ export function RestaurantJourneyStage() {
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={1} elapsed={elapsed} mobile /></div>
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={2} elapsed={elapsed} mobile /></div>
       </div>
-      <div className="mt-4 flex items-center justify-center gap-2 lg:hidden">{stages.map((_, index) => <span key={index} className={`block h-2 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-2 bg-zinc-300"}`} />)}</div>
-      <p className="mt-2 text-center text-[11px] text-slate-400">{isVisible ? "Watch the customer order flow through the restaurant automatically." : "Scroll here to watch a customer order move through the restaurant."}</p>
+      <div className="mt-3 flex items-center justify-center gap-2 md:hidden">{stages.map((_, index) => <span key={index} className={`block h-1.5 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-1.5 bg-zinc-300"}`} />)}</div>
+      <p className="mt-2 text-center text-[10px] text-slate-400">{isVisible ? "Customer order → floor alert → printed bill and kitchen ticket" : "The product journey starts as you bring it into view"}</p>
     </section>
   );
 }
 
 function PhoneMockup({ step, elapsed, mobile = false }: { step: Step; elapsed: number; mobile?: boolean }) {
-  const phase = step === 0 ? elapsed : 3.2;
-  const sent = phase >= 2.8;
-  const hasBiryani = phase >= 0.8;
-  const naanQty = phase >= 2.2 ? 2 : phase >= 1.6 ? 1 : 0;
-  const showCart = phase >= 2.2 && !sent;
+  const phase = step === 0 ? elapsed : 1.8;
+  const sent = phase >= 1.3;
+  const hasBiryani = phase >= 0.35;
+  const naanQty = phase >= 0.9 ? 2 : phase >= 0.65 ? 1 : 0;
+  const showCart = phase >= 0.9 && phase < 1.3;
   return <div className={`relative mx-auto aspect-[9/19.5] w-full max-w-[280px] rounded-[42px] border-[7px] border-zinc-900 bg-zinc-900 p-[3px] shadow-[0_20px_40px_-18px_rgba(15,23,42,0.45)] ${mobile ? "max-w-[min(100%,310px)]" : ""}`}>
     <div className="absolute top-2 left-1/2 z-20 h-4 w-20 -translate-x-1/2 rounded-full bg-zinc-900" />
     <div className="h-full overflow-hidden rounded-[34px] bg-slate-50 text-zinc-900">
@@ -101,7 +103,7 @@ function PhoneDish({ name, price, tag, meta, veg, qty }: { name: string; price: 
 
 function TerminalMockup({ step, elapsed, mobile = false }: { step: Step; elapsed: number; mobile?: boolean }) {
   const receiptVisible = step === 2 && elapsed >= 1.3;
-  return <div className={`relative mx-auto w-full ${mobile ? "max-w-[680px]" : ""}`}><div className={`overflow-hidden border-zinc-800 bg-white shadow-[0_22px_46px_-20px_rgba(15,23,42,0.5)] ${mobile ? "min-h-[430px] rounded-2xl border-[5px]" : "aspect-[16/10] rounded-[22px] border-[7px]"}`}><div className={`flex items-center justify-between border-b border-zinc-200 bg-slate-50 px-3 text-slate-500 ${mobile ? "h-11 text-[11px]" : "h-8 text-[9px]"}`}><div className="flex items-center gap-2"><img src="/logo-clean.png" alt="" className="h-5 w-auto" /><span className="font-semibold text-zinc-800">Point of Sale</span></div><span className="font-mono">STAFF STATION · 19:42</span></div>{step === 2 ? <PosTicket receiptVisible={receiptVisible} mobile={mobile} /> : <FloorPlan active={step === 1} mobile={mobile} />}</div>{!mobile && <><div className="relative z-10 mx-auto flex h-4 w-[42%] items-center justify-center rounded-b-2xl border-x border-b border-zinc-400 bg-gradient-to-b from-zinc-200 to-zinc-100"><span className="h-1 w-[72%] rounded-full bg-zinc-500" /></div><div className="mx-auto h-5 w-[24%] rounded-b-lg bg-zinc-300" /></>}{receiptVisible && <ThermalReceipt mobile={mobile} />}</div>;
+  return <div className={`relative mx-auto w-full ${mobile ? "max-w-[680px]" : ""}`}><div className={`overflow-hidden border-zinc-800 bg-white shadow-[0_22px_46px_-20px_rgba(15,23,42,0.5)] ${mobile ? "min-h-[430px] rounded-2xl border-[5px]" : "aspect-[16/10] rounded-[22px] border-[7px]"}`}><div className={`flex items-center justify-between border-b border-zinc-200 bg-slate-50 px-3 text-slate-500 ${mobile ? "h-11 text-[11px]" : "h-8 text-[9px]"}`}><div className="flex items-center gap-2"><img src="/logo-header.png" alt="" className="h-5 w-auto" /><span className="font-semibold text-zinc-800">Point of Sale</span></div><span className="font-mono">STAFF STATION · 19:42</span></div>{step === 2 ? <PosTicket receiptVisible={receiptVisible} mobile={mobile} /> : <FloorPlan active={step === 1} mobile={mobile} />}</div>{!mobile && <><div className="relative z-10 mx-auto flex h-4 w-[42%] items-center justify-center rounded-b-2xl border-x border-b border-zinc-400 bg-gradient-to-b from-zinc-200 to-zinc-100"><span className="h-1 w-[72%] rounded-full bg-zinc-500" /></div><div className="mx-auto h-5 w-[24%] rounded-b-lg bg-zinc-300" /></>}{receiptVisible && <ThermalReceipt mobile={mobile} />}</div>;
 }
 
 function FloorPlan({ active, mobile = false }: { active: boolean; mobile?: boolean }) {
