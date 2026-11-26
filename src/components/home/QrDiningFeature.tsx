@@ -1,9 +1,4 @@
-import {
-  Check,
-  Search,
-  ShoppingBag,
-  SlidersHorizontal,
-} from "lucide-react";
+import { Search, ShoppingBag, SlidersHorizontal } from "lucide-react";
 
 const features = [
   {
@@ -29,10 +24,11 @@ const features = [
 ];
 
 const menuItems = [
-  { name: "Classic Burger", category: "BURGERS", price: "₹249", veg: true, image: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=180&q=80" },
-  { name: "Double Smash", category: "BURGERS", price: "₹349", veg: false, image: "https://images.unsplash.com/photo-1594212848116-b8db20577184?w=180&q=80" },
-  { name: "Loaded Fries", category: "SNACKS", price: "₹199", veg: true, image: "https://images.unsplash.com/photo-1541592106381-b31e9677c0e5?w=180&q=80" },
-  { name: "Craft Soda", category: "DRINKS", price: "₹149", veg: true, image: "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=180&q=80" },
+  { name: "Shawarma", category: "MAIN COURSE", price: "₹230", veg: false },
+  { name: "Truffle Riosto", category: "ICE CREAMS", price: "₹65", veg: true },
+  { name: "aa", category: "DRINKS", price: "₹200", veg: true },
+  { name: "svb", category: "BURGERS", price: "₹1234", veg: true },
+  { name: "Fries", category: "DRINKS", price: "₹12", veg: true },
 ];
 
 function DietaryMark({ veg }: { veg: boolean }) {
@@ -55,7 +51,7 @@ function MenuPhone() {
 
           <div className="flex h-[102px] items-end justify-between px-4 pb-3">
             <div className="flex min-w-0 items-center gap-3">
-              <img src="/tap-bite-logo.svg" alt="Tap Bite" className="h-[52px] w-[52px] shrink-0 rounded-[14px] object-cover" />
+              <img src="/tap-bite-logo.png" alt="Tap Bite" className="h-[52px] w-[52px] shrink-0 rounded-[14px] object-cover" />
               <div className="min-w-0">
                 <p className="truncate text-[17px] font-bold tracking-[-0.04em]">Tap Bite</p>
                 <p className="mt-1 text-[9px] font-semibold tracking-[0.2em] text-zinc-500">DINE-IN</p>
@@ -97,45 +93,25 @@ function MenuPhone() {
           </div>
 
           <div className="absolute inset-x-0 bottom-0 top-[207px] overflow-hidden bg-[#FAF9F7] px-3.5 pt-3.5">
-            <div className="space-y-3 pb-4">
+            <div className="space-y-2.5 pb-4">
               {menuItems.map((item) => (
-                <article key={item.name} className="flex h-[78px] items-center gap-2 rounded-[19px] border border-zinc-100 bg-white p-2 shadow-[0_3px_12px_rgba(15,23,42,0.035)]">
-                  <img src={item.image} alt="" className="h-[58px] w-[52px] shrink-0 rounded-[13px] object-cover" />
+                <article key={item.name} className="flex h-[72px] items-center gap-2.5 rounded-[19px] border border-zinc-100 bg-white px-3 shadow-[0_3px_12px_rgba(15,23,42,0.035)]">
+                  <DietaryMark veg={item.veg} />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[12px] font-bold tracking-[-0.04em]">{item.name}</p>
+                    <p className="truncate text-[14px] font-bold tracking-[-0.04em]">{item.name}</p>
                     <div className="mt-1.5 flex items-center gap-1.5">
-                      <DietaryMark veg={item.veg} />
                       <span className="truncate text-[8px] font-bold tracking-[0.08em] text-zinc-500">{item.category}</span>
                     </div>
-                    <p className="mt-1 truncate text-[8px] font-medium text-[#B78620]">Choose size · add-ons</p>
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-1.5">
-                    <span className="text-[11px] font-bold tracking-tight">{item.price}</span>
-                    <button type="button" className="h-[25px] rounded-full bg-[#CC1118] px-2.5 text-[9px] font-extrabold text-white">ADD +</button>
+                    <span className="text-[12px] font-bold tracking-tight">{item.price}</span>
+                    <button type="button" className="h-[28px] rounded-full bg-[#CC1118] px-3 text-[9px] font-extrabold text-white">ADD +</button>
                   </div>
                 </article>
               ))}
             </div>
           </div>
-          <div className="absolute inset-x-2 bottom-2 z-20 rounded-[23px] border border-zinc-200/80 bg-white px-3.5 pb-3 pt-2 shadow-[0_12px_35px_rgba(15,23,42,0.2)]">
-            <div className="mx-auto mb-2 h-1 w-8 rounded-full bg-zinc-200" />
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-[11px] font-bold">Make it yours</p>
-                <p className="mt-0.5 text-[9px] text-zinc-500">Classic Burger · choose extras</p>
-              </div>
-              <span className="pt-1 text-[9px] font-semibold tracking-[0.12em] text-zinc-400">OPTIONAL</span>
-            </div>
-            <div className="mt-2 divide-y divide-zinc-100 border-y border-zinc-100">
-              {["Extra cheese", "Double patty"].map((extra, index) => (
-                <div key={extra} className="flex items-center justify-between py-2 text-[10px]">
-                  <span className="text-zinc-700">{extra}</span>
-                  <span className="flex items-center gap-2 font-semibold text-zinc-800">+₹{index === 0 ? "40" : "75"}<span className="grid h-4 w-4 place-items-center rounded-[4px] border border-[#CC3333] bg-[#CC3333] text-white"><Check size={11} strokeWidth={3} /></span></span>
-                </div>
-              ))}
-            </div>
-            <button type="button" className="mt-2.5 h-9 w-full rounded-xl bg-[#CC3333] text-[10px] font-bold text-white">Add to order · ₹289</button>
-          </div>
+          <button type="button" className="absolute bottom-2 left-3 right-3 z-20 h-12 rounded-full bg-[#CC1118] text-[12px] font-bold text-white shadow-[0_8px_24px_rgba(204,17,24,0.24)]">Add to order</button>
         </div>
       </div>
     </div>
