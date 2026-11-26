@@ -2,22 +2,20 @@ import { Search, ShoppingBag, SlidersHorizontal } from "lucide-react";
 
 const features = [
   {
-    label: "IDENTITY",
-    title: "Logo · colour · type",
+    title: "Your logo, colours, and type",
+    detail: "A menu that carries your restaurant’s identity.",
   },
   {
-    label: "MENU VIEW",
     title: "Photos on or off",
-    detail: "1×1 list · 2×2 grid",
+    detail: "Choose a compact 1×1 list or a richer 2×2 grid.",
   },
   {
-    label: "DISHES",
-    title: "Portions · add-ons · extras",
+    title: "Portions, add-ons, and extras",
+    detail: "Give every dish the choices it needs.",
   },
   {
-    label: "GUEST FLOW",
-    title: "Scan · find · order",
-    detail: "No app · dietary clarity · live cart",
+    title: "Scan, find, and order",
+    detail: "No app download, with dietary clarity built in.",
   },
 ];
 
@@ -183,18 +181,20 @@ export function QrDiningFeature() {
           <h2 className="max-w-[560px] text-4xl font-semibold leading-[1.1] tracking-[-0.045em] text-[#09090b] lg:text-[44px]">
             A digital menu that feels like <span className="text-[#C86256]">your restaurant.</span>
           </h2>
-          <p className="mt-4 inline-block border-b-2 border-[#E6B35A] pb-1 text-[15px] font-semibold tracking-[-0.01em] text-[#C86256] sm:text-base">
+          <p className="mt-4 inline-block border-b-2 border-[#E46254] pb-1 text-[15px] font-semibold tracking-[-0.01em] text-[#E46254] sm:text-base">
             Your brand. Their table. One easy scan.
           </p>
           <p className="mt-3 max-w-[520px] text-[15px] leading-6 text-slate-600">
             No PDF, no app, no generic template—just your menu, ready in the guest’s phone browser.
           </p>
-          <div className="mt-7 grid gap-x-6 gap-y-0 sm:grid-cols-2">
-            {features.map(({ label, title, detail }) => (
-              <article key={label} className="border-t border-zinc-200/90 py-3.5">
-                <p className="text-[9px] font-semibold tracking-[0.16em] text-[#CC1118]">{label}</p>
-                <h3 className="mt-1.5 text-[15px] font-semibold leading-5 tracking-[-0.025em] text-zinc-900">{title}</h3>
-                {detail && <p className="mt-0.5 text-[11px] leading-4 text-slate-600">{detail}</p>}
+          <div className="mt-7 grid gap-x-8 gap-y-0 sm:grid-cols-2">
+            {features.map(({ title, detail }) => (
+              <article key={title} className="flex items-start gap-3 border-t border-zinc-200/90 py-3.5">
+                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#E46254]" />
+                <div>
+                  <h3 className="text-[14px] font-semibold leading-5 tracking-[-0.02em] text-zinc-900">{title}</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-slate-600">{detail}</p>
+                </div>
               </article>
             ))}
           </div>
