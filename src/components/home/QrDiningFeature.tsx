@@ -1,25 +1,25 @@
-import { Search, ShoppingBag, SlidersHorizontal } from "lucide-react";
+import { Image, Palette, QrCode, Search, ShoppingBag, SlidersHorizontal, SlidersVertical } from "lucide-react";
 
 const features = [
   {
-    number: "01",
-    title: "Make it feel like your restaurant.",
-    body: "Add your logo, set an accent colour, and choose a type style that fits your brand.",
+    icon: Palette,
+    title: "Your brand, up front",
+    detail: "Logo · colours · type",
   },
   {
-    number: "02",
-    title: "Choose how dishes look.",
-    body: "Show dish photography or keep the menu compact. Pick a one-column list or a two-column grid.",
+    icon: Image,
+    title: "Photos your way",
+    detail: "On or off · 1×1 or 2×2",
   },
   {
-    number: "03",
-    title: "Let guests make it their own.",
-    body: "Offer portions, add-ons, and extras on each dish before it goes into the table cart.",
+    icon: SlidersVertical,
+    title: "Dishes with options",
+    detail: "Portions · add-ons · extras",
   },
   {
-    number: "04",
-    title: "Scan, find, and order in one flow.",
-    body: "The menu opens from a phone camera—no app install. Dietary markers, category jumps, and live search help guests add straight to the table cart.",
+    icon: QrCode,
+    title: "Scan. Find. Add.",
+    detail: "No app · dietary clarity · live cart",
   },
 ];
 
@@ -181,19 +181,26 @@ export function QrDiningFeature() {
     <section className="border-t border-zinc-200/80 bg-[linear-gradient(180deg,#fff_0%,#f8fafc_100%)] px-4 py-[60px] sm:px-6 sm:py-20">
       <div className="mx-auto grid max-w-6xl items-center gap-x-12 gap-y-12 lg:grid-cols-12">
         <div className="lg:col-span-6">
-          <p className="mb-4 text-[11px] font-semibold tracking-[0.18em] text-[#E46254]">CUSTOMIZABLE QR DINING</p>
-          <h2 className="max-w-[650px] text-4xl font-semibold leading-[1.15] tracking-[-0.04em] text-[#09090b] lg:text-5xl">
-            A Digital Menu That Actually Looks Like Your Restaurant.
+          <p className="mb-4 flex items-center gap-3 text-[10px] font-semibold tracking-[0.18em] text-[#CC1118]"><span className="h-px w-8 bg-[#CC1118]" />QR MENU, YOUR WAY</p>
+          <h2 className="max-w-[560px] text-4xl font-semibold leading-[1.1] tracking-[-0.045em] text-[#09090b] lg:text-[44px]">
+            A menu that looks like <span className="text-[#CC1118]">your restaurant.</span>
           </h2>
-          <p className="mt-5 max-w-[640px] text-[16px] leading-[1.65] text-slate-600 sm:text-[17px]">
-            No clunky PDF downloads. No third-party aggregator templates. When guests sit at Table 04 and scan, they open your branded web menu with your colors, your logo, and instant dietary clarity.
+          <p className="mt-4 flex items-center gap-3 text-[11px] font-bold tracking-[0.12em] text-[#CC1118] sm:text-xs">
+            <span className="h-5 w-0.5 rounded-full bg-[#F5BD3D]" />YOUR BRAND. THEIR TABLE. READY IN ONE SCAN.
           </p>
-          <div className="mt-9 grid gap-x-8 gap-y-0 sm:grid-cols-2">
-            {features.map(({ number, title, body }) => (
-              <article key={number} className="border-t border-zinc-200/80 py-4">
-                <p className="text-[10px] font-semibold tracking-[0.14em] text-[#E46254]">{number}</p>
-                <h3 className="mt-1 text-sm font-semibold leading-5 text-zinc-900">{title}</h3>
-                <p className="mt-1.5 text-[13px] leading-[1.65] text-slate-600">{body}</p>
+          <p className="mt-3 max-w-[520px] text-[15px] leading-6 text-slate-600">
+            No PDF. No app. Just your menu, opened by QR and made to match your restaurant.
+          </p>
+          <div className="mt-7 grid gap-x-6 gap-y-0 sm:grid-cols-2">
+            {features.map(({ icon: Icon, title, detail }) => (
+              <article key={title} className="flex items-center gap-3 border-t border-zinc-200/80 py-3.5">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#CC1118]/[0.06] text-[#CC1118]">
+                  <Icon size={16} strokeWidth={1.8} />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-[13px] font-semibold leading-5 text-zinc-900">{title}</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-slate-600">{detail}</p>
+                </div>
               </article>
             ))}
           </div>
