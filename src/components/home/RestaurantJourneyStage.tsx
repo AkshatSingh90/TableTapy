@@ -19,6 +19,7 @@ export function RestaurantJourneyStage() {
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const mobileRail = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLElement>(null);
+  const wasVisible = useRef(false);
   const step = Math.floor(cycleTime / STEP_SECONDS) as Step;
   const elapsed = cycleTime % STEP_SECONDS;
 
@@ -26,9 +27,11 @@ export function RestaurantJourneyStage() {
     const target = stageRef.current;
     if (!target) return;
     const observer = new IntersectionObserver(([entry]) => {
-      setIsVisible(entry.isIntersecting && entry.intersectionRatio >= 0.6);
-      if (entry.isIntersecting && entry.intersectionRatio >= 0.6) setCycleTime(0);
-    }, { threshold: [0, 0.55] });
+      const visible = entry.isIntersecting;
+      if (visible && !wasVisible.current) setCycleTime(0);
+      wasVisible.current = visible;
+      setIsVisible(visible);
+    }, { threshold: 0.05, rootMargin: "0px 0px -8% 0px" });
     observer.observe(target);
     return () => observer.disconnect();
   }, []);
@@ -53,9 +56,9 @@ export function RestaurantJourneyStage() {
 
   return (
     <section ref={stageRef} className="overflow-x-clip rounded-[24px] border border-zinc-200/80 bg-gradient-to-b from-white to-slate-50 p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.28)] sm:rounded-[32px] sm:p-5">
-      <div className="hidden gap-2 rounded-2xl bg-slate-100/80 p-2 md:grid md:grid-cols-3">
-        {stages.map(({ label, icon: Icon }, index) => <div key={label} aria-current={step === index ? "step" : undefined} className={`relative min-h-12 overflow-hidden rounded-xl px-3 text-left text-[11px] font-semibold transition sm:text-xs ${step === index ? "bg-white text-zinc-900 shadow-sm" : "text-slate-500"}`}>
-          <span className="relative z-10 flex items-center gap-2"><Icon size={15} className={step === index ? "text-[#E46254]" : ""} />{label}</span>
+      <div className="hidden gap-2 rounded-2xl bg-slate-100/80 p-2 lg:grid lg:grid-cols-3">
+        {stages.map(({ label, icon: Icon }, index) => <div key={label} aria-current={step === index ? "step" : undefined} className={`relative flex min-h-14 min-w-0 items-center overflow-hidden rounded-xl px-3 text-left text-[11px] font-semibold transition xl:px-4 xl:text-xs ${step === index ? "bg-white text-zinc-900 shadow-sm" : "text-slate-500"}`}>
+          <span className="relative z-10 flex items-center gap-2 whitespace-nowrap"><Icon size={15} className="shrink-0" />{label}</span>
           <span className="absolute inset-x-0 bottom-0 h-0.5 bg-zinc-100"><span className="block h-full bg-[#E46254] transition-[width] duration-100" style={{ width: `${progress(index)}%` }} /></span>
         </div>)}
       </div>
@@ -71,7 +74,7 @@ export function RestaurantJourneyStage() {
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={1} elapsed={elapsed} mobile /></div>
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={2} elapsed={elapsed} mobile /></div>
       </div>
-      <div className="mt-3 flex items-center justify-center gap-2 md:hidden">{stages.map((_, index) => <span key={index} className={`block h-1.5 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-1.5 bg-zinc-300"}`} />)}</div>
+      <div className="mt-3 flex items-center justify-center gap-2 lg:hidden">{stages.map((_, index) => <span key={index} className={`block h-1.5 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-1.5 bg-zinc-300"}`} />)}</div>
       <p className="mt-2 text-center text-[10px] text-slate-400">{isVisible ? "Customer order → floor alert → printed bill and kitchen ticket" : "The product journey starts as you bring it into view"}</p>
     </section>
   );
@@ -103,7 +106,7 @@ function PhoneDish({ name, price, tag, meta, veg, qty }: { name: string; price: 
 
 function TerminalMockup({ step, elapsed, mobile = false }: { step: Step; elapsed: number; mobile?: boolean }) {
   const receiptVisible = step === 2 && elapsed >= 1.3;
-  return <div className={`relative mx-auto w-full ${mobile ? "max-w-[680px]" : ""}`}><div className={`overflow-hidden border-zinc-800 bg-white shadow-[0_22px_46px_-20px_rgba(15,23,42,0.5)] ${mobile ? "min-h-[430px] rounded-2xl border-[5px]" : "aspect-[16/10] rounded-[22px] border-[7px]"}`}><div className={`flex items-center justify-between border-b border-zinc-200 bg-slate-50 px-3 text-slate-500 ${mobile ? "h-11 text-[11px]" : "h-8 text-[9px]"}`}><div className="flex items-center gap-2"><img src="/logo-header.png" alt="" className="h-5 w-auto" /><span className="font-semibold text-zinc-800">Point of Sale</span></div><span className="font-mono">STAFF STATION · 19:42</span></div>{step === 2 ? <PosTicket receiptVisible={receiptVisible} mobile={mobile} /> : <FloorPlan active={step === 1} mobile={mobile} />}</div>{!mobile && <><div className="relative z-10 mx-auto flex h-4 w-[42%] items-center justify-center rounded-b-2xl border-x border-b border-zinc-400 bg-gradient-to-b from-zinc-200 to-zinc-100"><span className="h-1 w-[72%] rounded-full bg-zinc-500" /></div><div className="mx-auto h-5 w-[24%] rounded-b-lg bg-zinc-300" /></>}{receiptVisible && <ThermalReceipt mobile={mobile} />}</div>;
+  return <div className={`relative mx-auto w-full ${mobile ? "max-w-[680px]" : ""}`}><div className={`overflow-hidden border-zinc-800 bg-white shadow-[0_22px_46px_-20px_rgba(15,23,42,0.5)] ${mobile ? "min-h-[430px] rounded-2xl border-[5px]" : "aspect-[16/10] rounded-[22px] border-[7px]"}`}><div className={`flex items-center justify-center border-b border-zinc-200 bg-white px-3 ${mobile ? "h-11" : "h-9"}`}><img src="/logo-header.png" alt="TableTapy" className="h-6 w-auto" /></div>{step === 2 ? <PosTicket receiptVisible={receiptVisible} mobile={mobile} /> : <FloorPlan active={step === 1} mobile={mobile} />}</div>{!mobile && <><div className="relative z-10 mx-auto flex h-4 w-[42%] items-center justify-center rounded-b-2xl border-x border-b border-zinc-400 bg-gradient-to-b from-zinc-200 to-zinc-100"><span className="h-1 w-[72%] rounded-full bg-zinc-500" /></div><div className="mx-auto h-5 w-[24%] rounded-b-lg bg-zinc-300" /></>}{receiptVisible && <ThermalReceipt mobile={mobile} />}</div>;
 }
 
 function FloorPlan({ active, mobile = false }: { active: boolean; mobile?: boolean }) {
