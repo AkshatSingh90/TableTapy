@@ -23,8 +23,8 @@ const features = [
   },
   {
     number: "04",
-    title: "Keep ordering clear and quick.",
-    body: "Dietary markers, category jumps, and dish search help guests find and add what they want.",
+    title: "Scan, find, and order in one flow.",
+    body: "The menu opens from a phone camera—no app install. Dietary markers, category jumps, and live search help guests add straight to the table cart.",
   },
 ];
 
