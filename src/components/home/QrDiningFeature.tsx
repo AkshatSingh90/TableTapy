@@ -118,11 +118,69 @@ function MenuPhone() {
   );
 }
 
+function MenuSettingsPreview() {
+  return (
+    <aside className="hidden w-[calc(38%-12px)] max-w-[220px] shrink-0 rounded-[20px] border border-zinc-200 bg-white p-4 shadow-[0_18px_40px_-30px_rgba(15,23,42,0.34)] lg:block" aria-label="QR menu customization preview">
+      <div className="border-b border-zinc-100 pb-3.5">
+        <p className="text-[9px] font-semibold tracking-[0.17em] text-[#E46254]">MENU SETTINGS</p>
+        <h3 className="mt-1.5 text-[15px] font-semibold leading-5 tracking-[-0.03em] text-zinc-900">Set the look.<br />Keep the choice.</h3>
+      </div>
+
+      <div className="border-b border-zinc-100 py-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold text-zinc-800">Brand colour</p>
+          <span className="text-[9px] font-mono text-zinc-500">#CC1118</span>
+        </div>
+        <div className="mt-3 flex items-center gap-3" aria-label="Tap Bite red selected">
+          <span className="h-5 w-5 rounded-full bg-[#CC1118] ring-2 ring-[#CC1118]/25 ring-offset-2" />
+          <span className="h-5 w-5 rounded-full bg-[#F5BD3D]" />
+          <span className="h-5 w-5 rounded-full bg-[#242424]" />
+          <span className="h-5 w-5 rounded-full bg-[#D9C7B3]" />
+        </div>
+      </div>
+
+      <div className="border-b border-zinc-100 py-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-[11px] font-semibold text-zinc-800">Dish photos</p>
+            <p className="mt-0.5 text-[9px] text-zinc-500">Hidden from guests</p>
+          </div>
+          <span className="relative h-5 w-9 shrink-0 rounded-full bg-zinc-200" aria-label="Off">
+            <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm" />
+          </span>
+        </div>
+      </div>
+
+      <div className="pt-3.5">
+        <p className="text-[11px] font-semibold text-zinc-800">Menu layout</p>
+        <div className="mt-2.5 grid grid-cols-2 gap-2" aria-label="One or two column layout options">
+          <div className="rounded-xl border border-[#CC1118] bg-[#CC1118]/[0.045] px-2 py-2 text-center">
+            <div className="mx-auto flex h-5 w-5 flex-col gap-0.5 rounded-[3px] border border-[#CC1118]/70 p-0.5">
+              <span className="h-1 flex-1 rounded-[1px] bg-[#CC1118]/70" />
+              <span className="h-1 flex-1 rounded-[1px] bg-[#CC1118]/35" />
+            </div>
+            <p className="mt-1.5 text-[10px] font-semibold text-zinc-900">1×1</p>
+            <p className="text-[8px] tracking-[0.08em] text-zinc-500">LIST</p>
+          </div>
+          <div className="rounded-xl border border-zinc-200 px-2 py-2 text-center">
+            <div className="mx-auto grid h-5 w-5 grid-cols-2 gap-0.5 rounded-[3px] border border-zinc-300 p-0.5">
+              <span className="rounded-[1px] bg-zinc-300" /><span className="rounded-[1px] bg-zinc-300" />
+              <span className="rounded-[1px] bg-zinc-300" /><span className="rounded-[1px] bg-zinc-300" />
+            </div>
+            <p className="mt-1.5 text-[10px] font-semibold text-zinc-800">2×2</p>
+            <p className="text-[8px] tracking-[0.08em] text-zinc-500">GRID</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 export function QrDiningFeature() {
   return (
     <section className="border-t border-zinc-200/80 bg-[linear-gradient(180deg,#fff_0%,#f8fafc_100%)] px-4 py-[60px] sm:px-6 sm:py-20">
       <div className="mx-auto grid max-w-6xl items-center gap-x-12 gap-y-12 lg:grid-cols-12">
-        <div className="lg:col-span-7">
+        <div className="lg:col-span-6">
           <p className="mb-4 text-[11px] font-semibold tracking-[0.18em] text-[#E46254]">CUSTOMIZABLE QR DINING</p>
           <h2 className="max-w-[650px] text-4xl font-semibold leading-[1.15] tracking-[-0.04em] text-[#09090b] lg:text-5xl">
             A Digital Menu That Actually Looks Like Your Restaurant.
@@ -140,8 +198,11 @@ export function QrDiningFeature() {
             ))}
           </div>
         </div>
-        <div className="lg:col-span-5">
-          <MenuPhone />
+        <div className="flex items-center justify-center gap-3 lg:col-span-6 lg:justify-end">
+          <div className="mx-auto w-full max-w-[315px] shrink-0 lg:mx-0 lg:w-[62%]">
+            <MenuPhone />
+          </div>
+          <MenuSettingsPreview />
         </div>
       </div>
     </section>
