@@ -146,3 +146,20 @@ body {
 .tt-coral-gradient-btn:active {
   transform: translateY(0px) scale(0.98);
 }
+
+/* Homepage restaurant-journey relay */
+@keyframes ttDataPulse {
+  0% { transform: translateX(-15%) scale(0.65); opacity: 0; }
+  18% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { transform: translateX(115%) scale(1); opacity: 0; }
+}
+
+@keyframes ttReceiptFeed {
+  0% { transform: translateY(-72%); opacity: 0; }
+  12% { opacity: 1; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+.tt-data-pulse { animation: ttDataPulse 1.25s cubic-bezier(0.16, 1, 0.3, 1) infinite; }
+.tt-receipt-feed { animation: ttReceiptFeed 1.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
