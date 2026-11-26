@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Tap Bite — Order, Eat, Enjoy</title>
+  <rect x="10" y="10" width="492" height="492" rx="100" fill="#D10C12"/>
+  <g fill="#FFC43D">
+    <rect x="365" y="77" width="26" height="78" rx="13" transform="rotate(13 378 116)"/>
+    <rect x="414" y="96" width="26" height="78" rx="13" transform="rotate(43 427 135)"/>
+    <rect x="454" y="138" width="26" height="68" rx="13" transform="rotate(69 467 172)"/>
+    <rect x="446" y="286" width="34" height="102" rx="7"/>
+    <rect x="446" y="402" width="34" height="28" rx="7"/>
+    <rect x="54" y="285" width="34" height="8" rx="4"/>
+    <rect x="54" y="410" width="34" height="8" rx="4"/>
+  </g>
+  <g fill="#fff" font-family="Impact, 'Arial Black', sans-serif" font-weight="900">
+    <text x="67" y="246" font-size="162" letter-spacing="-8">TAP</text>
+    <text x="135" y="398" font-size="132" letter-spacing="-5">BITE</text>
+  </g>
+  <g fill="#fff" font-family="Arial, sans-serif" font-size="21" font-weight="800">
+    <text x="54" y="321">ORDER</text>
+    <text x="54" y="355">EAT</text>
+    <text x="54" y="389">ENJOY</text>
+  </g>
+</svg>
