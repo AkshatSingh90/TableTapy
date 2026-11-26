@@ -67,7 +67,7 @@ export function RestaurantJourneyStage() {
         </button>)}
       </div>
 
-      <div className="relative mt-5 hidden min-h-[700px] items-start gap-10 px-6 py-8 lg:flex">
+      <div className="relative mt-5 hidden min-h-[820px] items-start gap-10 px-6 py-8 lg:flex">
         <div className="absolute left-[27%] right-[35%] top-[49%] h-px overflow-hidden bg-gradient-to-r from-transparent via-[#E46254]/35 to-transparent"><span className={`absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-[#E46254] shadow-[0_0_0_6px_rgba(228,98,84,0.13)] ${isVisible && step === 1 ? "tt-data-pulse" : "hidden"}`} /></div>
         <div className="w-[32%] min-w-0"><PhoneMockup step={step} elapsed={elapsed} /></div>
         <div className="flex-1 min-w-0"><TerminalMockup step={step} elapsed={elapsed} /></div>
@@ -126,5 +126,21 @@ function PosTicket({ receiptVisible, mobile = false }: { receiptVisible: boolean
 }
 
 function ThermalReceipt({ mobile = false }: { mobile?: boolean }) {
-  return <div className={`tt-receipt-feed z-10 border-x border-b border-zinc-300 bg-[#FDFCF7] p-3 font-mono leading-relaxed text-zinc-800 shadow-xl ${mobile ? "relative mx-auto mt-2 w-[min(82%,300px)] text-[9px]" : "absolute left-[26%] top-[calc(100%-1rem)] max-h-[190px] w-[48%] overflow-hidden text-[7px]"}`}><div className="text-center"><p className="font-bold">THE TABLETAPY BISTRO</p><p>TAX INVOICE</p><p className="text-zinc-500">GSTIN: 29ABCDE1234F1Z5 · FSSAI: 11223344556677</p></div><div className="my-2 border-t border-dashed border-zinc-400" /><p>TABLE: T-04 · 19:43</p><p>1x Biryani (Dum) ........ ₹340.00</p><p>2x Butter Garlic Naan ... ₹130.00</p><p className="mt-1 text-right font-bold">PAID TOTAL: ₹493.50 CASH</p><p className="text-center">Thank you! Visit again.</p><p className="my-2 text-center text-zinc-400">✂ ---------------- GS V AUTO CUT ----------------</p><div className="text-center font-bold"><p>KITCHEN ORDER TICKET</p><p>KOT #104 · TABLE T-04 · DINE-IN</p></div><p className="mt-2 font-bold">[ ] 1x Biryani (Dum)</p><p>NOTE: Less spicy</p><p className="font-bold">[ ] 2x Butter Garlic Naan</p><p className="mt-2 text-center">♩ Acoustic Kitchen Buzzer Alert Fired!</p></div>;
+  return (
+    <div className={`tt-receipt-feed z-10 border-x border-b border-zinc-300 bg-[#FDFCF7] px-4 py-3 font-mono leading-relaxed text-zinc-800 shadow-xl ${mobile ? "relative mx-auto mt-2 w-[min(82%,300px)] text-[9px]" : "absolute left-[26%] top-[calc(100%-3rem)] w-[48%] text-[8px]"}`}>
+      <div className="text-center"><p className="text-[1.1em] font-black tracking-wide">THE TABLETAPY BISTRO</p><p className="font-bold">CUSTOMER TAX INVOICE</p><p className="text-zinc-500">GSTIN: 29ABCDE1234F1Z5 · FSSAI: 11223344556677</p></div>
+      <div className="my-2 border-t border-dashed border-zinc-400" />
+      <p className="flex justify-between"><span>TABLE T-04 · 19:43</span><span>CASH</span></p>
+      <p className="mt-1 flex justify-between"><span>1 × Chicken Dum Biryani</span><span>₹340.00</span></p>
+      <p className="flex justify-between"><span>2 × Butter Garlic Naan</span><span>₹130.00</span></p>
+      <p className="flex justify-between"><span>Subtotal</span><span>₹470.00</span></p><p className="flex justify-between"><span>CGST + SGST</span><span>₹23.50</span></p>
+      <p className="mt-1 flex justify-between border-t border-zinc-300 pt-1 text-[1.15em] font-black"><span>PAID TOTAL</span><span>₹493.50</span></p>
+      <p className="mt-1 text-center">Thank you! Visit again.</p>
+      <div className="my-3 border-t-2 border-dashed border-zinc-500" /><p className="text-center text-[9px] font-bold tracking-widest text-zinc-500">✂ TEAR / AUTO-CUT</p><div className="my-3 border-t-2 border-dashed border-zinc-500" />
+      <div className="text-center"><p className="text-[1.1em] font-black tracking-wide">KITCHEN ORDER TICKET</p><p className="font-bold">KOT #104 · TABLE T-04 · DINE-IN</p><p className="text-zinc-500">19:43 · 2 ITEMS</p></div>
+      <div className="my-2 border-t border-dashed border-zinc-400" />
+      <p className="text-[1.1em] font-black">[ ] 1 × Chicken Dum Biryani</p><p className="pl-5 font-bold">NOTE: Less spicy</p><p className="mt-1 text-[1.1em] font-black">[ ] 2 × Butter Garlic Naan</p>
+      <p className="mt-3 border-t border-dashed border-zinc-400 pt-2 text-center font-bold">KITCHEN BUZZER FIRED</p>
+    </div>
+  );
 }
