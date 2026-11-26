@@ -1,24 +1,22 @@
-import { Image, Palette, QrCode, Search, ShoppingBag, SlidersHorizontal, SlidersVertical } from "lucide-react";
+import { Search, ShoppingBag, SlidersHorizontal } from "lucide-react";
 
 const features = [
   {
-    icon: Palette,
-    title: "Your brand, up front",
-    detail: "Logo · colours · type",
+    label: "IDENTITY",
+    title: "Logo · colour · type",
   },
   {
-    icon: Image,
-    title: "Photos your way",
-    detail: "On or off · 1×1 or 2×2",
+    label: "MENU VIEW",
+    title: "Photos on or off",
+    detail: "1×1 list · 2×2 grid",
   },
   {
-    icon: SlidersVertical,
-    title: "Dishes with options",
-    detail: "Portions · add-ons · extras",
+    label: "DISHES",
+    title: "Portions · add-ons · extras",
   },
   {
-    icon: QrCode,
-    title: "Scan. Find. Add.",
+    label: "GUEST FLOW",
+    title: "Scan · find · order",
     detail: "No app · dietary clarity · live cart",
   },
 ];
@@ -181,26 +179,22 @@ export function QrDiningFeature() {
     <section className="border-t border-zinc-200/80 bg-[linear-gradient(180deg,#fff_0%,#f8fafc_100%)] px-4 py-[60px] sm:px-6 sm:py-20">
       <div className="mx-auto grid max-w-6xl items-center gap-x-12 gap-y-12 lg:grid-cols-12">
         <div className="lg:col-span-6">
-          <p className="mb-4 flex items-center gap-3 text-[10px] font-semibold tracking-[0.18em] text-[#CC1118]"><span className="h-px w-8 bg-[#CC1118]" />QR MENU, YOUR WAY</p>
+          <p className="mb-4 text-[10px] font-semibold tracking-[0.18em] text-[#CC1118]">QR MENU, YOUR WAY</p>
           <h2 className="max-w-[560px] text-4xl font-semibold leading-[1.1] tracking-[-0.045em] text-[#09090b] lg:text-[44px]">
-            A menu that looks like <span className="text-[#CC1118]">your restaurant.</span>
+            A digital menu that feels like <span className="text-[#C86256]">your restaurant.</span>
           </h2>
-          <p className="mt-4 flex items-center gap-3 text-[11px] font-bold tracking-[0.12em] text-[#CC1118] sm:text-xs">
-            <span className="h-5 w-0.5 rounded-full bg-[#F5BD3D]" />YOUR BRAND. THEIR TABLE. READY IN ONE SCAN.
+          <p className="mt-4 inline-block border-b-2 border-[#E6B35A] pb-1 text-[15px] font-semibold tracking-[-0.01em] text-[#C86256] sm:text-base">
+            Your brand. Their table. One easy scan.
           </p>
           <p className="mt-3 max-w-[520px] text-[15px] leading-6 text-slate-600">
-            No PDF. No app. Just your menu, opened by QR and made to match your restaurant.
+            No PDF, no app, no generic template—just your menu, ready in the guest’s phone browser.
           </p>
           <div className="mt-7 grid gap-x-6 gap-y-0 sm:grid-cols-2">
-            {features.map(({ icon: Icon, title, detail }) => (
-              <article key={title} className="flex items-center gap-3 border-t border-zinc-200/80 py-3.5">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#CC1118]/[0.06] text-[#CC1118]">
-                  <Icon size={16} strokeWidth={1.8} />
-                </span>
-                <div className="min-w-0">
-                  <h3 className="text-[13px] font-semibold leading-5 text-zinc-900">{title}</h3>
-                  <p className="mt-0.5 text-[11px] leading-4 text-slate-600">{detail}</p>
-                </div>
+            {features.map(({ label, title, detail }) => (
+              <article key={label} className="border-t border-zinc-200/90 py-3.5">
+                <p className="text-[9px] font-semibold tracking-[0.16em] text-[#CC1118]">{label}</p>
+                <h3 className="mt-1.5 text-[15px] font-semibold leading-5 tracking-[-0.025em] text-zinc-900">{title}</h3>
+                {detail && <p className="mt-0.5 text-[11px] leading-4 text-slate-600">{detail}</p>}
               </article>
             ))}
           </div>
