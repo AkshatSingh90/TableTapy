@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bell, Check, ChevronRight, MapPin, Pause, Play, Plus, Printer, Search, Smartphone, UtensilsCrossed, Wifi } from "lucide-react";
 
 type Step = 0 | 1 | 2;
-const STEP_SECONDS = 2.7;
+const STEP_SECONDS = 4;
 const LOOP_SECONDS = STEP_SECONDS * 3;
 
 const stages = [
@@ -29,10 +29,13 @@ export function RestaurantJourneyStage() {
     if (!target) return;
     const observer = new IntersectionObserver(([entry]) => {
       const visible = entry.isIntersecting;
-      if (visible && !wasVisible.current) setCycleTime(0);
+      if (visible && !wasVisible.current) {
+        setCycleTime(0);
+        setManualPause(false);
+      }
       wasVisible.current = visible;
       setIsVisible(visible);
-    }, { threshold: 0.05, rootMargin: "0px 0px -8% 0px" });
+    }, { threshold: 0.35, rootMargin: "0px 0px -12% 0px" });
     observer.observe(target);
     return () => observer.disconnect();
   }, []);
@@ -79,7 +82,7 @@ export function RestaurantJourneyStage() {
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={2} elapsed={elapsed} mobile /></div>
       </div>
       <div className="mt-3 flex items-center justify-center gap-2 lg:hidden">{stages.map((_, index) => <span key={index} className={`block h-1.5 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-1.5 bg-zinc-300"}`} />)}</div>
-      <div className="mt-2 flex items-center justify-center gap-2 text-center text-[10px] text-slate-400"><span>{manualPause ? "Paused · select a step or resume the journey" : isVisible ? "Customer order → floor alert → printed bill and kitchen ticket" : "The product journey starts as you bring it into view"}</span><button type="button" onClick={() => setManualPause((paused) => !paused)} aria-label={manualPause ? "Resume journey" : "Pause journey"} className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-600 hover:text-[#E46254]">{manualPause ? <Play size={12} /> : <Pause size={12} />}</button></div>
+      <div className="mt-2 flex items-center justify-center gap-2 text-center text-[10px] text-slate-500"><span className="rounded-full bg-[#E46254]/10 px-2 py-1 font-semibold text-[#c64b3f]">{manualPause ? "Paused" : isVisible ? ["Guest adds dishes on the QR menu", "The floor plan flags Table 04", "The POS sends the bill and KOT to print"][step] : "Bring the journey into view to watch it"}</span><button type="button" onClick={() => setManualPause((paused) => !paused)} aria-label={manualPause ? "Resume journey" : "Pause journey"} className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-600 hover:text-[#E46254]">{manualPause ? <Play size={12} /> : <Pause size={12} />}</button></div>
       <p className="mt-1 text-center text-[10px] font-medium text-slate-500 lg:hidden">Swipe to see floor plan and POS <ChevronRight size={11} className="inline" /></p>
     </section>
   );
@@ -91,7 +94,7 @@ function PhoneMockup({ step, elapsed, mobile = false }: { step: Step; elapsed: n
   const hasBiryani = phase >= 0.35;
   const naanQty = phase >= 0.9 ? 2 : phase >= 0.65 ? 1 : 0;
   const showCart = phase >= 0.9 && phase < 1.3;
-  return <div className={`relative mx-auto aspect-[9/19.5] w-full max-w-[280px] rounded-[42px] border-[7px] border-zinc-900 bg-zinc-900 p-[3px] shadow-[0_20px_40px_-18px_rgba(15,23,42,0.45)] ${mobile ? "max-w-[min(100%,310px)]" : ""}`}>
+  return <div className={`relative mx-auto aspect-[9/19.5] w-full max-w-[280px] overflow-hidden rounded-[42px] border-[7px] border-zinc-900 bg-zinc-900 p-[3px] shadow-[0_20px_40px_-18px_rgba(15,23,42,0.45)] ${mobile ? "max-w-[min(100%,310px)]" : ""}`}>
     <div className="absolute top-2 left-1/2 z-20 h-4 w-20 -translate-x-1/2 rounded-full bg-zinc-900" />
     <div className="h-full overflow-hidden rounded-[34px] bg-slate-50 text-zinc-900">
       <div className="flex h-8 items-center justify-between px-5 pt-1 font-mono text-[9px]"><span>19:42</span><span className="flex items-center gap-1"><Wifi size={10} /> 92%</span></div>
