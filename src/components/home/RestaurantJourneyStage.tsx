@@ -1,16 +1,22 @@
 'use client';
 
 import { useEffect, useRef, useState } from "react";
-import { Bell, Check, ChevronRight, MapPin, Pause, Play, Plus, Printer, Search, Smartphone, UtensilsCrossed, Wifi } from "lucide-react";
+import { Bell, Check, ChevronRight, MapPin, Pause, Play, Plus, Printer, Search, UtensilsCrossed, Wifi } from "lucide-react";
 
 type Step = 0 | 1 | 2;
 const STEP_SECONDS = 4;
 const LOOP_SECONDS = STEP_SECONDS * 3;
 
 const stages = [
-  { label: "1. Customer Scans QR & Orders", icon: Smartphone },
-  { label: "2. Table 04 Turns Red on Floor Plan", icon: UtensilsCrossed },
-  { label: "3. POS Fires Dual Thermal Print", icon: Printer },
+  { label: "Guest orders" },
+  { label: "Table 04 updates" },
+  { label: "Kitchen prints" },
+] as const;
+
+const stageDetails = [
+  { title: "The guest scans and orders.", description: "Their table menu opens instantly on their phone." },
+  { title: "Table 04 lights up for staff.", description: "The new order appears on the floor plan as soon as it is placed." },
+  { title: "The POS sends it through.", description: "The customer bill and kitchen ticket are ready to print." },
 ] as const;
 
 export function RestaurantJourneyStage() {
@@ -63,10 +69,10 @@ export function RestaurantJourneyStage() {
 
   return (
     <section ref={stageRef} className="overflow-x-clip rounded-[24px] border border-zinc-200/80 bg-gradient-to-b from-white to-slate-50 p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.28)] sm:rounded-[32px] sm:p-5">
-      <div className="hidden gap-2 rounded-2xl bg-slate-100/80 p-2 lg:grid lg:grid-cols-3">
-        {stages.map(({ label, icon: Icon }, index) => <button key={label} type="button" aria-pressed={manualPause && step === index} onClick={() => { setCycleTime(index * STEP_SECONDS + 0.1); setManualPause(true); }} className={`relative flex min-h-14 min-w-0 items-center overflow-hidden rounded-xl px-3 text-left text-[11px] font-semibold transition xl:px-4 xl:text-xs ${step === index ? "bg-white text-zinc-900 shadow-sm" : "text-slate-500"}`}>
-          <span className="relative z-10 flex items-center gap-2 whitespace-nowrap"><Icon size={15} className="shrink-0" />{label}</span>
-          <span className="absolute inset-x-0 bottom-0 h-0.5 bg-zinc-100"><span className="block h-full bg-[#E46254] transition-[width] duration-100" style={{ width: `${progress(index)}%` }} /></span>
+      <div className="hidden gap-6 border-b border-zinc-200/80 px-3 lg:grid lg:grid-cols-3">
+        {stages.map(({ label }, index) => <button key={label} type="button" aria-pressed={manualPause && step === index} onClick={() => { setCycleTime(index * STEP_SECONDS + 0.1); setManualPause(true); }} className={`relative flex min-h-12 min-w-0 items-center px-1 text-left text-xs font-semibold transition ${step === index ? "text-zinc-900" : "text-slate-400 hover:text-slate-700"}`}>
+          <span className="relative z-10 whitespace-nowrap">{label}</span>
+          <span className="absolute inset-x-0 bottom-0 h-px bg-transparent"><span className="block h-full bg-[#E46254] transition-[width] duration-100" style={{ width: `${progress(index)}%` }} /></span>
         </button>)}
       </div>
 
@@ -82,7 +88,13 @@ export function RestaurantJourneyStage() {
         <div className="w-full shrink-0 snap-center px-2 sm:px-5"><TerminalMockup step={2} elapsed={elapsed} mobile /></div>
       </div>
       <div className="mt-3 flex items-center justify-center gap-2 lg:hidden">{stages.map((_, index) => <span key={index} className={`block h-1.5 rounded-full transition-all ${step === index ? "w-6 bg-[#E46254]" : "w-1.5 bg-zinc-300"}`} />)}</div>
-      <div className="mt-2 flex items-center justify-center gap-2 text-center text-[10px] text-slate-500"><span className="rounded-full bg-[#E46254]/10 px-2 py-1 font-semibold text-[#c64b3f]">{manualPause ? "Paused" : isVisible ? ["Guest adds dishes on the QR menu", "The floor plan flags Table 04", "The POS sends the bill and KOT to print"][step] : "Bring the journey into view to watch it"}</span><button type="button" onClick={() => setManualPause((paused) => !paused)} aria-label={manualPause ? "Resume journey" : "Pause journey"} className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-600 hover:text-[#E46254]">{manualPause ? <Play size={12} /> : <Pause size={12} />}</button></div>
+      <div className="mt-3 border-t border-zinc-200/80 px-2 pt-3 text-center">
+        <p className="text-[13px] font-semibold tracking-[-0.015em] text-zinc-900">{manualPause ? "Journey paused" : isVisible ? stageDetails[step].title : "The product journey"}</p>
+        <div className="mt-1 flex items-center justify-center gap-2 text-[11px] leading-5 text-slate-500">
+          <span>{manualPause ? "Choose a stage above or resume the story." : isVisible ? stageDetails[step].description : "Scroll here to see a QR order reach the floor and kitchen."}</span>
+          <button type="button" onClick={() => setManualPause((paused) => !paused)} aria-label={manualPause ? "Resume journey" : "Pause journey"} className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-600 hover:text-[#E46254]">{manualPause ? <Play size={12} /> : <Pause size={12} />}</button>
+        </div>
+      </div>
       <p className="mt-1 text-center text-[10px] font-medium text-slate-500 lg:hidden">Swipe to see floor plan and POS <ChevronRight size={11} className="inline" /></p>
     </section>
   );
